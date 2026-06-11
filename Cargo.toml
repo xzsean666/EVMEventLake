@@ -1,0 +1,31 @@
+[package]
+name = "eventlake"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+
+[dependencies]
+alloy-dyn-abi = "1.6.0"
+alloy-json-abi = { version = "1.6.0", features = ["serde_json"] }
+alloy-primitives = { version = "1.6.0", features = ["serde"] }
+anyhow = "1.0.100"
+axum = { version = "0.8.9", features = ["json", "macros"] }
+chrono = { version = "0.4.42", features = ["serde", "clock"] }
+dotenvy = "0.15.7"
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["rust_crypto"] }
+hex = "0.4.3"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
+thiserror = "2.0.17"
+tokio = { version = "1.52.3", features = ["full"] }
+tower-http = { version = "0.6.11", features = ["cors", "trace"] }
+tracing = "0.1.43"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
+utoipa = { version = "5.5.0", features = ["axum_extras", "chrono", "uuid"] }
+uuid = { version = "1.19.0", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tower = { version = "0.5.2", features = ["util"] }

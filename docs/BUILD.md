@@ -6,11 +6,11 @@ Status: Draft
 
 ## 1. Current Stage
 
-The repository is currently in architecture and documentation stage.
+The repository is currently in Step 4 implementation stage.
 
-Implementation has not been approved yet.
+The first Rust monolith implementation has been created.
 
-The following files do not exist yet and must not be created until Step 4 is explicitly requested:
+Created implementation files include:
 
 - `Cargo.toml`
 - `src/`
@@ -18,7 +18,11 @@ The following files do not exist yet and must not be created until Step 4 is exp
 - `Dockerfile`
 - `docker-compose.yml`
 
-This document defines the intended build and usage flow for the future implementation.
+Current verified commands:
+
+- `cargo check`
+- `cargo test`
+- `cargo clippy --all-targets --all-features -- -D warnings`
 
 ## 2. Expected Local Requirements
 
@@ -30,15 +34,18 @@ Future implementation should assume:
 - Docker Compose.
 - PostgreSQL through Docker Compose for local development.
 
-Recommended Rust stack:
+Current Rust stack:
 
-- `tokio` for async runtime.
-- `axum` for HTTP API.
-- `sqlx` for PostgreSQL access and migrations.
-- `alloy` for EVM primitives, ABI handling, and JSON-RPC integration.
-- `serde` for serialization.
-- `utoipa` for OpenAPI.
-- `tracing` for structured telemetry.
+- `tokio 1.52.3` for async runtime.
+- `axum 0.8.9` for HTTP API.
+- `sqlx 0.9.0` for PostgreSQL access and migrations.
+- `alloy-primitives 1.6.0` for EVM primitive types.
+- `alloy-json-abi 1.6.0` for ABI parsing and Event Registry generation.
+- `alloy-dyn-abi 1.6.0` for runtime event decoding.
+- `reqwest 0.13.4` for JSON-RPC HTTP transport.
+- `serde 1.0.228` for serialization.
+- `utoipa 5.5.0` for OpenAPI scaffolding.
+- `tracing 0.1.43` for structured telemetry.
 
 ## 3. Expected Environment Variables
 
@@ -54,6 +61,10 @@ EVENTLAKE_JWT_SECRET=change-me
 EVENTLAKE_LOG_LEVEL=info
 EVENTLAKE_DEFAULT_PAGE_LIMIT=50
 EVENTLAKE_MAX_PAGE_LIMIT=500
+EVENTLAKE_REQUIRE_AUTHENTICATION=false
+EVENTLAKE_BACKGROUND_WORKERS_ENABLED=true
+EVENTLAKE_WORKER_TICK_SECONDS=5
+EVENTLAKE_DECODE_BATCH_SIZE=100
 ```
 
 RPC endpoints should be stored and managed through the database, not hard-coded environment variables.
@@ -68,8 +79,6 @@ V1 allows only:
 No Redis, Kafka, ClickHouse, S3, or Elasticsearch service is allowed in V1.
 
 ## 5. Expected Development Commands
-
-These commands are the intended interface after Step 4 creates the implementation.
 
 Run tests:
 
@@ -215,4 +224,27 @@ GET /api/jobs/{job_id}
 ```
 
 Exact route names may be adjusted during Step 4, but the API must remain REST-based and OpenAPI-documented.
+
+## 12. Current Verification Notes
+
+Verified locally:
+
+```text
+cargo check
+cargo test
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+Not verified in this environment:
+
+- `docker compose up`
+- Live PostgreSQL migration execution
+- End-to-end RPC collection against a real EVM chain
+
+Reason:
+
+- The current user cannot access `/var/run/docker.sock`.
+- The local PostgreSQL listener requires credentials that are not available in this session.
+
+The migration is still compiled into the binary through `sqlx::migrate!("./migrations")`.
 

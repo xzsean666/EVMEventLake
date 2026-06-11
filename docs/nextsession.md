@@ -8,22 +8,22 @@ Branch: `main`
 
 ## 1. Current Progress
 
-The project is in documentation stage.
+The project is in Step 4 implementation stage.
 
 Completed workflow steps:
 
 - Step 1 - Architecture Design: completed.
 - Step 2 - Documentation: completed.
-- Step 3 - Context Handoff: this file.
+- Step 3 - Context Handoff: completed.
+- Step 4 - Implementation: first monolith implementation completed, further hardening pending.
 
-Step 4 - Implementation has not been approved yet.
+Rust source code, migrations, Dockerfile, and docker-compose files have been created.
 
-No Rust source code, migrations, Dockerfile, or docker-compose files have been created.
+Use this command to inspect recent commits:
 
-Recent commits:
-
-- `65f5fe7 feat: add architecture design documentation`
-- `3f8e8ab feat: add project documentation`
+```text
+git log --oneline --decorate -5
+```
 
 ## 2. Canonical Documents
 
@@ -107,6 +107,12 @@ Created:
 - `docs/BUILD.md`
 - `docs/EXTERNAL_DOCS.md`
 - `docs/nextsession.md`
+- `Cargo.toml`
+- `Dockerfile`
+- `docker-compose.yml`
+- `migrations/202606110001_initial_schema.sql`
+- `src/`
+- `tests/`
 
 Documented:
 
@@ -119,33 +125,36 @@ Documented:
 - Build and usage expectations.
 - External official docs links.
 - Future implementation gate.
+- Rust monolith service skeleton.
+- Configuration, telemetry, database migration loader.
+- REST API routes and unified response envelope.
+- API key/JWT authentication support.
+- Chain metadata endpoints.
+- RPC endpoint registry and health checks.
+- ABI upload and Event Registry parsing.
+- Contract subscription creation with active uniqueness.
+- Background collector, decoder, indexer, and partition manager workers.
+- Raw log, decoded event, address index, and event field index storage schema.
+- Search DSL endpoint.
+- Address, contract, and event explorer endpoints.
+- Dashboard summary endpoint.
+- Unit/integration tests for ABI parsing, Search DSL validation, and address/topic validation.
 
 ## 5. Pending Tasks
 
-Do not start these tasks until the user explicitly requests Step 4 implementation.
+Recommended next hardening sequence:
 
-Recommended Step 4 sequence:
-
-1. Create Rust project skeleton.
-2. Add `Cargo.toml` with pinned dependencies.
-3. Add `src/main.rs`, `src/app`, `src/configuration`, `src/database`, and `src/api` skeleton.
-4. Add Dockerfile and docker-compose with only `postgres` and `eventlake`.
-5. Add database migration framework.
-6. Add health/readiness endpoints.
-7. Add chain metadata and RPC endpoint registry.
-8. Add ABI upload and event parser.
-9. Add contract subscription creation with active uniqueness.
-10. Add raw log storage schema.
-11. Add historical collector.
-12. Add realtime collector.
-13. Add block checkpoints and reorg detection.
-14. Add decoder.
-15. Add address and event field indexes.
-16. Add Search DSL validation and query planning.
-17. Add explorer endpoints.
-18. Add dashboard and job monitor endpoints.
-19. Add auth with JWT and API keys.
-20. Add integration tests and documentation updates.
+1. Run migrations against a real PostgreSQL database.
+2. Exercise end-to-end flow with a real RPC endpoint:
+   add RPC, upload ERC-20 ABI, create subscription, collect logs, decode, search.
+3. Add database-backed integration tests once a test PostgreSQL instance is available.
+4. Expand Search DSL support for `in`, `not_in`, and more field comparison types.
+5. Add explicit Job Monitor routes separate from subscription routes if the UI needs different read models.
+6. Improve OpenAPI annotations with concrete path schemas for all handlers.
+7. Add JWT issuance or external identity provider integration if needed.
+8. Add per-chain/provider RPC range-limit metadata.
+9. Add stronger reorg repair tests.
+10. Add load tests for recent search and address index performance.
 
 ## 6. Next Actions
 
@@ -156,19 +165,16 @@ If the user asks for more documentation:
 - Then update this handoff.
 - Commit after the documentation change.
 
-If the user approves Step 4 implementation:
+If continuing implementation:
 
-- State the current step before starting.
-- Confirm that implementation code is now allowed.
-- Start with the smallest bootable Rust service.
-- Keep each module locally understandable.
-- Commit after each major implementation phase.
+- Keep module boundaries from `docs/ARCHITECTURE.md`.
+- Run `cargo fmt`, `cargo test`, and strict clippy before committing.
+- Prefer database-backed integration tests once PostgreSQL access is available.
 
 ## 7. Risks and Unknowns
 
-Open decisions before implementation:
+Open decisions:
 
-- Exact crate versions.
 - Exact Search DSL JSON shape.
 - Partition size per chain and block range.
 - Default confirmation depth for Ethereum, Base, Arbitrum, Optimism, Polygon, and BSC.
@@ -183,11 +189,16 @@ Known external concern:
 
 - BNB Chain public RPC documentation notes `eth_getLogs` limitations on listed public mainnet endpoints. BSC support should rely on user-managed RPC endpoints and capability health checks.
 
+Verification status:
+
+- `cargo check`: passed.
+- `cargo test`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- Docker/PostgreSQL runtime verification: blocked by local Docker socket permissions and unavailable PostgreSQL credentials.
+
 ## 8. Rules for Future AI Sessions
 
 Always follow `Agent.md`.
-
-Do not write implementation code unless Step 4 is explicitly requested.
 
 Do not introduce non-V1 infrastructure.
 
@@ -200,4 +211,3 @@ Do not create duplicate active subscriptions for the same `chain_id + contract_a
 Do not generate SQL from unvalidated Search DSL fields.
 
 Preserve raw logs before any decode or index action.
-

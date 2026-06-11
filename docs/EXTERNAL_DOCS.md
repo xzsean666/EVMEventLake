@@ -45,12 +45,15 @@ SQLx:
 - URL: https://docs.rs/sqlx/latest/sqlx/
 - Use for: PostgreSQL access, query typing, connection pools, transactions, migrations.
 - Relevant modules: `database`, all persistence modules.
+- Current implementation version: `0.9.0`.
 
 Alloy:
 
 - URL: https://alloy.rs/
 - Use for: EVM primitives, ABI/event handling, RPC providers, Ethereum data types.
 - Relevant modules: `abi_registry`, `rpc_pool`, `collector`, `decoder`.
+- Current implementation crates: `alloy-primitives 1.6.0`, `alloy-json-abi 1.6.0`, `alloy-dyn-abi 1.6.0`.
+- Current RPC transport note: V1 uses direct JSON-RPC HTTP calls through `reqwest` so the RPC pool can explicitly track endpoint health, latency, retries, and provider-specific failures. Alloy is used for ABI parsing, selectors, primitive EVM types, and dynamic event decoding.
 
 Serde:
 
@@ -63,6 +66,7 @@ Utoipa:
 - URL: https://docs.rs/utoipa/latest/utoipa/
 - Use for: OpenAPI generation from Rust types and handlers.
 - Relevant modules: `api`.
+- Current implementation version: `5.5.0`.
 
 Tracing:
 
@@ -199,4 +203,3 @@ Suggested provider categories:
 - Public chain RPC.
 
 Provider-specific rate limits and log range limits must be stored as RPC endpoint metadata or chain/RPC policy, not hidden in collector code.
-

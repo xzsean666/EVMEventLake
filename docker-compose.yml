@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: eventlake
+      POSTGRES_USER: eventlake
+      POSTGRES_PASSWORD: eventlake
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eventlake -d eventlake"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - eventlake_postgres_data:/var/lib/postgresql/data
+
+  eventlake:
+    build: .
+    environment:
+      EVENTLAKE_HTTP_HOST: 0.0.0.0
+      EVENTLAKE_HTTP_PORT: 8080
+      EVENTLAKE_DATABASE_URL: postgres://eventlake:eventlake@postgres:5432/eventlake
+      EVENTLAKE_JWT_SECRET: change-me
+      EVENTLAKE_REQUIRE_AUTHENTICATION: "false"
+      EVENTLAKE_BACKGROUND_WORKERS_ENABLED: "true"
+      EVENTLAKE_LOG_LEVEL: info
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  eventlake_postgres_data:
+
