@@ -23,6 +23,7 @@ Current verified commands:
 - `cargo check`
 - `cargo test`
 - `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test --test e2e_real_database_tests -- --nocapture`
 
 ## 2. Expected Local Requirements
 
@@ -85,6 +86,24 @@ Run tests:
 ```text
 cargo test
 ```
+
+Run only the real PostgreSQL E2E test:
+
+```text
+cargo test --test e2e_real_database_tests -- --nocapture
+```
+
+The E2E test reads `.env.test` and expects:
+
+```text
+DATABASE_URL=postgres://...
+```
+
+Important:
+
+- `.env.test` is intentionally ignored by Git.
+- The E2E test resets the `public` schema of the configured database.
+- Use a dedicated disposable test database only.
 
 Run formatting:
 
@@ -186,6 +205,7 @@ Test coverage should grow by risk:
 - Integration tests for raw log persistence before decode.
 - Integration tests for decoder and index builder.
 - Integration tests for reorg repair.
+- Real PostgreSQL E2E for API, migrations, ABI, subscription, collector, decoder, indexes, search, explorers, dashboard, auth, and reorg.
 
 Large-chain behavior should be tested with bounded fixtures first, then load tests after core behavior is stable.
 
@@ -232,19 +252,19 @@ Verified locally:
 ```text
 cargo check
 cargo test
+cargo test --test e2e_real_database_tests -- --nocapture
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 Not verified in this environment:
 
 - `docker compose up`
-- Live PostgreSQL migration execution
 - End-to-end RPC collection against a real EVM chain
 
 Reason:
 
 - The current user cannot access `/var/run/docker.sock`.
-- The local PostgreSQL listener requires credentials that are not available in this session.
+- `.env.test` PostgreSQL migration and E2E execution are verified.
+- E2E currently uses a deterministic local JSON-RPC HTTP fixture instead of a public chain RPC endpoint.
 
 The migration is still compiled into the binary through `sqlx::migrate!("./migrations")`.
-

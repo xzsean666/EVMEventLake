@@ -1,0 +1,665 @@
+use std::{env, net::SocketAddr, time::Duration};
+
+use axum::{
+    Json, Router,
+    body::{Body, to_bytes},
+    http::{Method, Request, StatusCode},
+    routing::post,
+};
+use chrono::Utc;
+use eventlake::{
+    api, app::application_state::ApplicationState, auth, collector, configuration, database,
+    decoder, indexing, reorg,
+};
+use jsonwebtoken::{EncodingKey, Header, encode};
+use serde_json::{Value, json};
+use sqlx::{PgPool, postgres::PgPoolOptions};
+use tokio::net::TcpListener;
+use tower::ServiceExt;
+use uuid::Uuid;
+
+const CONTRACT_ADDRESS: &str = "0x2222222222222222222222222222222222222222";
+const FROM_ADDRESS: &str = "0x1111111111111111111111111111111111111111";
+const TO_ADDRESS: &str = "0x3333333333333333333333333333333333333333";
+const TRANSFER_TOPIC0: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
+    let Some(database_url) = test_database_url() else {
+        eprintln!("skipping real database e2e: .env.test DATABASE_URL is not configured");
+        return Ok(());
+    };
+
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await?;
+    reset_public_schema_for_e2e(&pool).await?;
+    database::migrate(&pool).await?;
+    reset_eventlake_tables(&pool).await?;
+
+    let rpc_url = spawn_json_rpc_fixture().await?;
+    let state = build_test_state(database_url.clone(), pool.clone(), false);
+    let router = api::routes::build_router(state.clone());
+
+    assert_ok(get(&router, "/health/live").await?, StatusCode::OK);
+    assert_ok(get(&router, "/health/ready").await?, StatusCode::OK);
+    let openapi_response = get(&router, "/api/openapi.json").await?;
+    assert_eq!(openapi_response.0, StatusCode::OK);
+    assert_eq!(openapi_response.1["openapi"], "3.1.0");
+
+    let api_key_response = post_json(
+        &router,
+        "/api/auth/api-keys",
+        json!({ "name": "e2e-admin", "role": "admin" }),
+    )
+    .await?;
+    assert_ok(api_key_response.clone(), StatusCode::OK);
+    assert!(
+        response_data(&api_key_response.1)
+            .get("api_key")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .starts_with("evl_")
+    );
+
+    let chain_response = post_json(
+        &router,
+        "/api/chains",
+        json!({
+            "chain_id": 31337,
+            "name": "Local E2E",
+            "native_token_symbol": "ETH",
+            "safe_confirmation_depth": 0,
+            "default_max_block_window": 50,
+            "rpc_notes": "deterministic e2e fixture"
+        }),
+    )
+    .await?;
+    assert_ok(chain_response.clone(), StatusCode::OK);
+    assert_eq!(response_data(&chain_response.1)["chain_id"], 31337);
+    assert_ok(get(&router, "/api/chains/31337").await?, StatusCode::OK);
+    assert_ok(get(&router, "/api/chains").await?, StatusCode::OK);
+
+    let rpc_response = post_json(
+        &router,
+        "/api/rpc-endpoints",
+        json!({ "chain_id": 31337, "url": rpc_url, "weight": 100 }),
+    )
+    .await?;
+    assert_ok(rpc_response.clone(), StatusCode::OK);
+    let rpc_id = uuid_from_response(&rpc_response.1, "id");
+    assert_ok(
+        post_json(
+            &router,
+            &format!("/api/rpc-endpoints/{rpc_id}/check"),
+            json!({}),
+        )
+        .await?,
+        StatusCode::OK,
+    );
+    assert_ok(
+        post_json(
+            &router,
+            &format!("/api/rpc-endpoints/{rpc_id}/disable"),
+            json!({}),
+        )
+        .await?,
+        StatusCode::OK,
+    );
+    assert_ok(
+        post_json(
+            &router,
+            &format!("/api/rpc-endpoints/{rpc_id}/enable"),
+            json!({}),
+        )
+        .await?,
+        StatusCode::OK,
+    );
+    assert_ok(
+        get(&router, &format!("/api/rpc-endpoints/{rpc_id}")).await?,
+        StatusCode::OK,
+    );
+    assert_ok(get(&router, "/api/rpc-endpoints").await?, StatusCode::OK);
+
+    let abi_response = post_json(
+        &router,
+        "/api/abis",
+        json!({
+            "name": "ERC20",
+            "abi_json": erc20_transfer_abi()
+        }),
+    )
+    .await?;
+    assert_ok(abi_response.clone(), StatusCode::OK);
+    let abi_id = uuid_from_response(&abi_response.1, "id");
+    assert_eq!(response_data(&abi_response.1)["event_count"], 1);
+    assert_ok(
+        get(&router, &format!("/api/abis/{abi_id}")).await?,
+        StatusCode::OK,
+    );
+
+    let events_response = get(&router, "/api/events").await?;
+    assert_ok(events_response.clone(), StatusCode::OK);
+    assert_eq!(
+        response_data(&events_response.1)[0]["event_name"],
+        "Transfer"
+    );
+
+    let subscription_response = post_json(
+        &router,
+        "/api/subscriptions",
+        json!({
+            "chain_id": 31337,
+            "contract_address": CONTRACT_ADDRESS,
+            "abi_id": abi_id,
+            "start_block": 100,
+            "realtime_enabled": true
+        }),
+    )
+    .await?;
+    assert_ok(subscription_response.clone(), StatusCode::OK);
+    let subscription_id = uuid_from_response(&subscription_response.1, "id");
+
+    let duplicate_subscription_response = post_json(
+        &router,
+        "/api/subscriptions",
+        json!({
+            "chain_id": 31337,
+            "contract_address": CONTRACT_ADDRESS,
+            "abi_id": abi_id,
+            "start_block": 1,
+            "realtime_enabled": true
+        }),
+    )
+    .await?;
+    assert_ok(duplicate_subscription_response.clone(), StatusCode::OK);
+    assert_eq!(
+        uuid_from_response(&duplicate_subscription_response.1, "id"),
+        subscription_id
+    );
+
+    assert_ok(
+        post_json(
+            &router,
+            &format!("/api/subscriptions/{subscription_id}/pause"),
+            json!({}),
+        )
+        .await?,
+        StatusCode::OK,
+    );
+    assert_ok(
+        post_json(
+            &router,
+            &format!("/api/subscriptions/{subscription_id}/resume"),
+            json!({}),
+        )
+        .await?,
+        StatusCode::OK,
+    );
+    assert_ok(
+        get(&router, &format!("/api/subscriptions/{subscription_id}")).await?,
+        StatusCode::OK,
+    );
+    assert_ok(get(&router, "/api/subscriptions").await?, StatusCode::OK);
+
+    indexing::partition_manager::ensure_partitions(&pool).await?;
+    collector::worker::collect_once(&state).await?;
+    assert_eq!(count_rows(&pool, "raw_logs").await?, 1);
+    assert_eq!(count_rows(&pool, "decode_queue").await?, 1);
+
+    decoder::worker::decode_once(&state).await?;
+    assert_eq!(count_rows(&pool, "decoded_events").await?, 1);
+    assert_eq!(count_rows(&pool, "address_index").await?, 2);
+    assert!(count_rows(&pool, "event_field_index").await? >= 3);
+
+    let search_by_event = post_json(
+        &router,
+        "/api/search",
+        json!({
+            "page": 1,
+            "limit": 10,
+            "filters": [
+                { "field": "event_name", "operator": "eq", "value": "Transfer" }
+            ],
+            "sort": { "field": "block_number", "direction": "desc" }
+        }),
+    )
+    .await?;
+    assert_ok(search_by_event.clone(), StatusCode::OK);
+    assert_eq!(
+        response_data(&search_by_event.1).as_array().unwrap().len(),
+        1
+    );
+
+    let search_by_address = post_json(
+        &router,
+        "/api/search",
+        json!({
+            "page": 1,
+            "limit": 10,
+            "filters": [
+                { "field": "address", "operator": "eq", "value": FROM_ADDRESS }
+            ],
+            "sort": { "field": "block_number", "direction": "desc" }
+        }),
+    )
+    .await?;
+    assert_ok(search_by_address.clone(), StatusCode::OK);
+    assert_eq!(
+        response_data(&search_by_address.1)
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let search_by_field = post_json(
+        &router,
+        "/api/search",
+        json!({
+            "page": 1,
+            "limit": 10,
+            "filters": [
+                { "field": "field.value", "operator": "eq", "value": "1234" }
+            ],
+            "sort": { "field": "block_number", "direction": "desc" }
+        }),
+    )
+    .await?;
+    assert_ok(search_by_field.clone(), StatusCode::OK);
+    assert_eq!(
+        response_data(&search_by_field.1).as_array().unwrap().len(),
+        1
+    );
+
+    let address_explorer = get(&router, &format!("/api/explorer/address/{FROM_ADDRESS}")).await?;
+    assert_ok(address_explorer.clone(), StatusCode::OK);
+    assert_eq!(
+        response_data(&address_explorer.1)["recent_events"][0]["event_name"],
+        "Transfer"
+    );
+
+    let contract_explorer = get(
+        &router,
+        &format!("/api/explorer/contracts/31337/{CONTRACT_ADDRESS}"),
+    )
+    .await?;
+    assert_ok(contract_explorer.clone(), StatusCode::OK);
+    assert_eq!(response_data(&contract_explorer.1)["event_count"], 1);
+
+    let event_explorer = get(&router, "/api/explorer/events/Transfer").await?;
+    assert_ok(event_explorer.clone(), StatusCode::OK);
+    assert_eq!(response_data(&event_explorer.1)["total_count"], 1);
+
+    let dashboard = get(&router, "/api/dashboard").await?;
+    assert_ok(dashboard.clone(), StatusCode::OK);
+    assert_eq!(response_data(&dashboard.1)["total_raw_logs"], 1);
+    assert_eq!(response_data(&dashboard.1)["total_decoded_events"], 1);
+
+    assert_authentication_modes(&database_url, pool.clone()).await?;
+
+    let reorg_result = reorg::observe_block(
+        &pool,
+        31337,
+        100,
+        "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0",
+    )
+    .await?;
+    assert!(matches!(
+        reorg_result,
+        reorg::BlockCheckpointResult::ReorgDetected { .. }
+    ));
+    assert_eq!(
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM raw_logs WHERE removed = true")
+            .fetch_one(&pool)
+            .await?
+            .0,
+        1
+    );
+    assert_eq!(count_rows(&pool, "address_index").await?, 0);
+    assert_eq!(count_rows(&pool, "event_field_index").await?, 0);
+
+    assert_ok(
+        post_json(
+            &router,
+            &format!("/api/subscriptions/{subscription_id}/pause"),
+            json!({}),
+        )
+        .await?,
+        StatusCode::OK,
+    );
+    assert_ok(
+        delete(&router, &format!("/api/subscriptions/{subscription_id}")).await?,
+        StatusCode::OK,
+    );
+    assert_ok(
+        delete(&router, &format!("/api/abis/{abi_id}")).await?,
+        StatusCode::OK,
+    );
+
+    Ok(())
+}
+
+async fn assert_authentication_modes(database_url: &str, pool: PgPool) -> anyhow::Result<()> {
+    let admin_key = "e2e-admin-secret";
+    let read_only_key = "e2e-readonly-secret";
+
+    sqlx::query(
+        r#"
+        INSERT INTO api_keys (id, name, key_hash, role)
+        VALUES ($1, 'e2e-auth-admin', $2, 'admin'),
+               ($3, 'e2e-auth-readonly', $4, 'read_only')
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(auth::hash_api_key(admin_key))
+    .bind(Uuid::new_v4())
+    .bind(auth::hash_api_key(read_only_key))
+    .execute(&pool)
+    .await?;
+
+    let state = build_test_state(database_url.to_owned(), pool, true);
+    let router = api::routes::build_router(state);
+
+    assert_eq!(
+        get(&router, "/api/chains").await?.0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let read_only_response = request_json_with_headers(
+        &router,
+        Method::GET,
+        "/api/chains",
+        None,
+        vec![("x-api-key", read_only_key)],
+    )
+    .await?;
+    assert_ok(read_only_response, StatusCode::OK);
+
+    let forbidden_response = request_json_with_headers(
+        &router,
+        Method::POST,
+        "/api/chains",
+        Some(json!({
+            "chain_id": 31338,
+            "name": "Forbidden Chain",
+            "native_token_symbol": "ETH"
+        })),
+        vec![("x-api-key", read_only_key)],
+    )
+    .await?;
+    assert_eq!(forbidden_response.0, StatusCode::FORBIDDEN);
+
+    let admin_response = request_json_with_headers(
+        &router,
+        Method::POST,
+        "/api/chains",
+        Some(json!({
+            "chain_id": 31338,
+            "name": "Admin Chain",
+            "native_token_symbol": "ETH"
+        })),
+        vec![("x-api-key", admin_key)],
+    )
+    .await?;
+    assert_ok(admin_response, StatusCode::OK);
+
+    let jwt = encode(
+        &Header::default(),
+        &json!({
+            "sub": "e2e-jwt-admin",
+            "role": "admin",
+            "exp": Utc::now().timestamp() + 300
+        }),
+        &EncodingKey::from_secret(b"test-secret"),
+    )?;
+    let jwt_response = request_json_with_headers(
+        &router,
+        Method::GET,
+        "/api/chains/31338",
+        None,
+        vec![("authorization", &format!("Bearer {jwt}"))],
+    )
+    .await?;
+    assert_ok(jwt_response, StatusCode::OK);
+
+    Ok(())
+}
+
+fn test_database_url() -> Option<String> {
+    dotenvy::from_filename(".env.test").ok();
+    env::var("DATABASE_URL")
+        .or_else(|_| env::var("EVENTLAKE_DATABASE_URL"))
+        .ok()
+}
+
+fn build_test_state(
+    database_url: String,
+    pool: PgPool,
+    require_authentication: bool,
+) -> ApplicationState {
+    ApplicationState::new(
+        configuration::ApplicationConfiguration {
+            http: configuration::HttpConfiguration {
+                host: "127.0.0.1".parse().expect("test host parses"),
+                port: 0,
+            },
+            database: configuration::DatabaseConfiguration {
+                database_url,
+                max_connections: 5,
+            },
+            auth: configuration::AuthConfiguration {
+                jwt_secret: "test-secret".to_owned(),
+                require_authentication,
+            },
+            background: configuration::BackgroundConfiguration {
+                workers_enabled: false,
+                worker_tick: Duration::from_millis(50),
+                decode_batch_size: 100,
+            },
+            telemetry: configuration::TelemetryConfiguration {
+                log_level: "debug".to_owned(),
+                json_logs: false,
+            },
+        },
+        pool,
+    )
+}
+
+async fn reset_eventlake_tables(pool: &PgPool) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        TRUNCATE TABLE
+            api_keys,
+            event_field_index,
+            address_index,
+            decoded_events,
+            decode_queue,
+            raw_logs,
+            block_checkpoints,
+            subscriptions,
+            contract_registry,
+            event_registry,
+            abi_versions,
+            rpc_endpoints
+        RESTART IDENTITY CASCADE
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+async fn reset_public_schema_for_e2e(pool: &PgPool) -> anyhow::Result<()> {
+    sqlx::query("DROP SCHEMA IF EXISTS public CASCADE")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE SCHEMA public").execute(pool).await?;
+    sqlx::query("GRANT ALL ON SCHEMA public TO PUBLIC")
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+async fn spawn_json_rpc_fixture() -> anyhow::Result<String> {
+    let router = Router::new().route("/", post(json_rpc_fixture));
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await?;
+    let address = listener.local_addr()?;
+
+    tokio::spawn(async move {
+        if let Err(error) = axum::serve(listener, router).await {
+            eprintln!("json-rpc fixture failed: {error}");
+        }
+    });
+
+    Ok(format!("http://{address}"))
+}
+
+async fn json_rpc_fixture(Json(request): Json<Value>) -> Json<Value> {
+    let method = request
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let id = request.get("id").cloned().unwrap_or_else(|| json!(1));
+
+    let response = match method {
+        "eth_blockNumber" => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": "0x6f"
+        }),
+        "eth_getLogs" => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [{
+                "address": CONTRACT_ADDRESS,
+                "blockHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "blockNumber": "0x64",
+                "data": uint256_topic_data(1234),
+                "logIndex": "0x0",
+                "removed": false,
+                "topics": [
+                    TRANSFER_TOPIC0,
+                    address_topic(FROM_ADDRESS),
+                    address_topic(TO_ADDRESS)
+                ],
+                "transactionHash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "transactionIndex": "0x0"
+            }]
+        }),
+        _ => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32601, "message": "method not found" }
+        }),
+    };
+
+    Json(response)
+}
+
+fn erc20_transfer_abi() -> Value {
+    json!([
+        {
+            "anonymous": false,
+            "inputs": [
+                {"indexed": true, "internalType": "address", "name": "from", "type": "address"},
+                {"indexed": true, "internalType": "address", "name": "to", "type": "address"},
+                {"indexed": false, "internalType": "uint256", "name": "value", "type": "uint256"}
+            ],
+            "name": "Transfer",
+            "type": "event"
+        }
+    ])
+}
+
+fn address_topic(address: &str) -> String {
+    format!("0x{:0>64}", address.trim_start_matches("0x"))
+}
+
+fn uint256_topic_data(value: u64) -> String {
+    format!("0x{value:064x}")
+}
+
+async fn get(router: &Router, path: &str) -> anyhow::Result<(StatusCode, Value)> {
+    request_json(router, Method::GET, path, None).await
+}
+
+async fn delete(router: &Router, path: &str) -> anyhow::Result<(StatusCode, Value)> {
+    request_json(router, Method::DELETE, path, None).await
+}
+
+async fn post_json(
+    router: &Router,
+    path: &str,
+    body: Value,
+) -> anyhow::Result<(StatusCode, Value)> {
+    request_json(router, Method::POST, path, Some(body)).await
+}
+
+async fn request_json(
+    router: &Router,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> anyhow::Result<(StatusCode, Value)> {
+    request_json_with_headers(router, method, path, body, Vec::new()).await
+}
+
+async fn request_json_with_headers(
+    router: &Router,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+    headers: Vec<(&str, &str)>,
+) -> anyhow::Result<(StatusCode, Value)> {
+    let body = body
+        .map(|value| Body::from(value.to_string()))
+        .unwrap_or_else(Body::empty);
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json");
+
+    for (name, value) in headers {
+        builder = builder.header(name, value);
+    }
+
+    let response = router.clone().oneshot(builder.body(body)?).await?;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes)?
+    };
+
+    Ok((status, value))
+}
+
+fn assert_ok(response: (StatusCode, Value), expected_status: StatusCode) {
+    assert_eq!(response.0, expected_status, "response body: {}", response.1);
+    assert_eq!(response.1["success"], true, "response body: {}", response.1);
+}
+
+fn response_data(response: &Value) -> &Value {
+    response.get("data").expect("response has data")
+}
+
+fn uuid_from_response(response: &Value, field: &str) -> Uuid {
+    response_data(response)
+        .get(field)
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .expect("response field is uuid")
+}
+
+async fn count_rows(pool: &PgPool, table_name: &'static str) -> anyhow::Result<i64> {
+    let sql = format!("SELECT COUNT(*)::BIGINT FROM {table_name}");
+    Ok(sqlx::query_as::<_, (i64,)>(sqlx::AssertSqlSafe(sql))
+        .fetch_one(pool)
+        .await?
+        .0)
+}

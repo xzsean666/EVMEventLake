@@ -139,22 +139,21 @@ Documented:
 - Address, contract, and event explorer endpoints.
 - Dashboard summary endpoint.
 - Unit/integration tests for ABI parsing, Search DSL validation, and address/topic validation.
+- Real PostgreSQL E2E coverage through `tests/e2e_real_database_tests.rs`.
 
 ## 5. Pending Tasks
 
 Recommended next hardening sequence:
 
-1. Run migrations against a real PostgreSQL database.
-2. Exercise end-to-end flow with a real RPC endpoint:
+1. Exercise end-to-end flow with a real public or private EVM RPC endpoint:
    add RPC, upload ERC-20 ABI, create subscription, collect logs, decode, search.
-3. Add database-backed integration tests once a test PostgreSQL instance is available.
-4. Expand Search DSL support for `in`, `not_in`, and more field comparison types.
-5. Add explicit Job Monitor routes separate from subscription routes if the UI needs different read models.
-6. Improve OpenAPI annotations with concrete path schemas for all handlers.
-7. Add JWT issuance or external identity provider integration if needed.
-8. Add per-chain/provider RPC range-limit metadata.
-9. Add stronger reorg repair tests.
-10. Add load tests for recent search and address index performance.
+2. Expand Search DSL support for `in`, `not_in`, and more field comparison types.
+3. Add explicit Job Monitor routes separate from subscription routes if the UI needs different read models.
+4. Improve OpenAPI annotations with concrete path schemas for all handlers.
+5. Add JWT issuance or external identity provider integration if needed.
+6. Add per-chain/provider RPC range-limit metadata.
+7. Add stronger reorg repair tests.
+8. Add load tests for recent search and address index performance.
 
 ## 6. Next Actions
 
@@ -193,8 +192,10 @@ Verification status:
 
 - `cargo check`: passed.
 - `cargo test`: passed.
+- `cargo test --test e2e_real_database_tests -- --nocapture`: passed against `.env.test` PostgreSQL.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
-- Docker/PostgreSQL runtime verification: blocked by local Docker socket permissions and unavailable PostgreSQL credentials.
+- Docker runtime verification: blocked by local Docker socket permissions.
+- Public-chain RPC E2E: not yet run; current E2E uses a deterministic local JSON-RPC HTTP fixture.
 
 ## 8. Rules for Future AI Sessions
 
