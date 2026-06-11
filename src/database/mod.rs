@@ -12,6 +12,8 @@ pub async fn connect(configuration: &DatabaseConfiguration) -> anyhow::Result<Pg
 }
 
 pub async fn migrate(pool: &PgPool) -> anyhow::Result<()> {
-    sqlx::migrate!("./migrations").run(pool).await?;
+    let mut migrator = sqlx::migrate!("./migrations");
+    migrator.dangerous_set_table_name("eventlake_sqlx_migrations");
+    migrator.run(pool).await?;
     Ok(())
 }

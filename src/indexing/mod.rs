@@ -35,7 +35,7 @@ pub async fn index_decoded_event(
         if normalize_address(&field.normalized_value).is_ok() {
             sqlx::query(
                 r#"
-                INSERT INTO address_index (
+                INSERT INTO eventlake_address_index (
                     id, chain_id, address, contract_address, event_name, field_name,
                     raw_log_id, block_number, transaction_hash
                 )
@@ -59,7 +59,7 @@ pub async fn index_decoded_event(
         if should_index_field_value(&field.json_value) {
             sqlx::query(
                 r#"
-                INSERT INTO event_field_index (
+                INSERT INTO eventlake_event_field_index (
                     id, chain_id, contract_address, event_name, field_name, field_type,
                     normalized_value, raw_log_id, block_number
                 )

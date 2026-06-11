@@ -1,4 +1,4 @@
-CREATE TABLE chains (
+CREATE TABLE eventlake_chains (
     chain_id BIGINT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     native_token_symbol TEXT NOT NULL,
@@ -10,7 +10,7 @@ CREATE TABLE chains (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-INSERT INTO chains (
+INSERT INTO eventlake_chains (
     chain_id,
     name,
     native_token_symbol,
@@ -26,9 +26,9 @@ INSERT INTO chains (
     (56, 'BSC', 'BNB', 30, 1000, 'BSC public endpoints may limit eth_getLogs')
 ON CONFLICT (chain_id) DO NOTHING;
 
-CREATE TABLE rpc_endpoints (
+CREATE TABLE eventlake_rpc_endpoints (
     id UUID PRIMARY KEY,
-    chain_id BIGINT NOT NULL REFERENCES chains(chain_id),
+    chain_id BIGINT NOT NULL REFERENCES eventlake_chains(chain_id),
     url TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'enabled',
     weight INTEGER NOT NULL DEFAULT 100,
@@ -41,9 +41,9 @@ CREATE TABLE rpc_endpoints (
     UNIQUE (chain_id, url)
 );
 
-CREATE INDEX rpc_endpoints_chain_status_idx ON rpc_endpoints(chain_id, status, weight DESC);
+CREATE INDEX eventlake_rpc_endpoints_chain_status_idx ON eventlake_rpc_endpoints(chain_id, status, weight DESC);
 
-CREATE TABLE abi_versions (
+CREATE TABLE eventlake_abi_versions (
     id UUID PRIMARY KEY,
     name TEXT NOT NULL,
     version INTEGER NOT NULL,
@@ -54,9 +54,9 @@ CREATE TABLE abi_versions (
     UNIQUE (name, version)
 );
 
-CREATE TABLE event_registry (
+CREATE TABLE eventlake_event_registry (
     id UUID PRIMARY KEY,
-    abi_id UUID NOT NULL REFERENCES abi_versions(id),
+    abi_id UUID NOT NULL REFERENCES eventlake_abi_versions(id),
     event_name TEXT NOT NULL,
     signature TEXT NOT NULL,
     topic0 TEXT NOT NULL,
@@ -67,14 +67,14 @@ CREATE TABLE event_registry (
     UNIQUE (abi_id, topic0)
 );
 
-CREATE INDEX event_registry_topic0_idx ON event_registry(topic0);
-CREATE INDEX event_registry_name_idx ON event_registry(event_name);
+CREATE INDEX eventlake_event_registry_topic0_idx ON eventlake_event_registry(topic0);
+CREATE INDEX eventlake_event_registry_name_idx ON eventlake_event_registry(event_name);
 
-CREATE TABLE contract_registry (
+CREATE TABLE eventlake_contract_registry (
     id UUID PRIMARY KEY,
-    chain_id BIGINT NOT NULL REFERENCES chains(chain_id),
+    chain_id BIGINT NOT NULL REFERENCES eventlake_chains(chain_id),
     contract_address TEXT NOT NULL,
-    abi_id UUID REFERENCES abi_versions(id),
+    abi_id UUID REFERENCES eventlake_abi_versions(id),
     event_count BIGINT NOT NULL DEFAULT 0,
     first_seen_block BIGINT,
     last_seen_block BIGINT,
@@ -85,11 +85,11 @@ CREATE TABLE contract_registry (
     UNIQUE (chain_id, contract_address)
 );
 
-CREATE TABLE subscriptions (
+CREATE TABLE eventlake_subscriptions (
     id UUID PRIMARY KEY,
-    chain_id BIGINT NOT NULL REFERENCES chains(chain_id),
+    chain_id BIGINT NOT NULL REFERENCES eventlake_chains(chain_id),
     contract_address TEXT NOT NULL,
-    abi_id UUID REFERENCES abi_versions(id),
+    abi_id UUID REFERENCES eventlake_abi_versions(id),
     start_block BIGINT NOT NULL,
     current_block BIGINT NOT NULL,
     target_block BIGINT,
@@ -101,23 +101,23 @@ CREATE TABLE subscriptions (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX subscriptions_one_active_contract_idx
-    ON subscriptions(chain_id, contract_address)
+CREATE UNIQUE INDEX eventlake_subscriptions_one_active_contract_idx
+    ON eventlake_subscriptions(chain_id, contract_address)
     WHERE active = true;
 
-CREATE INDEX subscriptions_status_idx ON subscriptions(status, active);
+CREATE INDEX eventlake_subscriptions_status_idx ON eventlake_subscriptions(status, active);
 
-CREATE TABLE block_checkpoints (
-    chain_id BIGINT NOT NULL REFERENCES chains(chain_id),
+CREATE TABLE eventlake_block_checkpoints (
+    chain_id BIGINT NOT NULL REFERENCES eventlake_chains(chain_id),
     block_number BIGINT NOT NULL,
     block_hash TEXT NOT NULL,
     observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (chain_id, block_number)
 );
 
-CREATE TABLE raw_logs (
+CREATE TABLE eventlake_raw_logs (
     id UUID NOT NULL,
-    subscription_id UUID REFERENCES subscriptions(id),
+    subscription_id UUID REFERENCES eventlake_subscriptions(id),
     chain_id BIGINT NOT NULL,
     contract_address TEXT NOT NULL,
     block_number BIGINT NOT NULL,
@@ -132,19 +132,19 @@ CREATE TABLE raw_logs (
     PRIMARY KEY (id, block_number)
 ) PARTITION BY RANGE (block_number);
 
-CREATE TABLE raw_logs_default PARTITION OF raw_logs DEFAULT;
+CREATE TABLE eventlake_raw_logs_default PARTITION OF eventlake_raw_logs DEFAULT;
 
-CREATE UNIQUE INDEX raw_logs_unique_log_idx
-    ON raw_logs(chain_id, transaction_hash, log_index, block_number);
+CREATE UNIQUE INDEX eventlake_raw_logs_unique_log_idx
+    ON eventlake_raw_logs(chain_id, transaction_hash, log_index, block_number);
 
-CREATE INDEX raw_logs_chain_contract_block_idx
-    ON raw_logs(chain_id, contract_address, block_number DESC);
+CREATE INDEX eventlake_raw_logs_chain_contract_block_idx
+    ON eventlake_raw_logs(chain_id, contract_address, block_number DESC);
 
-CREATE TABLE decode_queue (
+CREATE TABLE eventlake_decode_queue (
     id UUID PRIMARY KEY,
     raw_log_id UUID NOT NULL,
     block_number BIGINT NOT NULL,
-    subscription_id UUID REFERENCES subscriptions(id),
+    subscription_id UUID REFERENCES eventlake_subscriptions(id),
     status TEXT NOT NULL DEFAULT 'pending',
     attempt_count INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
@@ -153,9 +153,9 @@ CREATE TABLE decode_queue (
     UNIQUE(raw_log_id, block_number)
 );
 
-CREATE INDEX decode_queue_status_idx ON decode_queue(status, created_at);
+CREATE INDEX eventlake_decode_queue_status_idx ON eventlake_decode_queue(status, created_at);
 
-CREATE TABLE decoded_events (
+CREATE TABLE eventlake_decoded_events (
     id UUID NOT NULL,
     raw_log_id UUID NOT NULL,
     block_number BIGINT NOT NULL,
@@ -172,18 +172,18 @@ CREATE TABLE decoded_events (
     PRIMARY KEY (id, block_number)
 ) PARTITION BY RANGE (block_number);
 
-CREATE TABLE decoded_events_default PARTITION OF decoded_events DEFAULT;
+CREATE TABLE eventlake_decoded_events_default PARTITION OF eventlake_decoded_events DEFAULT;
 
-CREATE UNIQUE INDEX decoded_events_raw_log_idx
-    ON decoded_events(raw_log_id, block_number);
+CREATE UNIQUE INDEX eventlake_decoded_events_raw_log_idx
+    ON eventlake_decoded_events(raw_log_id, block_number);
 
-CREATE INDEX decoded_events_chain_contract_block_idx
-    ON decoded_events(chain_id, contract_address, block_number DESC);
+CREATE INDEX eventlake_decoded_events_chain_contract_block_idx
+    ON eventlake_decoded_events(chain_id, contract_address, block_number DESC);
 
-CREATE INDEX decoded_events_event_name_idx
-    ON decoded_events(event_name, block_number DESC);
+CREATE INDEX eventlake_decoded_events_event_name_idx
+    ON eventlake_decoded_events(event_name, block_number DESC);
 
-CREATE TABLE address_index (
+CREATE TABLE eventlake_address_index (
     id UUID PRIMARY KEY,
     chain_id BIGINT NOT NULL,
     address TEXT NOT NULL,
@@ -197,10 +197,10 @@ CREATE TABLE address_index (
     UNIQUE(chain_id, address, raw_log_id, field_name, block_number)
 );
 
-CREATE INDEX address_index_lookup_idx
-    ON address_index(chain_id, address, block_number DESC);
+CREATE INDEX eventlake_address_index_lookup_idx
+    ON eventlake_address_index(chain_id, address, block_number DESC);
 
-CREATE TABLE event_field_index (
+CREATE TABLE eventlake_event_field_index (
     id UUID PRIMARY KEY,
     chain_id BIGINT NOT NULL,
     contract_address TEXT NOT NULL,
@@ -214,10 +214,10 @@ CREATE TABLE event_field_index (
     UNIQUE(chain_id, contract_address, event_name, field_name, normalized_value, raw_log_id, block_number)
 );
 
-CREATE INDEX event_field_index_lookup_idx
-    ON event_field_index(chain_id, event_name, field_name, normalized_value, block_number DESC);
+CREATE INDEX eventlake_event_field_index_lookup_idx
+    ON eventlake_event_field_index(chain_id, event_name, field_name, normalized_value, block_number DESC);
 
-CREATE TABLE api_keys (
+CREATE TABLE eventlake_api_keys (
     id UUID PRIMARY KEY,
     name TEXT NOT NULL,
     key_hash TEXT NOT NULL UNIQUE,
@@ -226,4 +226,3 @@ CREATE TABLE api_keys (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_used_at TIMESTAMPTZ
 );
-

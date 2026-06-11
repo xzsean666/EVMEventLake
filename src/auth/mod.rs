@@ -127,7 +127,7 @@ async fn authenticate_api_key(
     let key_hash = hash_api_key(api_key);
     let record = sqlx::query_as::<_, ApiKeyRecord>(
         r#"
-        UPDATE api_keys
+        UPDATE eventlake_api_keys
         SET last_used_at = now()
         WHERE key_hash = $1 AND revoked = false
         RETURNING id, role
@@ -202,7 +202,7 @@ async fn create_api_key(
 
     sqlx::query(
         r#"
-        INSERT INTO api_keys (id, name, key_hash, role)
+        INSERT INTO eventlake_api_keys (id, name, key_hash, role)
         VALUES ($1, $2, $3, $4)
         "#,
     )

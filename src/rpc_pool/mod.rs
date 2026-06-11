@@ -85,7 +85,7 @@ async fn create_rpc_endpoint(
 
     let endpoint = sqlx::query_as::<_, RpcEndpointRecord>(
         r#"
-        INSERT INTO rpc_endpoints (id, chain_id, url, weight)
+        INSERT INTO eventlake_rpc_endpoints (id, chain_id, url, weight)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (chain_id, url) DO UPDATE
         SET weight = EXCLUDED.weight,
@@ -146,7 +146,7 @@ pub async fn select_rpc_endpoint(
         r#"
         SELECT id, chain_id, url, status, weight, latency_ms, last_check_at,
                failure_count, last_error, created_at, updated_at
-        FROM rpc_endpoints
+        FROM eventlake_rpc_endpoints
         WHERE chain_id = $1 AND status IN ('enabled', 'healthy')
         ORDER BY failure_count ASC, weight DESC, latency_ms ASC NULLS LAST, updated_at ASC
         LIMIT 1
@@ -165,7 +165,7 @@ pub async fn mark_rpc_failure(
 ) -> Result<(), ApplicationError> {
     sqlx::query(
         r#"
-        UPDATE rpc_endpoints
+        UPDATE eventlake_rpc_endpoints
         SET failure_count = failure_count + 1,
             last_error = $2,
             last_check_at = now(),
@@ -190,7 +190,7 @@ async fn find_rpc_endpoint(
         r#"
         SELECT id, chain_id, url, status, weight, latency_ms, last_check_at,
                failure_count, last_error, created_at, updated_at
-        FROM rpc_endpoints
+        FROM eventlake_rpc_endpoints
         WHERE id = $1
         "#,
     )
@@ -207,7 +207,7 @@ async fn update_rpc_status(
 ) -> Result<RpcEndpointRecord, ApplicationError> {
     sqlx::query_as::<_, RpcEndpointRecord>(
         r#"
-        UPDATE rpc_endpoints
+        UPDATE eventlake_rpc_endpoints
         SET status = $2,
             updated_at = now()
         WHERE id = $1
@@ -231,7 +231,7 @@ async fn persist_health_check(
         Ok(check) => {
             sqlx::query(
                 r#"
-                UPDATE rpc_endpoints
+                UPDATE eventlake_rpc_endpoints
                 SET status = 'healthy',
                     latency_ms = $2,
                     last_check_at = now(),
@@ -257,6 +257,6 @@ async fn persist_health_check(
 const SELECT_RPC_ENDPOINTS: &str = r#"
 SELECT id, chain_id, url, status, weight, latency_ms, last_check_at,
        failure_count, last_error, created_at, updated_at
-FROM rpc_endpoints
+FROM eventlake_rpc_endpoints
 ORDER BY chain_id, status, weight DESC, created_at
 "#;

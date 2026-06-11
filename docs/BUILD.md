@@ -102,7 +102,9 @@ DATABASE_URL=postgres://...
 Important:
 
 - `.env.test` is intentionally ignored by Git.
-- The E2E test resets the `public` schema of the configured database.
+- The E2E test resets only EventLake-owned database objects.
+- EventLake-owned business tables use the `eventlake_` prefix.
+- EventLake uses `eventlake_sqlx_migrations` instead of the default `_sqlx_migrations` table.
 - Use a dedicated disposable test database only.
 
 Run formatting:
@@ -148,6 +150,8 @@ Expected workflow:
 
 Migration rules:
 
+- All EventLake-owned tables must use the `eventlake_` prefix.
+- SQLx migration state must use `eventlake_sqlx_migrations`.
 - Raw log tables must support partitioning.
 - Decoded event tables must support partitioning.
 - Index tables must be query-optimized from the start.

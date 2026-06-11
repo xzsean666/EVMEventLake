@@ -75,9 +75,9 @@ async fn fetch_decode_batch(
                rl.topics,
                rl.data,
                s.abi_id
-        FROM decode_queue dq
-        JOIN raw_logs rl ON rl.id = dq.raw_log_id AND rl.block_number = dq.block_number
-        LEFT JOIN subscriptions s ON s.id = dq.subscription_id
+        FROM eventlake_decode_queue dq
+        JOIN eventlake_raw_logs rl ON rl.id = dq.raw_log_id AND rl.block_number = dq.block_number
+        LEFT JOIN eventlake_subscriptions s ON s.id = dq.subscription_id
         WHERE dq.status IN ('pending', 'error')
           AND rl.removed = false
           AND dq.attempt_count < 5
@@ -119,7 +119,7 @@ async fn decode_work_item(
 
     sqlx::query(
         r#"
-        INSERT INTO decoded_events (
+        INSERT INTO eventlake_decoded_events (
             id, raw_log_id, block_number, chain_id, contract_address, abi_id, event_name,
             topic0, indexed_fields, non_indexed_fields, decode_status
         )
@@ -181,7 +181,7 @@ async fn mark_queue_status(
 ) -> Result<(), ApplicationError> {
     sqlx::query(
         r#"
-        UPDATE decode_queue
+        UPDATE eventlake_decode_queue
         SET status = $2,
             attempt_count = CASE WHEN $2 = 'error' THEN attempt_count + 1 ELSE attempt_count END,
             last_error = $3,
@@ -206,7 +206,7 @@ async fn update_contract_activity(
 ) -> Result<(), ApplicationError> {
     sqlx::query(
         r#"
-        UPDATE contract_registry
+        UPDATE eventlake_contract_registry
         SET event_count = event_count + 1,
             first_seen_block = COALESCE(first_seen_block, $3),
             last_seen_block = GREATEST(COALESCE(last_seen_block, $3), $3),

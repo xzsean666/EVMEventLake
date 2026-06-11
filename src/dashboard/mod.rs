@@ -32,13 +32,13 @@ async fn dashboard_summary(
     let summary = sqlx::query_as::<_, DashboardSummary>(
         r#"
         SELECT
-            (SELECT COUNT(*)::BIGINT FROM subscriptions WHERE active = true) AS active_jobs,
-            (SELECT COUNT(*)::BIGINT FROM subscriptions WHERE status = 'paused') AS paused_jobs,
-            (SELECT COUNT(*)::BIGINT FROM subscriptions WHERE status = 'error') AS errored_jobs,
-            (SELECT COUNT(*)::BIGINT FROM raw_logs) AS total_raw_logs,
-            (SELECT COUNT(*)::BIGINT FROM decoded_events) AS total_decoded_events,
-            (SELECT COUNT(*)::BIGINT FROM rpc_endpoints WHERE status = 'healthy') AS healthy_rpc_endpoints,
-            (SELECT COUNT(*)::BIGINT FROM rpc_endpoints WHERE status = 'unhealthy') AS unhealthy_rpc_endpoints
+            (SELECT COUNT(*)::BIGINT FROM eventlake_subscriptions WHERE active = true) AS active_jobs,
+            (SELECT COUNT(*)::BIGINT FROM eventlake_subscriptions WHERE status = 'paused') AS paused_jobs,
+            (SELECT COUNT(*)::BIGINT FROM eventlake_subscriptions WHERE status = 'error') AS errored_jobs,
+            (SELECT COUNT(*)::BIGINT FROM eventlake_raw_logs) AS total_raw_logs,
+            (SELECT COUNT(*)::BIGINT FROM eventlake_decoded_events) AS total_decoded_events,
+            (SELECT COUNT(*)::BIGINT FROM eventlake_rpc_endpoints WHERE status = 'healthy') AS healthy_rpc_endpoints,
+            (SELECT COUNT(*)::BIGINT FROM eventlake_rpc_endpoints WHERE status = 'unhealthy') AS unhealthy_rpc_endpoints
         "#,
     )
     .fetch_one(&state.pool)

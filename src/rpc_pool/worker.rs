@@ -21,7 +21,7 @@ async fn check_enabled_endpoints(
         r#"
         SELECT id, chain_id, url, status, weight, latency_ms, last_check_at,
                failure_count, last_error, created_at, updated_at
-        FROM rpc_endpoints
+        FROM eventlake_rpc_endpoints
         WHERE status IN ('enabled', 'healthy', 'unhealthy')
         ORDER BY last_check_at ASC NULLS FIRST
         LIMIT 25
@@ -37,7 +37,7 @@ async fn check_enabled_endpoints(
             Ok(check) => {
                 sqlx::query(
                     r#"
-                    UPDATE rpc_endpoints
+                    UPDATE eventlake_rpc_endpoints
                     SET status = 'healthy',
                         latency_ms = $2,
                         last_check_at = now(),

@@ -17,7 +17,7 @@ pub async fn observe_block(
     block_hash: &str,
 ) -> Result<BlockCheckpointResult, ApplicationError> {
     let previous = sqlx::query_as::<_, (String,)>(
-        "SELECT block_hash FROM block_checkpoints WHERE chain_id = $1 AND block_number = $2",
+        "SELECT block_hash FROM eventlake_block_checkpoints WHERE chain_id = $1 AND block_number = $2",
     )
     .bind(chain_id)
     .bind(block_number)
@@ -28,7 +28,7 @@ pub async fn observe_block(
         None => {
             sqlx::query(
                 r#"
-                INSERT INTO block_checkpoints (chain_id, block_number, block_hash)
+                INSERT INTO eventlake_block_checkpoints (chain_id, block_number, block_hash)
                 VALUES ($1, $2, $3)
                 ON CONFLICT (chain_id, block_number) DO NOTHING
                 "#,
@@ -47,7 +47,7 @@ pub async fn observe_block(
             mark_reorg_range_invalid(pool, chain_id, block_number).await?;
             sqlx::query(
                 r#"
-                UPDATE block_checkpoints
+                UPDATE eventlake_block_checkpoints
                 SET block_hash = $3,
                     observed_at = now()
                 WHERE chain_id = $1 AND block_number = $2
@@ -74,7 +74,7 @@ async fn mark_reorg_range_invalid(
 ) -> Result<(), ApplicationError> {
     sqlx::query(
         r#"
-        UPDATE raw_logs
+        UPDATE eventlake_raw_logs
         SET removed = true
         WHERE chain_id = $1 AND block_number >= $2
         "#,
@@ -86,7 +86,7 @@ async fn mark_reorg_range_invalid(
 
     sqlx::query(
         r#"
-        DELETE FROM address_index
+        DELETE FROM eventlake_address_index
         WHERE chain_id = $1 AND block_number >= $2
         "#,
     )
@@ -97,7 +97,7 @@ async fn mark_reorg_range_invalid(
 
     sqlx::query(
         r#"
-        DELETE FROM event_field_index
+        DELETE FROM eventlake_event_field_index
         WHERE chain_id = $1 AND block_number >= $2
         "#,
     )

@@ -19,9 +19,9 @@ pub async fn run(state: ApplicationState) {
 pub async fn ensure_partitions(pool: &sqlx::PgPool) -> Result<(), ApplicationError> {
     let block_numbers = sqlx::query_as::<_, (i64,)>(
         r#"
-        SELECT current_block FROM subscriptions WHERE active = true
+        SELECT current_block FROM eventlake_subscriptions WHERE active = true
         UNION
-        SELECT COALESCE(MAX(block_number), 0) FROM raw_logs
+        SELECT COALESCE(MAX(block_number), 0) FROM eventlake_raw_logs
         "#,
     )
     .fetch_all(pool)
@@ -42,14 +42,14 @@ fn floor_partition_start(block_number: i64) -> i64 {
 
 async fn create_partition_pair(pool: &sqlx::PgPool, start: i64) -> Result<(), ApplicationError> {
     let end = start + PARTITION_BLOCK_SIZE;
-    let raw_partition = format!("raw_logs_{}_{}", start, end);
-    let decoded_partition = format!("decoded_events_{}_{}", start, end);
+    let raw_partition = format!("eventlake_raw_logs_{}_{}", start, end);
+    let decoded_partition = format!("eventlake_decoded_events_{}_{}", start, end);
 
     let raw_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {raw_partition} PARTITION OF raw_logs FOR VALUES FROM ({start}) TO ({end})"
+        "CREATE TABLE IF NOT EXISTS {raw_partition} PARTITION OF eventlake_raw_logs FOR VALUES FROM ({start}) TO ({end})"
     );
     let decoded_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {decoded_partition} PARTITION OF decoded_events FOR VALUES FROM ({start}) TO ({end})"
+        "CREATE TABLE IF NOT EXISTS {decoded_partition} PARTITION OF eventlake_decoded_events FOR VALUES FROM ({start}) TO ({end})"
     );
 
     sqlx::query(sqlx::AssertSqlSafe(raw_sql))

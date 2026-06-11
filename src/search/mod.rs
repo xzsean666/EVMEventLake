@@ -116,7 +116,7 @@ async fn execute_search(
         r#"
         SELECT d.id, d.raw_log_id, d.block_number, d.chain_id, d.contract_address,
                d.event_name, d.topic0, d.indexed_fields, d.non_indexed_fields, d.decoded_at
-        FROM decoded_events d
+        FROM eventlake_decoded_events d
         WHERE d.decode_status = 'decoded'
         "#,
     );
@@ -327,7 +327,7 @@ fn push_transaction_filter(
     match filter.operator {
         SearchOperator::Eq => {
             query_builder.push(
-                " AND EXISTS (SELECT 1 FROM raw_logs rl WHERE rl.id = d.raw_log_id AND rl.block_number = d.block_number AND lower(rl.transaction_hash) = "
+                " AND EXISTS (SELECT 1 FROM eventlake_raw_logs rl WHERE rl.id = d.raw_log_id AND rl.block_number = d.block_number AND lower(rl.transaction_hash) = "
             );
             query_builder.push_bind(value);
             query_builder.push(")");
@@ -347,7 +347,7 @@ fn push_address_filter(
     match filter.operator {
         SearchOperator::Eq => {
             query_builder.push(
-                " AND EXISTS (SELECT 1 FROM address_index ai WHERE ai.raw_log_id = d.raw_log_id AND ai.block_number = d.block_number AND ai.address = "
+                " AND EXISTS (SELECT 1 FROM eventlake_address_index ai WHERE ai.raw_log_id = d.raw_log_id AND ai.block_number = d.block_number AND ai.address = "
             );
             query_builder.push_bind(value);
             query_builder.push(")");
@@ -368,7 +368,7 @@ fn push_event_field_filter(
     match filter.operator {
         SearchOperator::Eq => {
             query_builder.push(
-                " AND EXISTS (SELECT 1 FROM event_field_index efi WHERE efi.raw_log_id = d.raw_log_id AND efi.block_number = d.block_number AND efi.field_name = "
+                " AND EXISTS (SELECT 1 FROM eventlake_event_field_index efi WHERE efi.raw_log_id = d.raw_log_id AND efi.block_number = d.block_number AND efi.field_name = "
             );
             query_builder.push_bind(field_name.to_owned());
             query_builder.push(" AND efi.normalized_value = ");
@@ -378,7 +378,7 @@ fn push_event_field_filter(
         }
         SearchOperator::Contains => {
             query_builder.push(
-                " AND EXISTS (SELECT 1 FROM event_field_index efi WHERE efi.raw_log_id = d.raw_log_id AND efi.block_number = d.block_number AND efi.field_name = "
+                " AND EXISTS (SELECT 1 FROM eventlake_event_field_index efi WHERE efi.raw_log_id = d.raw_log_id AND efi.block_number = d.block_number AND efi.field_name = "
             );
             query_builder.push_bind(field_name.to_owned());
             query_builder.push(" AND efi.normalized_value ILIKE ");

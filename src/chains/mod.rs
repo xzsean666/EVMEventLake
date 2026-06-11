@@ -52,7 +52,7 @@ async fn list_chains(
         r#"
         SELECT chain_id, name, native_token_symbol, status, safe_confirmation_depth,
                default_max_block_window, rpc_notes, created_at, updated_at
-        FROM chains
+        FROM eventlake_chains
         ORDER BY chain_id
         "#,
     )
@@ -71,7 +71,7 @@ async fn get_chain(
         r#"
         SELECT chain_id, name, native_token_symbol, status, safe_confirmation_depth,
                default_max_block_window, rpc_notes, created_at, updated_at
-        FROM chains
+        FROM eventlake_chains
         WHERE chain_id = $1
         "#,
     )
@@ -92,7 +92,7 @@ async fn create_chain(
 
     let chain = sqlx::query_as::<_, ChainRecord>(
         r#"
-        INSERT INTO chains (
+        INSERT INTO eventlake_chains (
             chain_id, name, native_token_symbol, safe_confirmation_depth,
             default_max_block_window, rpc_notes
         )
@@ -125,7 +125,7 @@ pub async fn get_collection_policy(
     chain_id: i64,
 ) -> Result<(i64, i64), ApplicationError> {
     let row = sqlx::query_as::<_, (i64, i64)>(
-        "SELECT safe_confirmation_depth, default_max_block_window FROM chains WHERE chain_id = $1",
+        "SELECT safe_confirmation_depth, default_max_block_window FROM eventlake_chains WHERE chain_id = $1",
     )
     .bind(chain_id)
     .fetch_optional(pool)

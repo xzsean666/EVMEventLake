@@ -135,6 +135,7 @@ Documented:
 - Contract subscription creation with active uniqueness.
 - Background collector, decoder, indexer, and partition manager workers.
 - Raw log, decoded event, address index, and event field index storage schema.
+- Database namespace isolation with the `eventlake_` table prefix and `eventlake_sqlx_migrations`.
 - Search DSL endpoint.
 - Address, contract, and event explorer endpoints.
 - Dashboard summary endpoint.
@@ -212,3 +213,5 @@ Do not create duplicate active subscriptions for the same `chain_id + contract_a
 Do not generate SQL from unvalidated Search DSL fields.
 
 Preserve raw logs before any decode or index action.
+
+All EventLake-owned database tables must keep the `eventlake_` prefix. Tests must not drop shared schemas or unprefixed tables.

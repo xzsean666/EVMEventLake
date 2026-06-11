@@ -62,7 +62,7 @@ async fn list_abis(
     let records = sqlx::query_as::<_, AbiVersionRecord>(
         r#"
         SELECT id, name, version, abi_json, status, event_count, created_at
-        FROM abi_versions
+        FROM eventlake_abi_versions
         ORDER BY name, version DESC
         "#,
     )
@@ -94,7 +94,7 @@ async fn upload_abi(
         .map_err(|error| ApplicationError::BadRequest(format!("invalid ABI JSON: {error}")))?;
 
     let next_version = sqlx::query_as::<_, (i32,)>(
-        "SELECT COALESCE(MAX(version), 0) + 1 FROM abi_versions WHERE name = $1",
+        "SELECT COALESCE(MAX(version), 0) + 1 FROM eventlake_abi_versions WHERE name = $1",
     )
     .bind(&request.name)
     .fetch_one(&state.pool)
@@ -106,7 +106,7 @@ async fn upload_abi(
 
     let record = sqlx::query_as::<_, AbiVersionRecord>(
         r#"
-        INSERT INTO abi_versions (id, name, version, abi_json, event_count)
+        INSERT INTO eventlake_abi_versions (id, name, version, abi_json, event_count)
         VALUES ($1, $2, $3, $4, $5)
         RETURNING id, name, version, abi_json, status, event_count, created_at
         "#,
@@ -135,7 +135,7 @@ async fn delete_abi(
 
     let record = sqlx::query_as::<_, AbiVersionRecord>(
         r#"
-        UPDATE abi_versions
+        UPDATE eventlake_abi_versions
         SET status = 'deleted'
         WHERE id = $1
         RETURNING id, name, version, abi_json, status, event_count, created_at
@@ -156,7 +156,7 @@ async fn list_events(
     let records = sqlx::query_as::<_, EventRegistryRecord>(
         r#"
         SELECT id, abi_id, event_name, signature, topic0, inputs, indexed_inputs, anonymous, created_at
-        FROM event_registry
+        FROM eventlake_event_registry
         ORDER BY event_name, signature
         "#,
     )
@@ -170,7 +170,7 @@ pub async fn find_abi(pool: &sqlx::PgPool, id: Uuid) -> Result<AbiVersionRecord,
     sqlx::query_as::<_, AbiVersionRecord>(
         r#"
         SELECT id, name, version, abi_json, status, event_count, created_at
-        FROM abi_versions
+        FROM eventlake_abi_versions
         WHERE id = $1
         "#,
     )
@@ -189,7 +189,7 @@ pub async fn find_event_by_topic(
     let record = sqlx::query_as::<_, EventRegistryRecord>(
         r#"
         SELECT id, abi_id, event_name, signature, topic0, inputs, indexed_inputs, anonymous, created_at
-        FROM event_registry
+        FROM eventlake_event_registry
         WHERE abi_id = $1 AND topic0 = $2
         "#,
     )
@@ -230,7 +230,7 @@ async fn insert_event_registry_record(
 
     sqlx::query(
         r#"
-        INSERT INTO event_registry (
+        INSERT INTO eventlake_event_registry (
             id, abi_id, event_name, signature, topic0, inputs, indexed_inputs, anonymous
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)

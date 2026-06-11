@@ -99,7 +99,7 @@ async fn create_subscription(
 
     let record = sqlx::query_as::<_, SubscriptionRecord>(
         r#"
-        INSERT INTO subscriptions (
+        INSERT INTO eventlake_subscriptions (
             id, chain_id, contract_address, abi_id, start_block, current_block, realtime_enabled
         )
         VALUES ($1, $2, $3, $4, $5, $5, $6)
@@ -168,7 +168,7 @@ pub async fn runnable_subscriptions(
         r#"
         SELECT id, chain_id, contract_address, abi_id, start_block, current_block,
                target_block, status, realtime_enabled, active, error_message, created_at, updated_at
-        FROM subscriptions
+        FROM eventlake_subscriptions
         WHERE active = true
           AND status IN ('pending', 'historical_syncing', 'realtime_syncing', 'error')
         ORDER BY updated_at ASC
@@ -191,7 +191,7 @@ pub async fn update_checkpoint(
 ) -> Result<(), ApplicationError> {
     sqlx::query(
         r#"
-        UPDATE subscriptions
+        UPDATE eventlake_subscriptions
         SET current_block = $2,
             target_block = $3,
             status = $4,
@@ -217,7 +217,7 @@ pub async fn mark_subscription_error(
 ) -> Result<(), ApplicationError> {
     sqlx::query(
         r#"
-        UPDATE subscriptions
+        UPDATE eventlake_subscriptions
         SET status = 'error',
             error_message = $2,
             updated_at = now()
@@ -240,7 +240,7 @@ async fn find_subscription(
         r#"
         SELECT id, chain_id, contract_address, abi_id, start_block, current_block,
                target_block, status, realtime_enabled, active, error_message, created_at, updated_at
-        FROM subscriptions
+        FROM eventlake_subscriptions
         WHERE id = $1
         "#,
     )
@@ -259,7 +259,7 @@ async fn find_active_subscription_by_contract(
         r#"
         SELECT id, chain_id, contract_address, abi_id, start_block, current_block,
                target_block, status, realtime_enabled, active, error_message, created_at, updated_at
-        FROM subscriptions
+        FROM eventlake_subscriptions
         WHERE chain_id = $1 AND contract_address = $2 AND active = true
         "#,
     )
@@ -279,7 +279,7 @@ async fn update_status(
 ) -> Result<SubscriptionRecord, ApplicationError> {
     sqlx::query_as::<_, SubscriptionRecord>(
         r#"
-        UPDATE subscriptions
+        UPDATE eventlake_subscriptions
         SET status = $2,
             active = $3,
             updated_at = now()
@@ -304,7 +304,7 @@ async fn upsert_contract_registry(
 ) -> Result<(), ApplicationError> {
     sqlx::query(
         r#"
-        INSERT INTO contract_registry (id, chain_id, contract_address, abi_id)
+        INSERT INTO eventlake_contract_registry (id, chain_id, contract_address, abi_id)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (chain_id, contract_address) DO UPDATE
         SET abi_id = EXCLUDED.abi_id,
@@ -324,6 +324,6 @@ async fn upsert_contract_registry(
 const SELECT_SUBSCRIPTIONS: &str = r#"
 SELECT id, chain_id, contract_address, abi_id, start_block, current_block,
        target_block, status, realtime_enabled, active, error_message, created_at, updated_at
-FROM subscriptions
+FROM eventlake_subscriptions
 ORDER BY created_at DESC
 "#;

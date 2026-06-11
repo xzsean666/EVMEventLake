@@ -86,7 +86,7 @@ async fn address_explorer(
     let recent_events = sqlx::query_as::<_, AddressRecentEvent>(
         r#"
         SELECT chain_id, contract_address, event_name, field_name, block_number, transaction_hash
-        FROM address_index
+        FROM eventlake_address_index
         WHERE address = $1
         ORDER BY block_number DESC
         LIMIT 50
@@ -99,7 +99,7 @@ async fn address_explorer(
     let related_contracts = sqlx::query_as::<_, RelatedContract>(
         r#"
         SELECT chain_id, contract_address, COUNT(*)::BIGINT AS event_count
-        FROM address_index
+        FROM eventlake_address_index
         WHERE address = $1
         GROUP BY chain_id, contract_address
         ORDER BY event_count DESC
@@ -113,7 +113,7 @@ async fn address_explorer(
     let event_statistics = sqlx::query_as::<_, EventStatistic>(
         r#"
         SELECT event_name, COUNT(*)::BIGINT AS event_count
-        FROM address_index
+        FROM eventlake_address_index
         WHERE address = $1
         GROUP BY event_name
         ORDER BY event_count DESC
@@ -149,8 +149,8 @@ async fn contract_explorer(
                cr.first_seen_block,
                cr.last_seen_block,
                COALESCE(jsonb_agg(DISTINCT de.event_name) FILTER (WHERE de.event_name IS NOT NULL), '[]'::jsonb) AS event_types
-        FROM contract_registry cr
-        LEFT JOIN decoded_events de
+        FROM eventlake_contract_registry cr
+        LEFT JOIN eventlake_decoded_events de
           ON de.chain_id = cr.chain_id
          AND de.contract_address = cr.contract_address
         WHERE cr.chain_id = $1 AND cr.contract_address = $2
@@ -178,8 +178,8 @@ async fn event_explorer(
                jsonb_agg(DISTINCT er.topic0) AS topic0_values,
                COUNT(DISTINCT de.contract_address)::BIGINT AS contract_count,
                COUNT(de.id)::BIGINT AS total_count
-        FROM event_registry er
-        LEFT JOIN decoded_events de ON de.topic0 = er.topic0
+        FROM eventlake_event_registry er
+        LEFT JOIN eventlake_decoded_events de ON de.topic0 = er.topic0
         WHERE er.event_name = $1
         GROUP BY er.event_name
         "#,

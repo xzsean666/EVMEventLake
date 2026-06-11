@@ -34,7 +34,7 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
         .max_connections(5)
         .connect(&database_url)
         .await?;
-    reset_public_schema_for_e2e(&pool).await?;
+    reset_eventlake_namespace_before_migration(&pool).await?;
     database::migrate(&pool).await?;
     reset_eventlake_tables(&pool).await?;
 
@@ -205,13 +205,13 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
 
     indexing::partition_manager::ensure_partitions(&pool).await?;
     collector::worker::collect_once(&state).await?;
-    assert_eq!(count_rows(&pool, "raw_logs").await?, 1);
-    assert_eq!(count_rows(&pool, "decode_queue").await?, 1);
+    assert_eq!(count_rows(&pool, "eventlake_raw_logs").await?, 1);
+    assert_eq!(count_rows(&pool, "eventlake_decode_queue").await?, 1);
 
     decoder::worker::decode_once(&state).await?;
-    assert_eq!(count_rows(&pool, "decoded_events").await?, 1);
-    assert_eq!(count_rows(&pool, "address_index").await?, 2);
-    assert!(count_rows(&pool, "event_field_index").await? >= 3);
+    assert_eq!(count_rows(&pool, "eventlake_decoded_events").await?, 1);
+    assert_eq!(count_rows(&pool, "eventlake_address_index").await?, 2);
+    assert!(count_rows(&pool, "eventlake_event_field_index").await? >= 3);
 
     let search_by_event = post_json(
         &router,
@@ -311,14 +311,14 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
         reorg::BlockCheckpointResult::ReorgDetected { .. }
     ));
     assert_eq!(
-        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM raw_logs WHERE removed = true")
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM eventlake_raw_logs WHERE removed = true")
             .fetch_one(&pool)
             .await?
             .0,
         1
     );
-    assert_eq!(count_rows(&pool, "address_index").await?, 0);
-    assert_eq!(count_rows(&pool, "event_field_index").await?, 0);
+    assert_eq!(count_rows(&pool, "eventlake_address_index").await?, 0);
+    assert_eq!(count_rows(&pool, "eventlake_event_field_index").await?, 0);
 
     assert_ok(
         post_json(
@@ -347,7 +347,7 @@ async fn assert_authentication_modes(database_url: &str, pool: PgPool) -> anyhow
 
     sqlx::query(
         r#"
-        INSERT INTO api_keys (id, name, key_hash, role)
+        INSERT INTO eventlake_api_keys (id, name, key_hash, role)
         VALUES ($1, 'e2e-auth-admin', $2, 'admin'),
                ($3, 'e2e-auth-readonly', $4, 'read_only')
         "#,
@@ -471,18 +471,18 @@ async fn reset_eventlake_tables(pool: &PgPool) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         TRUNCATE TABLE
-            api_keys,
-            event_field_index,
-            address_index,
-            decoded_events,
-            decode_queue,
-            raw_logs,
-            block_checkpoints,
-            subscriptions,
-            contract_registry,
-            event_registry,
-            abi_versions,
-            rpc_endpoints
+            eventlake_api_keys,
+            eventlake_event_field_index,
+            eventlake_address_index,
+            eventlake_decoded_events,
+            eventlake_decode_queue,
+            eventlake_raw_logs,
+            eventlake_block_checkpoints,
+            eventlake_subscriptions,
+            eventlake_contract_registry,
+            eventlake_event_registry,
+            eventlake_abi_versions,
+            eventlake_rpc_endpoints
         RESTART IDENTITY CASCADE
         "#,
     )
@@ -492,14 +492,29 @@ async fn reset_eventlake_tables(pool: &PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn reset_public_schema_for_e2e(pool: &PgPool) -> anyhow::Result<()> {
-    sqlx::query("DROP SCHEMA IF EXISTS public CASCADE")
-        .execute(pool)
-        .await?;
-    sqlx::query("CREATE SCHEMA public").execute(pool).await?;
-    sqlx::query("GRANT ALL ON SCHEMA public TO PUBLIC")
-        .execute(pool)
-        .await?;
+async fn reset_eventlake_namespace_before_migration(pool: &PgPool) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        DROP TABLE IF EXISTS
+            eventlake_api_keys,
+            eventlake_event_field_index,
+            eventlake_address_index,
+            eventlake_decoded_events,
+            eventlake_decode_queue,
+            eventlake_raw_logs,
+            eventlake_block_checkpoints,
+            eventlake_subscriptions,
+            eventlake_contract_registry,
+            eventlake_event_registry,
+            eventlake_abi_versions,
+            eventlake_rpc_endpoints,
+            eventlake_chains,
+            eventlake_sqlx_migrations
+        CASCADE
+        "#,
+    )
+    .execute(pool)
+    .await?;
 
     Ok(())
 }

@@ -134,7 +134,7 @@ async fn store_raw_log(
     let raw_log_id = sqlx::query_as::<_, (Uuid,)>(
         r#"
         WITH inserted AS (
-            INSERT INTO raw_logs (
+            INSERT INTO eventlake_raw_logs (
                 id, subscription_id, chain_id, contract_address, block_number, block_hash,
                 transaction_hash, transaction_index, log_index, topics, data, removed
             )
@@ -144,7 +144,7 @@ async fn store_raw_log(
         )
         SELECT id FROM inserted
         UNION ALL
-        SELECT id FROM raw_logs
+        SELECT id FROM eventlake_raw_logs
         WHERE chain_id = $3
           AND transaction_hash = $7
           AND log_index = $9
@@ -170,7 +170,7 @@ async fn store_raw_log(
 
     sqlx::query(
         r#"
-        INSERT INTO decode_queue (id, raw_log_id, block_number, subscription_id)
+        INSERT INTO eventlake_decode_queue (id, raw_log_id, block_number, subscription_id)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (raw_log_id, block_number) DO NOTHING
         "#,
