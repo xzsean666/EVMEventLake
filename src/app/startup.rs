@@ -1,24 +1,33 @@
 use std::net::SocketAddr;
 
+use axum::http::HeaderValue;
 use tokio::net::TcpListener;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{
+    cors::{Any, CorsLayer},
+    trace::TraceLayer,
+};
 
 use crate::{
     api, app::application_state::ApplicationState, background,
     configuration::ApplicationConfiguration, database,
 };
 
+const DEFAULT_JWT_SECRET: &str = "change-me";
+
 pub async fn run(configuration: ApplicationConfiguration) -> anyhow::Result<()> {
+    validate_security(&configuration)?;
+
     let pool = database::connect(&configuration.database).await?;
     database::migrate(&pool).await?;
 
     let address = SocketAddr::new(configuration.http.host, configuration.http.port);
+    let cors = build_cors_layer(&configuration.http.cors_allowed_origins);
     let state = ApplicationState::new(configuration, pool);
 
     background::spawn_workers(state.clone());
 
     let router = api::routes::build_router(state)
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .layer(TraceLayer::new_for_http());
 
     let listener = TcpListener::bind(address).await?;
@@ -29,6 +38,49 @@ pub async fn run(configuration: ApplicationConfiguration) -> anyhow::Result<()> 
         .await?;
 
     Ok(())
+}
+
+/// Guards against shipping insecure auth defaults: a default JWT secret with auth on is a
+/// hard error, and running with auth disabled is allowed but loudly warned about.
+fn validate_security(configuration: &ApplicationConfiguration) -> anyhow::Result<()> {
+    if configuration.auth.require_authentication {
+        if configuration.auth.jwt_secret == DEFAULT_JWT_SECRET {
+            anyhow::bail!(
+                "EVENTLAKE_JWT_SECRET is still the default value; set a strong secret when EVENTLAKE_REQUIRE_AUTHENTICATION=true"
+            );
+        }
+    } else {
+        tracing::warn!(
+            "authentication is DISABLED (EVENTLAKE_REQUIRE_AUTHENTICATION=false): every request is treated as admin"
+        );
+    }
+
+    Ok(())
+}
+
+/// An empty allowlist means permissive CORS (convenient for local development); otherwise
+/// only the configured origins are accepted.
+fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
+    if allowed_origins.is_empty() {
+        tracing::warn!("CORS is permissive (no EVENTLAKE_CORS_ALLOWED_ORIGINS configured)");
+        return CorsLayer::permissive();
+    }
+
+    let origins: Vec<HeaderValue> = allowed_origins
+        .iter()
+        .filter_map(|origin| match origin.parse::<HeaderValue>() {
+            Ok(value) => Some(value),
+            Err(_) => {
+                tracing::warn!(origin = %origin, "ignoring invalid CORS origin");
+                None
+            }
+        })
+        .collect();
+
+    CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods(Any)
+        .allow_headers(Any)
 }
 
 async fn shutdown_signal() {

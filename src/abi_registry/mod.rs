@@ -1,3 +1,5 @@
+use std::{collections::HashMap, sync::Arc};
+
 use alloy_json_abi::{Event, JsonAbi};
 use axum::{
     Json, Router,
@@ -17,6 +19,52 @@ use crate::{
     auth::AuthenticatedPrincipal,
     shared::{error::ApplicationError, validation::normalize_topic},
 };
+
+/// A parsed ABI ready for decoding, indexed by `topic0` for O(1) event lookup.
+///
+/// ABIs are immutable once uploaded (deletion only flips a status flag), so a cached
+/// entry never goes stale and can be shared across decode workers via `Arc`.
+pub struct CachedAbi {
+    events_by_topic0: HashMap<String, Event>,
+}
+
+impl CachedAbi {
+    pub fn event_for_topic0(&self, topic0: &str) -> Option<&Event> {
+        self.events_by_topic0.get(topic0)
+    }
+}
+
+/// Returns the parsed ABI for `abi_id`, loading and caching it on first use.
+pub async fn load_cached_abi(
+    state: &ApplicationState,
+    abi_id: Uuid,
+) -> Result<Arc<CachedAbi>, ApplicationError> {
+    if let Some(cached) = state
+        .abi_cache
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&abi_id)
+        .cloned()
+    {
+        return Ok(cached);
+    }
+
+    let record = find_abi(&state.pool, abi_id).await?;
+    let abi = parse_abi_from_value(&record.abi_json)?;
+    let mut events_by_topic0 = HashMap::new();
+    for event in abi.events.values().flatten() {
+        events_by_topic0.insert(event_topic0(event), event.clone());
+    }
+    let cached = Arc::new(CachedAbi { events_by_topic0 });
+
+    state
+        .abi_cache
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(abi_id, Arc::clone(&cached));
+
+    Ok(cached)
+}
 
 pub fn routes() -> Router<ApplicationState> {
     Router::new()
@@ -93,16 +141,20 @@ async fn upload_abi(
     let parsed_abi = JsonAbi::from_json_str(&abi_json_text)
         .map_err(|error| ApplicationError::BadRequest(format!("invalid ABI JSON: {error}")))?;
 
+    let abi_id = Uuid::new_v4();
+    let event_count = parsed_abi.events.values().map(Vec::len).sum::<usize>() as i32;
+
+    // The version bump, the ABI row, and its event registry rows must land together,
+    // otherwise a crash mid-insert leaves an ABI with a partial event set.
+    let mut transaction = state.pool.begin().await?;
+
     let next_version = sqlx::query_as::<_, (i32,)>(
         "SELECT COALESCE(MAX(version), 0) + 1 FROM eventlake_abi_versions WHERE name = $1",
     )
     .bind(&request.name)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *transaction)
     .await?
     .0;
-
-    let abi_id = Uuid::new_v4();
-    let event_count = parsed_abi.events.values().map(Vec::len).sum::<usize>() as i32;
 
     let record = sqlx::query_as::<_, AbiVersionRecord>(
         r#"
@@ -116,12 +168,14 @@ async fn upload_abi(
     .bind(next_version)
     .bind(&request.abi_json)
     .bind(event_count)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *transaction)
     .await?;
 
     for event in parsed_abi.events.values().flatten() {
-        insert_event_registry_record(&state.pool, abi_id, event).await?;
+        insert_event_registry_record(&mut transaction, abi_id, event).await?;
     }
+
+    transaction.commit().await?;
 
     Ok(response::success(record))
 }
@@ -213,7 +267,7 @@ fn event_topic0(event: &Event) -> String {
 }
 
 async fn insert_event_registry_record(
-    pool: &sqlx::PgPool,
+    connection: &mut sqlx::PgConnection,
     abi_id: Uuid,
     event: &Event,
 ) -> Result<(), ApplicationError> {
@@ -245,7 +299,7 @@ async fn insert_event_registry_record(
     .bind(inputs)
     .bind(indexed_inputs)
     .bind(event.anonymous)
-    .execute(pool)
+    .execute(&mut *connection)
     .await?;
 
     Ok(())

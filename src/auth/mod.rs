@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, request::Parts},
     routing::post,
 };
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Utc};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -18,7 +18,12 @@ use crate::{
 };
 
 pub fn routes() -> Router<ApplicationState> {
-    Router::new().route("/api/auth/api-keys", post(create_api_key))
+    Router::new()
+        .route(
+            "/api/auth/api-keys",
+            post(create_api_key).get(list_api_keys),
+        )
+        .route("/api/auth/api-keys/{id}/revoke", post(revoke_api_key))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -52,6 +57,9 @@ pub struct CreateApiKeyResponse {
 struct JwtClaims {
     sub: String,
     role: String,
+    // Required so tokens without an expiry fail to deserialize; the actual expiry check
+    // is performed by `Validation`.
+    #[allow(dead_code)]
     exp: i64,
 }
 
@@ -59,6 +67,16 @@ struct JwtClaims {
 struct ApiKeyRecord {
     id: uuid::Uuid,
     role: String,
+}
+
+#[derive(Debug, Serialize, FromRow, ToSchema)]
+pub struct ApiKeySummary {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub role: String,
+    pub revoked: bool,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
 }
 
 impl Role {
@@ -149,6 +167,8 @@ fn authenticate_jwt(
     state: &ApplicationState,
     token: &str,
 ) -> Result<AuthenticatedPrincipal, ApplicationError> {
+    // `Validation` already enforces `exp` (with the configured leeway), so no manual
+    // expiry check is needed here.
     let mut validation = Validation::new(Algorithm::HS256);
     validation.leeway = 30;
 
@@ -158,10 +178,6 @@ fn authenticate_jwt(
         &validation,
     )
     .map_err(|_| ApplicationError::Unauthorized)?;
-
-    if token_data.claims.exp < Utc::now().timestamp() - Duration::seconds(30).num_seconds() {
-        return Err(ApplicationError::Unauthorized);
-    }
 
     Ok(AuthenticatedPrincipal {
         subject: token_data.claims.sub,
@@ -221,10 +237,44 @@ async fn create_api_key(
     }))
 }
 
-pub async fn require_admin(
-    State(_state): State<ApplicationState>,
+async fn list_api_keys(
     principal: AuthenticatedPrincipal,
-) -> Result<AuthenticatedPrincipal, ApplicationError> {
+    State(state): State<ApplicationState>,
+) -> Result<Json<ApiResponse<Vec<ApiKeySummary>>>, ApplicationError> {
     principal.require_admin()?;
-    Ok(principal)
+
+    let records = sqlx::query_as::<_, ApiKeySummary>(
+        r#"
+        SELECT id, name, role, revoked, created_at, last_used_at
+        FROM eventlake_api_keys
+        ORDER BY created_at DESC
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
+    Ok(response::success(records))
+}
+
+async fn revoke_api_key(
+    principal: AuthenticatedPrincipal,
+    State(state): State<ApplicationState>,
+    axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<ApiResponse<ApiKeySummary>>, ApplicationError> {
+    principal.require_admin()?;
+
+    let record = sqlx::query_as::<_, ApiKeySummary>(
+        r#"
+        UPDATE eventlake_api_keys
+        SET revoked = true
+        WHERE id = $1
+        RETURNING id, name, role, revoked, created_at, last_used_at
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| ApplicationError::NotFound(format!("api key {id}")))?;
+
+    Ok(response::success(record))
 }

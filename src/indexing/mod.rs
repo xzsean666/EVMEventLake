@@ -1,10 +1,8 @@
 use serde_json::Value;
+use sqlx::QueryBuilder;
 use uuid::Uuid;
 
-use crate::{
-    app::application_state::ApplicationState,
-    shared::{error::ApplicationError, validation::normalize_address},
-};
+use crate::shared::{error::ApplicationError, validation::normalize_address};
 
 pub mod partition_manager;
 
@@ -27,61 +25,81 @@ pub struct DecodedEventIndexInput {
     pub fields: Vec<DecodedFieldValue>,
 }
 
+/// Builds the address and event-field indexes for a single decoded event.
+///
+/// Each index is written as one multi-row insert instead of a query per field, so an
+/// event with N fields costs at most two round trips rather than up to 2N.
 pub async fn index_decoded_event(
-    pool: &sqlx::PgPool,
+    connection: &mut sqlx::PgConnection,
     input: DecodedEventIndexInput,
 ) -> Result<(), ApplicationError> {
-    for field in input.fields {
-        if normalize_address(&field.normalized_value).is_ok() {
-            sqlx::query(
-                r#"
-                INSERT INTO eventlake_address_index (
-                    id, chain_id, address, contract_address, event_name, field_name,
-                    raw_log_id, block_number, transaction_hash
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                ON CONFLICT (chain_id, address, raw_log_id, field_name, block_number) DO NOTHING
-                "#,
-            )
-            .bind(Uuid::new_v4())
-            .bind(input.chain_id)
-            .bind(field.normalized_value.clone())
-            .bind(&input.contract_address)
-            .bind(&input.event_name)
-            .bind(&field.field_name)
-            .bind(input.raw_log_id)
-            .bind(input.block_number)
-            .bind(&input.transaction_hash)
-            .execute(pool)
-            .await?;
-        }
+    let address_fields: Vec<&DecodedFieldValue> = input
+        .fields
+        .iter()
+        .filter(|field| normalize_address(&field.normalized_value).is_ok())
+        .collect();
 
-        if should_index_field_value(&field.json_value) {
-            sqlx::query(
-                r#"
-                INSERT INTO eventlake_event_field_index (
-                    id, chain_id, contract_address, event_name, field_name, field_type,
-                    normalized_value, raw_log_id, block_number
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                ON CONFLICT (
-                    chain_id, contract_address, event_name, field_name,
-                    normalized_value, raw_log_id, block_number
-                ) DO NOTHING
-                "#,
+    if !address_fields.is_empty() {
+        let mut builder = QueryBuilder::new(
+            r#"
+            INSERT INTO eventlake_address_index (
+                id, chain_id, address, contract_address, event_name, field_name,
+                raw_log_id, block_number, transaction_hash
             )
-            .bind(Uuid::new_v4())
-            .bind(input.chain_id)
-            .bind(&input.contract_address)
-            .bind(&input.event_name)
-            .bind(&field.field_name)
-            .bind(&field.field_type)
-            .bind(&field.normalized_value)
-            .bind(input.raw_log_id)
-            .bind(input.block_number)
-            .execute(pool)
-            .await?;
-        }
+            "#,
+        );
+        builder.push_values(address_fields, |mut row, field| {
+            row.push_bind(Uuid::new_v4())
+                .push_bind(input.chain_id)
+                .push_bind(field.normalized_value.clone())
+                .push_bind(input.contract_address.clone())
+                .push_bind(input.event_name.clone())
+                .push_bind(field.field_name.clone())
+                .push_bind(input.raw_log_id)
+                .push_bind(input.block_number)
+                .push_bind(input.transaction_hash.clone());
+        });
+        builder.push(
+            " ON CONFLICT (chain_id, address, raw_log_id, field_name, block_number) DO NOTHING",
+        );
+        builder.build().execute(&mut *connection).await?;
+    }
+
+    let value_fields: Vec<&DecodedFieldValue> = input
+        .fields
+        .iter()
+        .filter(|field| should_index_field_value(&field.json_value))
+        .collect();
+
+    if !value_fields.is_empty() {
+        let mut builder = QueryBuilder::new(
+            r#"
+            INSERT INTO eventlake_event_field_index (
+                id, chain_id, contract_address, event_name, field_name, field_type,
+                normalized_value, raw_log_id, block_number
+            )
+            "#,
+        );
+        builder.push_values(value_fields, |mut row, field| {
+            row.push_bind(Uuid::new_v4())
+                .push_bind(input.chain_id)
+                .push_bind(input.contract_address.clone())
+                .push_bind(input.event_name.clone())
+                .push_bind(field.field_name.clone())
+                .push_bind(field.field_type.clone())
+                .push_bind(field.normalized_value.clone())
+                .push_bind(input.raw_log_id)
+                .push_bind(input.block_number);
+        });
+        builder.push(
+            r#"
+            ON CONFLICT (
+                chain_id, contract_address, event_name, field_name,
+                normalized_value, raw_log_id, block_number
+            ) DO NOTHING
+            "#,
+        );
+        builder.build().execute(&mut *connection).await?;
     }
 
     Ok(())
@@ -89,15 +107,4 @@ pub async fn index_decoded_event(
 
 fn should_index_field_value(value: &Value) -> bool {
     matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_))
-}
-
-#[allow(dead_code)]
-pub async fn reindex_decoded_event(
-    _state: &ApplicationState,
-    _raw_log_id: Uuid,
-    _block_number: i64,
-) -> Result<(), ApplicationError> {
-    Err(ApplicationError::Internal(
-        "single event reindex is not implemented yet".to_owned(),
-    ))
 }

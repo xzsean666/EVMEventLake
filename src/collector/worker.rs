@@ -1,4 +1,5 @@
-use serde_json::Value;
+use std::collections::HashSet;
+
 use tokio::time::{MissedTickBehavior, interval};
 use uuid::Uuid;
 
@@ -146,8 +147,36 @@ async fn collect_subscription(
         };
 
         let log_count = logs.len();
-        for log in logs {
-            store_raw_log(&state.pool, subscription, &log).await?;
+
+        // Observe each block once (logs share a block hash within a block) to detect
+        // reorgs cheaply. If the chain reorganised, `observe_block` has already
+        // invalidated the affected range and rewound this subscription, so we abort and
+        // let the next tick re-collect the canonical fork instead of advancing.
+        let mut observed_blocks = HashSet::new();
+        for log in &logs {
+            let block_number = parse_hex_u64(&log.block_number)?;
+            if observed_blocks.insert(block_number) {
+                let result = reorg::observe_block(
+                    &state.pool,
+                    subscription.chain_id,
+                    block_number,
+                    &log.block_hash,
+                )
+                .await?;
+                if matches!(result, reorg::BlockCheckpointResult::ReorgDetected { .. }) {
+                    tracing::warn!(
+                        subscription_id = %subscription.id,
+                        chain_id = subscription.chain_id,
+                        block_number,
+                        "reorg detected during collection; aborting tick to re-collect"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        for log in &logs {
+            store_raw_log(&state.pool, subscription, log).await?;
         }
 
         let next_block = to_block + 1;
@@ -189,27 +218,27 @@ async fn store_raw_log(
     let topics_value = serde_json::to_value(&topics)
         .map_err(|error| ApplicationError::BadRequest(error.to_string()))?;
 
-    reorg::observe_block(pool, subscription.chain_id, block_number, &log.block_hash).await?;
+    // The raw log and its decode-queue entry must be written together: a raw log with no
+    // queue entry would silently never be decoded.
+    let mut transaction = pool.begin().await?;
 
+    // On re-collection (e.g. after a reorg rewind) the log already exists and is flagged
+    // removed; the upsert clears that flag and refreshes the block hash so the canonical
+    // fork supersedes the stale row instead of being dropped by the unique index.
     let raw_log_id = sqlx::query_as::<_, (Uuid,)>(
         r#"
-        WITH inserted AS (
-            INSERT INTO eventlake_raw_logs (
-                id, subscription_id, chain_id, contract_address, block_number, block_hash,
-                transaction_hash, transaction_index, log_index, topics, data, removed
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            ON CONFLICT (chain_id, transaction_hash, log_index, block_number) DO NOTHING
-            RETURNING id
+        INSERT INTO eventlake_raw_logs (
+            id, subscription_id, chain_id, contract_address, block_number, block_hash,
+            transaction_hash, transaction_index, log_index, topics, data, removed
         )
-        SELECT id FROM inserted
-        UNION ALL
-        SELECT id FROM eventlake_raw_logs
-        WHERE chain_id = $3
-          AND transaction_hash = $7
-          AND log_index = $9
-          AND block_number = $5
-        LIMIT 1
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ON CONFLICT (chain_id, transaction_hash, log_index, block_number) DO UPDATE
+        SET removed = false,
+            block_hash = EXCLUDED.block_hash,
+            data = EXCLUDED.data,
+            topics = EXCLUDED.topics,
+            ingested_at = now()
+        RETURNING id
         "#,
     )
     .bind(Uuid::new_v4())
@@ -224,23 +253,32 @@ async fn store_raw_log(
     .bind(topics_value)
     .bind(&log.data)
     .bind(log.removed.unwrap_or(false))
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await?
     .0;
 
+    // Reset the queue entry to pending on conflict so a re-collected log is decoded again
+    // against the canonical fork. In steady state blocks are collected exactly once, so
+    // this only fires on genuine re-collection.
     sqlx::query(
         r#"
         INSERT INTO eventlake_decode_queue (id, raw_log_id, block_number, subscription_id)
         VALUES ($1, $2, $3, $4)
-        ON CONFLICT (raw_log_id, block_number) DO NOTHING
+        ON CONFLICT (raw_log_id, block_number) DO UPDATE
+        SET status = 'pending',
+            attempt_count = 0,
+            last_error = NULL,
+            updated_at = now()
         "#,
     )
     .bind(Uuid::new_v4())
     .bind(raw_log_id)
     .bind(block_number)
     .bind(subscription.id)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
+
+    transaction.commit().await?;
 
     Ok(())
 }
@@ -309,11 +347,6 @@ fn is_get_logs_window_error(error: &ApplicationError) -> bool {
         || message.contains("gateway timeout")
         || message.contains("timed out")
         || message.contains("timeout")
-}
-
-#[allow(dead_code)]
-fn topics_as_value(topics: &[String]) -> Value {
-    serde_json::to_value(topics).unwrap_or_else(|_| serde_json::json!([]))
 }
 
 #[cfg(test)]

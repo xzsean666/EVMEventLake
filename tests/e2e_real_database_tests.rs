@@ -678,6 +678,7 @@ fn build_test_state(
             http: configuration::HttpConfiguration {
                 host: "127.0.0.1".parse().expect("test host parses"),
                 port: 0,
+                cors_allowed_origins: Vec::new(),
             },
             database: configuration::DatabaseConfiguration {
                 database_url,
@@ -691,6 +692,7 @@ fn build_test_state(
                 workers_enabled: false,
                 worker_tick: Duration::from_millis(50),
                 decode_batch_size: 100,
+                partition_tick: Duration::from_secs(300),
             },
             telemetry: configuration::TelemetryConfiguration {
                 log_level: "debug".to_owned(),

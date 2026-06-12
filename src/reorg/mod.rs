@@ -44,7 +44,12 @@ pub async fn observe_block(
             Ok(BlockCheckpointResult::SameBlock)
         }
         Some((previous_hash,)) => {
-            mark_reorg_range_invalid(pool, chain_id, block_number).await?;
+            // The block hash changed: everything from this block onward on this chain is
+            // suspect. Invalidate it and rewind affected subscriptions atomically so the
+            // collector re-fetches the canonical fork. Either it all happens or none of it.
+            let mut transaction = pool.begin().await?;
+            invalidate_from_block(&mut transaction, chain_id, block_number).await?;
+
             sqlx::query(
                 r#"
                 UPDATE eventlake_block_checkpoints
@@ -56,8 +61,10 @@ pub async fn observe_block(
             .bind(chain_id)
             .bind(block_number)
             .bind(block_hash)
-            .execute(pool)
+            .execute(&mut *transaction)
             .await?;
+
+            transaction.commit().await?;
 
             Ok(BlockCheckpointResult::ReorgDetected {
                 previous_hash,
@@ -67,11 +74,13 @@ pub async fn observe_block(
     }
 }
 
-async fn mark_reorg_range_invalid(
-    pool: &sqlx::PgPool,
+async fn invalidate_from_block(
+    connection: &mut sqlx::PgConnection,
     chain_id: i64,
     from_block: i64,
 ) -> Result<(), ApplicationError> {
+    // Raw logs are preserved (per the "keep raw logs permanently" rule) but flagged so
+    // collection can re-ingest the canonical fork without violating the unique index.
     sqlx::query(
         r#"
         UPDATE eventlake_raw_logs
@@ -81,9 +90,26 @@ async fn mark_reorg_range_invalid(
     )
     .bind(chain_id)
     .bind(from_block)
-    .execute(pool)
+    .execute(&mut *connection)
     .await?;
 
+    // Decoded events are kept for audit but flipped out of the 'decoded' status so the
+    // search path stops returning reorged data immediately.
+    sqlx::query(
+        r#"
+        UPDATE eventlake_decoded_events
+        SET decode_status = 'reorged',
+            decode_error = 'invalidated by reorg',
+            decoded_at = now()
+        WHERE chain_id = $1 AND block_number >= $2 AND decode_status = 'decoded'
+        "#,
+    )
+    .bind(chain_id)
+    .bind(from_block)
+    .execute(&mut *connection)
+    .await?;
+
+    // The derived indexes are rebuilt from scratch on re-decode, so they are deleted.
     sqlx::query(
         r#"
         DELETE FROM eventlake_address_index
@@ -92,7 +118,7 @@ async fn mark_reorg_range_invalid(
     )
     .bind(chain_id)
     .bind(from_block)
-    .execute(pool)
+    .execute(&mut *connection)
     .await?;
 
     sqlx::query(
@@ -103,7 +129,24 @@ async fn mark_reorg_range_invalid(
     )
     .bind(chain_id)
     .bind(from_block)
-    .execute(pool)
+    .execute(&mut *connection)
+    .await?;
+
+    // Rewind subscriptions that had advanced past the reorg point so the collector
+    // re-fetches the affected range on its next tick.
+    sqlx::query(
+        r#"
+        UPDATE eventlake_subscriptions
+        SET current_block = $2,
+            status = 'pending',
+            error_message = 'rewound after chain reorg',
+            updated_at = now()
+        WHERE chain_id = $1 AND active = true AND current_block > $2
+        "#,
+    )
+    .bind(chain_id)
+    .bind(from_block)
+    .execute(&mut *connection)
     .await?;
 
     Ok(())

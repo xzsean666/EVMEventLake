@@ -5,7 +5,7 @@ use crate::{app::application_state::ApplicationState, shared::error::Application
 const PARTITION_BLOCK_SIZE: i64 = 1_000_000;
 
 pub async fn run(state: ApplicationState) {
-    let mut ticker = interval(state.configuration.background.worker_tick);
+    let mut ticker = interval(state.configuration.background.partition_tick);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {

@@ -15,6 +15,8 @@ use crate::{
     shared::{error::ApplicationError, validation::normalize_topic},
 };
 
+const MAX_DECODE_ATTEMPTS: i32 = 5;
+
 #[derive(Debug, FromRow)]
 struct DecodeWorkItem {
     queue_id: Uuid,
@@ -44,17 +46,16 @@ pub async fn decode_once(state: &ApplicationState) -> Result<(), ApplicationErro
     let batch = fetch_decode_batch(state).await?;
 
     for item in batch {
-        match decode_work_item(state, &item).await {
-            Ok(()) => mark_queue_status(&state.pool, item.queue_id, "decoded", None).await?,
-            Err(error) => {
-                mark_queue_status(
-                    &state.pool,
-                    item.queue_id,
-                    "error",
-                    Some(&error.public_message()),
-                )
-                .await?;
-            }
+        // The success path marks the queue entry inside its own transaction, so here we
+        // only need to record failures.
+        if let Err(error) = decode_work_item(state, &item).await {
+            mark_queue_status(
+                &state.pool,
+                item.queue_id,
+                "error",
+                Some(&error.public_message()),
+            )
+            .await?;
         }
     }
 
@@ -80,12 +81,13 @@ async fn fetch_decode_batch(
         LEFT JOIN eventlake_subscriptions s ON s.id = dq.subscription_id
         WHERE dq.status IN ('pending', 'error')
           AND rl.removed = false
-          AND dq.attempt_count < 5
+          AND dq.attempt_count < $2
         ORDER BY dq.created_at
         LIMIT $1
         "#,
     )
     .bind(state.configuration.background.decode_batch_size)
+    .bind(MAX_DECODE_ATTEMPTS)
     .fetch_all(&state.pool)
     .await?;
 
@@ -100,13 +102,14 @@ async fn decode_work_item(
         .abi_id
         .ok_or_else(|| ApplicationError::BadRequest("raw log has no ABI association".to_owned()))?;
     let topic0 = topic0_from_value(&item.topics)?;
-    let event_record = abi_registry::find_event_by_topic(&state.pool, abi_id, &topic0)
-        .await?
+
+    // Pull the parsed ABI from the in-memory cache instead of re-reading and re-parsing
+    // the ABI JSON from the database on every single log.
+    let cached_abi = abi_registry::load_cached_abi(state, abi_id).await?;
+    let event = cached_abi
+        .event_for_topic0(&topic0)
         .ok_or_else(|| ApplicationError::BadRequest(format!("no ABI event for topic0 {topic0}")))?;
-    let abi_record = abi_registry::find_abi(&state.pool, abi_id).await?;
-    let abi = abi_registry::parse_abi_from_value(&abi_record.abi_json)?;
-    let event = find_event(&abi, &topic0)
-        .ok_or_else(|| ApplicationError::BadRequest(format!("event not found in ABI: {topic0}")))?;
+    let event_name = event.name.clone();
 
     let topics = parse_topics(&item.topics)?;
     let data = parse_data(&item.data)?;
@@ -117,22 +120,23 @@ async fn decode_work_item(
     let decoded_fields = decoded_event_fields(event, decoded.indexed, decoded.body)?;
     let decoded_event_id = Uuid::new_v4();
 
-    sqlx::query(
+    // The decoded event, its derived indexes, the contract activity bump, and the queue
+    // status are one logical unit and are committed together.
+    let mut transaction = state.pool.begin().await?;
+
+    // Partitioned tables cannot return system columns (e.g. xmax), so we detect a fresh
+    // insert with DO NOTHING + RETURNING. On a real insert the row is complete; on a
+    // re-decode (conflict) we refresh the decoded fields with an explicit UPDATE. The
+    // contract event_count is bumped only on first insert, avoiding drift on re-decode.
+    let inserted = sqlx::query_as::<_, (Uuid,)>(
         r#"
         INSERT INTO eventlake_decoded_events (
             id, raw_log_id, block_number, chain_id, contract_address, abi_id, event_name,
             topic0, indexed_fields, non_indexed_fields, decode_status
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'decoded')
-        ON CONFLICT (raw_log_id, block_number) DO UPDATE
-        SET abi_id = EXCLUDED.abi_id,
-            event_name = EXCLUDED.event_name,
-            topic0 = EXCLUDED.topic0,
-            indexed_fields = EXCLUDED.indexed_fields,
-            non_indexed_fields = EXCLUDED.non_indexed_fields,
-            decode_status = 'decoded',
-            decode_error = NULL,
-            decoded_at = now()
+        ON CONFLICT (raw_log_id, block_number) DO NOTHING
+        RETURNING id
         "#,
     )
     .bind(decoded_event_id)
@@ -141,19 +145,46 @@ async fn decode_work_item(
     .bind(item.chain_id)
     .bind(&item.contract_address)
     .bind(abi_id)
-    .bind(&event_record.event_name)
-    .bind(&event_record.topic0)
+    .bind(&event_name)
+    .bind(&topic0)
     .bind(&decoded_fields.indexed_json)
     .bind(&decoded_fields.non_indexed_json)
-    .execute(&state.pool)
-    .await?;
+    .fetch_optional(&mut *transaction)
+    .await?
+    .is_some();
+
+    if !inserted {
+        sqlx::query(
+            r#"
+            UPDATE eventlake_decoded_events
+            SET abi_id = $3,
+                event_name = $4,
+                topic0 = $5,
+                indexed_fields = $6,
+                non_indexed_fields = $7,
+                decode_status = 'decoded',
+                decode_error = NULL,
+                decoded_at = now()
+            WHERE raw_log_id = $1 AND block_number = $2
+            "#,
+        )
+        .bind(item.raw_log_id)
+        .bind(item.block_number)
+        .bind(abi_id)
+        .bind(&event_name)
+        .bind(&topic0)
+        .bind(&decoded_fields.indexed_json)
+        .bind(&decoded_fields.non_indexed_json)
+        .execute(&mut *transaction)
+        .await?;
+    }
 
     indexing::index_decoded_event(
-        &state.pool,
+        &mut transaction,
         DecodedEventIndexInput {
             chain_id: item.chain_id,
             contract_address: item.contract_address.clone(),
-            event_name: event_record.event_name,
+            event_name,
             raw_log_id: item.raw_log_id,
             block_number: item.block_number,
             transaction_hash: item.transaction_hash.clone(),
@@ -162,23 +193,32 @@ async fn decode_work_item(
     )
     .await?;
 
-    update_contract_activity(
-        &state.pool,
-        item.chain_id,
-        &item.contract_address,
-        item.block_number,
-    )
-    .await?;
+    if inserted {
+        update_contract_activity(
+            &mut transaction,
+            item.chain_id,
+            &item.contract_address,
+            item.block_number,
+        )
+        .await?;
+    }
+
+    mark_queue_status(&mut *transaction, item.queue_id, "decoded", None).await?;
+
+    transaction.commit().await?;
 
     Ok(())
 }
 
-async fn mark_queue_status(
-    pool: &sqlx::PgPool,
+async fn mark_queue_status<'executor, E>(
+    executor: E,
     queue_id: Uuid,
     status: &str,
     last_error: Option<&str>,
-) -> Result<(), ApplicationError> {
+) -> Result<(), ApplicationError>
+where
+    E: sqlx::Executor<'executor, Database = sqlx::Postgres>,
+{
     sqlx::query(
         r#"
         UPDATE eventlake_decode_queue
@@ -192,14 +232,14 @@ async fn mark_queue_status(
     .bind(queue_id)
     .bind(status)
     .bind(last_error)
-    .execute(pool)
+    .execute(executor)
     .await?;
 
     Ok(())
 }
 
 async fn update_contract_activity(
-    pool: &sqlx::PgPool,
+    connection: &mut sqlx::PgConnection,
     chain_id: i64,
     contract_address: &str,
     block_number: i64,
@@ -219,18 +259,10 @@ async fn update_contract_activity(
     .bind(chain_id)
     .bind(contract_address)
     .bind(block_number)
-    .execute(pool)
+    .execute(&mut *connection)
     .await?;
 
     Ok(())
-}
-
-fn find_event<'a>(abi: &'a alloy_json_abi::JsonAbi, topic0: &str) -> Option<&'a Event> {
-    let topic0 = normalize_topic(topic0).ok()?;
-    abi.events
-        .values()
-        .flatten()
-        .find(|event| format!("{:#x}", event.selector()).to_ascii_lowercase() == topic0)
 }
 
 fn topic0_from_value(topics: &Value) -> Result<String, ApplicationError> {

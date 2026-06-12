@@ -68,11 +68,20 @@ pub struct CreateSubscriptionRequest {
     pub max_block_window: Option<i64>,
 }
 
+/// The full `SubscriptionRecord` column list, kept in one place so the many SELECT and
+/// RETURNING clauses below cannot drift out of sync with each other or the struct.
+const SUBSCRIPTION_COLUMNS: &str = "id, chain_id, contract_address, abi_id, start_block, \
+    current_block, target_block, min_block_window, max_block_window, current_block_window, \
+    status, realtime_enabled, active, error_message, created_at, updated_at";
+
 async fn list_subscriptions(
     _principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
 ) -> Result<Json<ApiResponse<Vec<SubscriptionRecord>>>, ApplicationError> {
-    let records = sqlx::query_as::<_, SubscriptionRecord>(SELECT_SUBSCRIPTIONS)
+    let query = format!(
+        "SELECT {SUBSCRIPTION_COLUMNS} FROM eventlake_subscriptions ORDER BY created_at DESC"
+    );
+    let records = sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(query))
         .fetch_all(&state.pool)
         .await?;
 
@@ -112,19 +121,18 @@ async fn create_subscription(
         .unwrap_or(collection_policy.default_max_block_window);
     validate_block_windows(min_block_window, max_block_window)?;
 
-    let record = sqlx::query_as::<_, SubscriptionRecord>(
+    let insert_query = format!(
         r#"
         INSERT INTO eventlake_subscriptions (
             id, chain_id, contract_address, abi_id, start_block, current_block,
             min_block_window, max_block_window, current_block_window, realtime_enabled
         )
         VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $7, $8)
-        RETURNING id, chain_id, contract_address, abi_id, start_block, current_block,
-                  target_block, min_block_window, max_block_window, current_block_window,
-                  status, realtime_enabled, active, error_message, created_at, updated_at
-        "#,
-    )
-    .bind(Uuid::new_v4())
+        RETURNING {SUBSCRIPTION_COLUMNS}
+        "#
+    );
+    let record = sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(insert_query))
+        .bind(Uuid::new_v4())
     .bind(request.chain_id)
     .bind(contract_address)
     .bind(request.abi_id)
@@ -183,21 +191,20 @@ pub async fn runnable_subscriptions(
     pool: &sqlx::PgPool,
     limit: i64,
 ) -> Result<Vec<SubscriptionRecord>, ApplicationError> {
-    let records = sqlx::query_as::<_, SubscriptionRecord>(
+    let query = format!(
         r#"
-        SELECT id, chain_id, contract_address, abi_id, start_block, current_block,
-               target_block, min_block_window, max_block_window, current_block_window,
-               status, realtime_enabled, active, error_message, created_at, updated_at
+        SELECT {SUBSCRIPTION_COLUMNS}
         FROM eventlake_subscriptions
         WHERE active = true
           AND status IN ('pending', 'historical_syncing', 'realtime_syncing', 'error')
         ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, updated_at ASC
         LIMIT $1
-        "#,
-    )
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
+        "#
+    );
+    let records = sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(query))
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
 
     Ok(records)
 }
@@ -284,19 +291,14 @@ async fn find_subscription(
     pool: &sqlx::PgPool,
     id: Uuid,
 ) -> Result<SubscriptionRecord, ApplicationError> {
-    sqlx::query_as::<_, SubscriptionRecord>(
-        r#"
-        SELECT id, chain_id, contract_address, abi_id, start_block, current_block,
-               target_block, min_block_window, max_block_window, current_block_window,
-               status, realtime_enabled, active, error_message, created_at, updated_at
-        FROM eventlake_subscriptions
-        WHERE id = $1
-        "#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| ApplicationError::NotFound(format!("subscription {id}")))
+    let query = format!(
+        "SELECT {SUBSCRIPTION_COLUMNS} FROM eventlake_subscriptions WHERE id = $1"
+    );
+    sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(query))
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| ApplicationError::NotFound(format!("subscription {id}")))
 }
 
 async fn find_active_subscription_by_contract(
@@ -304,19 +306,18 @@ async fn find_active_subscription_by_contract(
     chain_id: i64,
     contract_address: &str,
 ) -> Result<Option<SubscriptionRecord>, ApplicationError> {
-    let record = sqlx::query_as::<_, SubscriptionRecord>(
+    let query = format!(
         r#"
-        SELECT id, chain_id, contract_address, abi_id, start_block, current_block,
-               target_block, min_block_window, max_block_window, current_block_window,
-               status, realtime_enabled, active, error_message, created_at, updated_at
+        SELECT {SUBSCRIPTION_COLUMNS}
         FROM eventlake_subscriptions
         WHERE chain_id = $1 AND contract_address = $2 AND active = true
-        "#,
-    )
-    .bind(chain_id)
-    .bind(contract_address)
-    .fetch_optional(pool)
-    .await?;
+        "#
+    );
+    let record = sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(query))
+        .bind(chain_id)
+        .bind(contract_address)
+        .fetch_optional(pool)
+        .await?;
 
     Ok(record)
 }
@@ -327,7 +328,7 @@ async fn update_status(
     status: &str,
     active: bool,
 ) -> Result<SubscriptionRecord, ApplicationError> {
-    sqlx::query_as::<_, SubscriptionRecord>(
+    let query = format!(
         r#"
         UPDATE eventlake_subscriptions
         SET status = $2,
@@ -335,17 +336,16 @@ async fn update_status(
             error_message = CASE WHEN $2 = 'pending' THEN NULL ELSE error_message END,
             updated_at = now()
         WHERE id = $1
-        RETURNING id, chain_id, contract_address, abi_id, start_block, current_block,
-                  target_block, min_block_window, max_block_window, current_block_window,
-                  status, realtime_enabled, active, error_message, created_at, updated_at
-        "#,
-    )
-    .bind(id)
-    .bind(status)
-    .bind(active)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| ApplicationError::NotFound(format!("subscription {id}")))
+        RETURNING {SUBSCRIPTION_COLUMNS}
+        "#
+    );
+    sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(query))
+        .bind(id)
+        .bind(status)
+        .bind(active)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| ApplicationError::NotFound(format!("subscription {id}")))
 }
 
 async fn upsert_contract_registry(
@@ -391,11 +391,3 @@ fn validate_block_windows(
 
     Ok(())
 }
-
-const SELECT_SUBSCRIPTIONS: &str = r#"
-SELECT id, chain_id, contract_address, abi_id, start_block, current_block,
-       target_block, min_block_window, max_block_window, current_block_window,
-       status, realtime_enabled, active, error_message, created_at, updated_at
-FROM eventlake_subscriptions
-ORDER BY created_at DESC
-"#;
