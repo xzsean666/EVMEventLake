@@ -6,7 +6,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
-use utoipa::ToSchema;
+use utoipa::{OpenApi, ToSchema};
 
 use crate::{
     api::response::{self, ApiResponse},
@@ -19,6 +19,17 @@ pub fn routes() -> Router<ApplicationState> {
     Router::new()
         .route("/api/chains", get(list_chains).post(create_chain))
         .route("/api/chains/{chain_id}", get(get_chain))
+}
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(list_chains, get_chain, create_chain),
+    components(schemas(ChainRecord, CreateChainRequest))
+)]
+struct ChainsApiDocumentation;
+
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    ChainsApiDocumentation::openapi()
 }
 
 #[derive(Debug, Serialize, FromRow, ToSchema)]
@@ -53,6 +64,12 @@ pub struct CollectionPolicy {
     pub default_max_block_window: i64,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/chains",
+    tag = "chains",
+    responses((status = 200, description = "Chains", body = ApiResponse<Vec<ChainRecord>>))
+)]
 async fn list_chains(
     _principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -71,6 +88,16 @@ async fn list_chains(
     Ok(response::success(chains))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/chains/{chain_id}",
+    tag = "chains",
+    params(("chain_id" = i64, Path, description = "EVM chain id")),
+    responses(
+        (status = 200, description = "Chain", body = ApiResponse<ChainRecord>),
+        (status = 404, description = "Chain not found")
+    )
+)]
 async fn get_chain(
     _principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -92,6 +119,18 @@ async fn get_chain(
     Ok(response::success(chain))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/chains",
+    tag = "chains",
+    request_body = CreateChainRequest,
+    responses(
+        (status = 200, description = "Chain created or updated", body = ApiResponse<ChainRecord>),
+        (status = 400, description = "Invalid chain request"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden")
+    )
+)]
 async fn create_chain(
     principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -99,9 +138,15 @@ async fn create_chain(
 ) -> Result<Json<ApiResponse<ChainRecord>>, ApplicationError> {
     principal.require_admin()?;
 
+    let safe_confirmation_depth = request.safe_confirmation_depth.unwrap_or(12);
     let default_min_block_window = request.default_min_block_window.unwrap_or(1);
     let default_max_block_window = request.default_max_block_window.unwrap_or(1000);
-    validate_default_block_windows(default_min_block_window, default_max_block_window)?;
+    validate_chain_request(
+        &request,
+        safe_confirmation_depth,
+        default_min_block_window,
+        default_max_block_window,
+    )?;
 
     let chain = sqlx::query_as::<_, ChainRecord>(
         r#"
@@ -125,7 +170,7 @@ async fn create_chain(
     .bind(request.chain_id)
     .bind(request.name)
     .bind(request.native_token_symbol)
-    .bind(request.safe_confirmation_depth.unwrap_or(12))
+    .bind(safe_confirmation_depth)
     .bind(default_min_block_window)
     .bind(default_max_block_window)
     .bind(request.rpc_notes)
@@ -156,6 +201,39 @@ pub async fn get_collection_policy(
         default_min_block_window: row.1,
         default_max_block_window: row.2,
     })
+}
+
+fn validate_chain_request(
+    request: &CreateChainRequest,
+    safe_confirmation_depth: i64,
+    default_min_block_window: i64,
+    default_max_block_window: i64,
+) -> Result<(), ApplicationError> {
+    if request.chain_id <= 0 {
+        return Err(ApplicationError::BadRequest(
+            "chain_id must be greater than 0".to_owned(),
+        ));
+    }
+
+    if request.name.trim().is_empty() {
+        return Err(ApplicationError::BadRequest(
+            "chain name must not be empty".to_owned(),
+        ));
+    }
+
+    if request.native_token_symbol.trim().is_empty() {
+        return Err(ApplicationError::BadRequest(
+            "native_token_symbol must not be empty".to_owned(),
+        ));
+    }
+
+    if safe_confirmation_depth < 0 {
+        return Err(ApplicationError::BadRequest(
+            "safe_confirmation_depth must be greater than or equal to 0".to_owned(),
+        ));
+    }
+
+    validate_default_block_windows(default_min_block_window, default_max_block_window)
 }
 
 fn validate_default_block_windows(

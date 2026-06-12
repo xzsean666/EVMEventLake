@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::FromRow;
-use utoipa::ToSchema;
+use utoipa::{OpenApi, ToSchema};
 use uuid::Uuid;
 
 use crate::{
@@ -73,6 +73,17 @@ pub fn routes() -> Router<ApplicationState> {
         .route("/api/events", get(list_events))
 }
 
+#[derive(OpenApi)]
+#[openapi(
+    paths(list_abis, get_abi, upload_abi, delete_abi, list_events),
+    components(schemas(AbiVersionRecord, EventRegistryRecord, UploadAbiRequest))
+)]
+struct AbiApiDocumentation;
+
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    AbiApiDocumentation::openapi()
+}
+
 #[derive(Debug, Serialize, FromRow, Clone, ToSchema)]
 pub struct AbiVersionRecord {
     pub id: Uuid,
@@ -103,6 +114,12 @@ pub struct UploadAbiRequest {
     pub abi_json: Value,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/abis",
+    tag = "abis",
+    responses((status = 200, description = "ABI versions", body = ApiResponse<Vec<AbiVersionRecord>>))
+)]
 async fn list_abis(
     _principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -120,6 +137,16 @@ async fn list_abis(
     Ok(response::success(records))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/abis/{id}",
+    tag = "abis",
+    params(("id" = uuid::Uuid, Path, description = "ABI id")),
+    responses(
+        (status = 200, description = "ABI version", body = ApiResponse<AbiVersionRecord>),
+        (status = 404, description = "ABI not found")
+    )
+)]
 async fn get_abi(
     _principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -129,6 +156,16 @@ async fn get_abi(
     Ok(response::success(record))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/abis",
+    tag = "abis",
+    request_body = UploadAbiRequest,
+    responses(
+        (status = 200, description = "ABI uploaded", body = ApiResponse<AbiVersionRecord>),
+        (status = 400, description = "Invalid ABI")
+    )
+)]
 async fn upload_abi(
     principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -180,6 +217,16 @@ async fn upload_abi(
     Ok(response::success(record))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/abis/{id}",
+    tag = "abis",
+    params(("id" = uuid::Uuid, Path, description = "ABI id")),
+    responses(
+        (status = 200, description = "ABI marked deleted", body = ApiResponse<AbiVersionRecord>),
+        (status = 404, description = "ABI not found")
+    )
+)]
 async fn delete_abi(
     principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -203,6 +250,12 @@ async fn delete_abi(
     Ok(response::success(record))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/events",
+    tag = "abis",
+    responses((status = 200, description = "Registered events", body = ApiResponse<Vec<EventRegistryRecord>>))
+)]
 async fn list_events(
     _principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,

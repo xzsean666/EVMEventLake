@@ -62,6 +62,17 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
     let openapi_response = get(&router, "/api/openapi.json").await?;
     assert_eq!(openapi_response.0, StatusCode::OK);
     assert_eq!(openapi_response.1["openapi"], "3.1.0");
+    assert!(openapi_response.1["paths"].get("/api/search").is_some());
+    assert!(
+        openapi_response.1["paths"]
+            .get("/api/subscriptions")
+            .is_some()
+    );
+    assert!(
+        openapi_response.1["paths"]
+            .get("/api/explorer/events/{event_name}")
+            .is_some()
+    );
 
     let api_key_response = post_json(
         &router,
@@ -95,6 +106,31 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
     assert_eq!(response_data(&chain_response.1)["chain_id"], 31337);
     assert_ok(get(&router, "/api/chains/31337").await?, StatusCode::OK);
     assert_ok(get(&router, "/api/chains").await?, StatusCode::OK);
+
+    assert_error(
+        post_json(
+            &router,
+            "/api/chains",
+            json!({
+                "chain_id": -1,
+                "name": "Invalid",
+                "native_token_symbol": "ETH",
+                "safe_confirmation_depth": -1
+            }),
+        )
+        .await?,
+        StatusCode::BAD_REQUEST,
+    );
+
+    assert_error(
+        post_json(
+            &router,
+            "/api/rpc-endpoints",
+            json!({ "chain_id": 31337, "url": "ftp://example.invalid", "weight": 0 }),
+        )
+        .await?,
+        StatusCode::BAD_REQUEST,
+    );
 
     let rpc_response = post_json(
         &router,
@@ -161,6 +197,21 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
         "Transfer"
     );
 
+    assert_error(
+        post_json(
+            &router,
+            "/api/subscriptions",
+            json!({
+                "chain_id": 31337,
+                "contract_address": CONTRACT_ADDRESS,
+                "abi_id": abi_id,
+                "start_block": -1
+            }),
+        )
+        .await?,
+        StatusCode::BAD_REQUEST,
+    );
+
     let subscription_response = post_json(
         &router,
         "/api/subscriptions",
@@ -218,7 +269,6 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
     );
     assert_ok(get(&router, "/api/subscriptions").await?, StatusCode::OK);
 
-    indexing::partition_manager::ensure_partitions(&pool).await?;
     collector::worker::collect_once(&state).await?;
     assert_eq!(count_rows(&pool, "eventlake_raw_logs").await?, 1);
     assert_eq!(count_rows(&pool, "eventlake_decode_queue").await?, 1);
@@ -334,6 +384,47 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
     );
     assert_eq!(count_rows(&pool, "eventlake_address_index").await?, 0);
     assert_eq!(count_rows(&pool, "eventlake_event_field_index").await?, 0);
+
+    let post_reorg_search = post_json(
+        &router,
+        "/api/search",
+        json!({
+            "page": 1,
+            "limit": 10,
+            "filters": [
+                { "field": "event_name", "operator": "eq", "value": "Transfer" }
+            ]
+        }),
+    )
+    .await?;
+    assert_ok(post_reorg_search.clone(), StatusCode::OK);
+    assert_eq!(
+        response_data(&post_reorg_search.1)
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+
+    let post_reorg_contract = get(
+        &router,
+        &format!("/api/explorer/contracts/31337/{CONTRACT_ADDRESS}"),
+    )
+    .await?;
+    assert_ok(post_reorg_contract.clone(), StatusCode::OK);
+    assert_eq!(response_data(&post_reorg_contract.1)["event_count"], 0);
+
+    let post_reorg_event = get(&router, "/api/explorer/events/Transfer").await?;
+    assert_ok(post_reorg_event.clone(), StatusCode::OK);
+    assert_eq!(response_data(&post_reorg_event.1)["total_count"], 0);
+
+    let post_reorg_dashboard = get(&router, "/api/dashboard").await?;
+    assert_ok(post_reorg_dashboard.clone(), StatusCode::OK);
+    assert_eq!(response_data(&post_reorg_dashboard.1)["total_raw_logs"], 0);
+    assert_eq!(
+        response_data(&post_reorg_dashboard.1)["total_decoded_events"],
+        0
+    );
 
     assert_ok(
         post_json(
@@ -918,6 +1009,15 @@ async fn request_json_with_headers(
 fn assert_ok(response: (StatusCode, Value), expected_status: StatusCode) {
     assert_eq!(response.0, expected_status, "response body: {}", response.1);
     assert_eq!(response.1["success"], true, "response body: {}", response.1);
+}
+
+fn assert_error(response: (StatusCode, Value), expected_status: StatusCode) {
+    assert_eq!(response.0, expected_status, "response body: {}", response.1);
+    assert_eq!(
+        response.1["success"], false,
+        "response body: {}",
+        response.1
+    );
 }
 
 fn response_data(response: &Value) -> &Value {

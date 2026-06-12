@@ -9,7 +9,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::FromRow;
-use utoipa::ToSchema;
+use utoipa::{OpenApi, ToSchema};
 
 use crate::{
     api::response::{self, ApiResponse},
@@ -24,6 +24,17 @@ pub fn routes() -> Router<ApplicationState> {
             post(create_api_key).get(list_api_keys),
         )
         .route("/api/auth/api-keys/{id}/revoke", post(revoke_api_key))
+}
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(create_api_key, list_api_keys, revoke_api_key),
+    components(schemas(Role, CreateApiKeyRequest, CreateApiKeyResponse, ApiKeySummary))
+)]
+struct AuthApiDocumentation;
+
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    AuthApiDocumentation::openapi()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -205,6 +216,17 @@ pub fn hash_api_key(api_key: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/api-keys",
+    tag = "auth",
+    request_body = CreateApiKeyRequest,
+    responses(
+        (status = 200, description = "API key created", body = ApiResponse<CreateApiKeyResponse>),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden")
+    )
+)]
 async fn create_api_key(
     principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -237,6 +259,16 @@ async fn create_api_key(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/auth/api-keys",
+    tag = "auth",
+    responses(
+        (status = 200, description = "API keys", body = ApiResponse<Vec<ApiKeySummary>>),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden")
+    )
+)]
 async fn list_api_keys(
     principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -256,6 +288,18 @@ async fn list_api_keys(
     Ok(response::success(records))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/api-keys/{id}/revoke",
+    tag = "auth",
+    params(("id" = uuid::Uuid, Path, description = "API key id")),
+    responses(
+        (status = 200, description = "API key revoked", body = ApiResponse<ApiKeySummary>),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "API key not found")
+    )
+)]
 async fn revoke_api_key(
     principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,

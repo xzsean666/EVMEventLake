@@ -5,7 +5,9 @@ use uuid::Uuid;
 
 use crate::{
     app::application_state::ApplicationState,
-    chains, reorg,
+    chains,
+    indexing::partition_manager,
+    reorg,
     rpc_pool::{self, evm_rpc_client::RpcLog},
     shared::{error::ApplicationError, hex::parse_hex_u64, validation::normalize_address},
     subscriptions::{self, SubscriptionRecord},
@@ -88,6 +90,7 @@ async fn collect_subscription(
 
     loop {
         let to_block = block_range_end(from_block, block_window, safe_head);
+        partition_manager::ensure_partitions_for_range(&state.pool, from_block, to_block).await?;
         let logs_result = rpc_pool::evm_rpc_client::eth_get_logs(
             &state.http_client,
             &endpoint.url,

@@ -6,7 +6,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
-use utoipa::ToSchema;
+use utoipa::{OpenApi, ToSchema};
 use uuid::Uuid;
 
 use crate::{
@@ -35,6 +35,24 @@ pub fn routes() -> Router<ApplicationState> {
             "/api/subscriptions/{id}/resume",
             axum::routing::post(resume_subscription),
         )
+}
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        list_subscriptions,
+        get_subscription,
+        create_subscription,
+        pause_subscription,
+        resume_subscription,
+        delete_subscription
+    ),
+    components(schemas(SubscriptionRecord, CreateSubscriptionRequest))
+)]
+struct SubscriptionsApiDocumentation;
+
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    SubscriptionsApiDocumentation::openapi()
 }
 
 #[derive(Debug, Serialize, FromRow, Clone, ToSchema)]
@@ -74,6 +92,12 @@ const SUBSCRIPTION_COLUMNS: &str = "id, chain_id, contract_address, abi_id, star
     current_block, target_block, min_block_window, max_block_window, current_block_window, \
     status, realtime_enabled, active, error_message, created_at, updated_at";
 
+#[utoipa::path(
+    get,
+    path = "/api/subscriptions",
+    tag = "subscriptions",
+    responses((status = 200, description = "Subscriptions", body = ApiResponse<Vec<SubscriptionRecord>>))
+)]
 async fn list_subscriptions(
     _principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -88,6 +112,16 @@ async fn list_subscriptions(
     Ok(response::success(records))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/subscriptions/{id}",
+    tag = "subscriptions",
+    params(("id" = uuid::Uuid, Path, description = "Subscription id")),
+    responses(
+        (status = 200, description = "Subscription", body = ApiResponse<SubscriptionRecord>),
+        (status = 404, description = "Subscription not found")
+    )
+)]
 async fn get_subscription(
     _principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -96,6 +130,17 @@ async fn get_subscription(
     Ok(response::success(find_subscription(&state.pool, id).await?))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/subscriptions",
+    tag = "subscriptions",
+    request_body = CreateSubscriptionRequest,
+    responses(
+        (status = 200, description = "Subscription created or existing active subscription returned", body = ApiResponse<SubscriptionRecord>),
+        (status = 400, description = "Invalid subscription request"),
+        (status = 409, description = "Subscription conflict")
+    )
+)]
 async fn create_subscription(
     principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -103,14 +148,8 @@ async fn create_subscription(
 ) -> Result<Json<ApiResponse<SubscriptionRecord>>, ApplicationError> {
     principal.require_admin()?;
 
+    validate_subscription_request(&request)?;
     let contract_address = normalize_address(&request.contract_address)?;
-
-    if let Some(existing) =
-        find_active_subscription_by_contract(&state.pool, request.chain_id, &contract_address)
-            .await?
-    {
-        return Ok(response::success(existing));
-    }
 
     let collection_policy = chains::get_collection_policy(&state.pool, request.chain_id).await?;
     let min_block_window = request
@@ -128,20 +167,35 @@ async fn create_subscription(
             min_block_window, max_block_window, current_block_window, realtime_enabled
         )
         VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $7, $8)
+        ON CONFLICT (chain_id, contract_address) WHERE active = true DO NOTHING
         RETURNING {SUBSCRIPTION_COLUMNS}
         "#
     );
-    let record = sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(insert_query))
+    let inserted = sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(insert_query))
         .bind(Uuid::new_v4())
-    .bind(request.chain_id)
-    .bind(contract_address)
-    .bind(request.abi_id)
-    .bind(request.start_block)
-    .bind(min_block_window)
-    .bind(max_block_window)
-    .bind(request.realtime_enabled.unwrap_or(true))
-    .fetch_one(&state.pool)
-    .await?;
+        .bind(request.chain_id)
+        .bind(&contract_address)
+        .bind(request.abi_id)
+        .bind(request.start_block)
+        .bind(min_block_window)
+        .bind(max_block_window)
+        .bind(request.realtime_enabled.unwrap_or(true))
+        .fetch_optional(&state.pool)
+        .await?;
+
+    let record = match inserted {
+        Some(record) => record,
+        None => {
+            find_active_subscription_by_contract(&state.pool, request.chain_id, &contract_address)
+                .await?
+                .ok_or_else(|| {
+                    ApplicationError::Conflict(
+                        "active subscription conflict was detected but existing row was not found"
+                            .to_owned(),
+                    )
+                })?
+        }
+    };
 
     upsert_contract_registry(
         &state.pool,
@@ -154,6 +208,13 @@ async fn create_subscription(
     Ok(response::success(record))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/subscriptions/{id}/pause",
+    tag = "subscriptions",
+    params(("id" = uuid::Uuid, Path, description = "Subscription id")),
+    responses((status = 200, description = "Subscription paused", body = ApiResponse<SubscriptionRecord>))
+)]
 async fn pause_subscription(
     principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -165,6 +226,13 @@ async fn pause_subscription(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/subscriptions/{id}/resume",
+    tag = "subscriptions",
+    params(("id" = uuid::Uuid, Path, description = "Subscription id")),
+    responses((status = 200, description = "Subscription resumed", body = ApiResponse<SubscriptionRecord>))
+)]
 async fn resume_subscription(
     principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -176,6 +244,13 @@ async fn resume_subscription(
     ))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/subscriptions/{id}",
+    tag = "subscriptions",
+    params(("id" = uuid::Uuid, Path, description = "Subscription id")),
+    responses((status = 200, description = "Subscription deleted", body = ApiResponse<SubscriptionRecord>))
+)]
 async fn delete_subscription(
     principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -291,9 +366,7 @@ async fn find_subscription(
     pool: &sqlx::PgPool,
     id: Uuid,
 ) -> Result<SubscriptionRecord, ApplicationError> {
-    let query = format!(
-        "SELECT {SUBSCRIPTION_COLUMNS} FROM eventlake_subscriptions WHERE id = $1"
-    );
+    let query = format!("SELECT {SUBSCRIPTION_COLUMNS} FROM eventlake_subscriptions WHERE id = $1");
     sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(query))
         .bind(id)
         .fetch_optional(pool)
@@ -369,6 +442,24 @@ async fn upsert_contract_registry(
     .bind(abi_id)
     .execute(pool)
     .await?;
+
+    Ok(())
+}
+
+fn validate_subscription_request(
+    request: &CreateSubscriptionRequest,
+) -> Result<(), ApplicationError> {
+    if request.chain_id <= 0 {
+        return Err(ApplicationError::BadRequest(
+            "chain_id must be greater than 0".to_owned(),
+        ));
+    }
+
+    if request.start_block < 0 {
+        return Err(ApplicationError::BadRequest(
+            "start_block must be greater than or equal to 0".to_owned(),
+        ));
+    }
 
     Ok(())
 }

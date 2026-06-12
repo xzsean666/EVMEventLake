@@ -119,6 +119,12 @@ async fn decode_work_item(
 
     let decoded_fields = decoded_event_fields(event, decoded.indexed, decoded.body)?;
     let decoded_event_id = Uuid::new_v4();
+    indexing::partition_manager::ensure_decoded_partitions_for_range(
+        &state.pool,
+        item.block_number,
+        item.block_number,
+    )
+    .await?;
 
     // The decoded event, its derived indexes, the contract activity bump, and the queue
     // status are one logical unit and are committed together.
@@ -152,6 +158,24 @@ async fn decode_work_item(
     .fetch_optional(&mut *transaction)
     .await?
     .is_some();
+
+    let was_decoded_before_update = if inserted {
+        false
+    } else {
+        sqlx::query_as::<_, (String,)>(
+            r#"
+            SELECT decode_status
+            FROM eventlake_decoded_events
+            WHERE raw_log_id = $1 AND block_number = $2
+            FOR UPDATE
+            "#,
+        )
+        .bind(item.raw_log_id)
+        .bind(item.block_number)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .is_some_and(|(status,)| status == "decoded")
+    };
 
     if !inserted {
         sqlx::query(
@@ -193,7 +217,7 @@ async fn decode_work_item(
     )
     .await?;
 
-    if inserted {
+    if inserted || !was_decoded_before_update {
         update_contract_activity(
             &mut transaction,
             item.chain_id,

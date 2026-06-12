@@ -36,25 +36,83 @@ pub async fn ensure_partitions(pool: &sqlx::PgPool) -> Result<(), ApplicationErr
     Ok(())
 }
 
+pub async fn ensure_partitions_for_range(
+    pool: &sqlx::PgPool,
+    from_block: i64,
+    to_block: i64,
+) -> Result<(), ApplicationError> {
+    for start in partition_starts(from_block, to_block)? {
+        create_partition_pair(pool, start).await?;
+    }
+
+    Ok(())
+}
+
+pub async fn ensure_decoded_partitions_for_range(
+    pool: &sqlx::PgPool,
+    from_block: i64,
+    to_block: i64,
+) -> Result<(), ApplicationError> {
+    for start in partition_starts(from_block, to_block)? {
+        create_decoded_partition(pool, start).await?;
+    }
+
+    Ok(())
+}
+
+fn partition_starts(from_block: i64, to_block: i64) -> Result<Vec<i64>, ApplicationError> {
+    if from_block < 0 || to_block < from_block {
+        return Err(ApplicationError::BadRequest(
+            "partition range must be non-negative and ordered".to_owned(),
+        ));
+    }
+
+    let end_start = floor_partition_start(to_block);
+    let mut start = floor_partition_start(from_block);
+    let mut starts = Vec::new();
+    loop {
+        starts.push(start);
+        if start >= end_start {
+            break;
+        }
+        start += PARTITION_BLOCK_SIZE;
+    }
+
+    Ok(starts)
+}
+
 fn floor_partition_start(block_number: i64) -> i64 {
     block_number.div_euclid(PARTITION_BLOCK_SIZE) * PARTITION_BLOCK_SIZE
 }
 
 async fn create_partition_pair(pool: &sqlx::PgPool, start: i64) -> Result<(), ApplicationError> {
+    create_raw_partition(pool, start).await?;
+    create_decoded_partition(pool, start).await?;
+
+    Ok(())
+}
+
+async fn create_raw_partition(pool: &sqlx::PgPool, start: i64) -> Result<(), ApplicationError> {
     let end = start + PARTITION_BLOCK_SIZE;
     let raw_partition = format!("eventlake_raw_logs_{}_{}", start, end);
-    let decoded_partition = format!("eventlake_decoded_events_{}_{}", start, end);
-
     let raw_sql = format!(
         "CREATE TABLE IF NOT EXISTS {raw_partition} PARTITION OF eventlake_raw_logs FOR VALUES FROM ({start}) TO ({end})"
-    );
-    let decoded_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {decoded_partition} PARTITION OF eventlake_decoded_events FOR VALUES FROM ({start}) TO ({end})"
     );
 
     sqlx::query(sqlx::AssertSqlSafe(raw_sql))
         .execute(pool)
         .await?;
+
+    Ok(())
+}
+
+async fn create_decoded_partition(pool: &sqlx::PgPool, start: i64) -> Result<(), ApplicationError> {
+    let end = start + PARTITION_BLOCK_SIZE;
+    let decoded_partition = format!("eventlake_decoded_events_{}_{}", start, end);
+    let decoded_sql = format!(
+        "CREATE TABLE IF NOT EXISTS {decoded_partition} PARTITION OF eventlake_decoded_events FOR VALUES FROM ({start}) TO ({end})"
+    );
+
     sqlx::query(sqlx::AssertSqlSafe(decoded_sql))
         .execute(pool)
         .await?;

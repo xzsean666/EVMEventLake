@@ -6,7 +6,7 @@ use axum::{
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::FromRow;
-use utoipa::ToSchema;
+use utoipa::{OpenApi, ToSchema};
 
 use crate::{
     api::response::{self, ApiResponse},
@@ -23,6 +23,24 @@ pub fn routes() -> Router<ApplicationState> {
             get(contract_explorer),
         )
         .route("/api/explorer/events/{event_name}", get(event_explorer))
+}
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(address_explorer, contract_explorer, event_explorer),
+    components(schemas(
+        AddressExplorerResponse,
+        AddressRecentEvent,
+        RelatedContract,
+        EventStatistic,
+        ContractExplorerResponse,
+        EventExplorerResponse
+    ))
+)]
+struct ExplorersApiDocumentation;
+
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    ExplorersApiDocumentation::openapi()
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -76,6 +94,16 @@ pub struct EventExplorerResponse {
     pub total_count: i64,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/explorer/address/{address}",
+    tag = "explorers",
+    params(("address" = String, Path, description = "EVM address")),
+    responses(
+        (status = 200, description = "Address explorer", body = ApiResponse<AddressExplorerResponse>),
+        (status = 400, description = "Invalid address")
+    )
+)]
 async fn address_explorer(
     _principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -135,6 +163,20 @@ async fn address_explorer(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/explorer/contracts/{chain_id}/{contract_address}",
+    tag = "explorers",
+    params(
+        ("chain_id" = i64, Path, description = "EVM chain id"),
+        ("contract_address" = String, Path, description = "Contract address")
+    ),
+    responses(
+        (status = 200, description = "Contract explorer", body = ApiResponse<ContractExplorerResponse>),
+        (status = 400, description = "Invalid contract address"),
+        (status = 404, description = "Contract not found")
+    )
+)]
 async fn contract_explorer(
     _principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -145,16 +187,17 @@ async fn contract_explorer(
         r#"
         SELECT cr.chain_id,
                cr.contract_address,
-               cr.event_count,
-               cr.first_seen_block,
-               cr.last_seen_block,
+               COUNT(de.id)::BIGINT AS event_count,
+               MIN(de.block_number) AS first_seen_block,
+               MAX(de.block_number) AS last_seen_block,
                COALESCE(jsonb_agg(DISTINCT de.event_name) FILTER (WHERE de.event_name IS NOT NULL), '[]'::jsonb) AS event_types
         FROM eventlake_contract_registry cr
         LEFT JOIN eventlake_decoded_events de
           ON de.chain_id = cr.chain_id
          AND de.contract_address = cr.contract_address
+         AND de.decode_status = 'decoded'
         WHERE cr.chain_id = $1 AND cr.contract_address = $2
-        GROUP BY cr.chain_id, cr.contract_address, cr.event_count, cr.first_seen_block, cr.last_seen_block
+        GROUP BY cr.chain_id, cr.contract_address
         "#,
     )
     .bind(chain_id)
@@ -166,6 +209,16 @@ async fn contract_explorer(
     Ok(response::success(record))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/explorer/events/{event_name}",
+    tag = "explorers",
+    params(("event_name" = String, Path, description = "Event name")),
+    responses(
+        (status = 200, description = "Event explorer", body = ApiResponse<EventExplorerResponse>),
+        (status = 404, description = "Event not found")
+    )
+)]
 async fn event_explorer(
     _principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -177,9 +230,11 @@ async fn event_explorer(
                jsonb_agg(DISTINCT er.signature) AS signatures,
                jsonb_agg(DISTINCT er.topic0) AS topic0_values,
                COUNT(DISTINCT de.contract_address)::BIGINT AS contract_count,
-               COUNT(de.id)::BIGINT AS total_count
+               COUNT(DISTINCT de.id)::BIGINT AS total_count
         FROM eventlake_event_registry er
-        LEFT JOIN eventlake_decoded_events de ON de.topic0 = er.topic0
+        LEFT JOIN eventlake_decoded_events de
+          ON de.topic0 = er.topic0
+         AND de.decode_status = 'decoded'
         WHERE er.event_name = $1
         GROUP BY er.event_name
         "#,

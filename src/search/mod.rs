@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{FromRow, QueryBuilder};
-use utoipa::ToSchema;
+use utoipa::{OpenApi, ToSchema};
 use uuid::Uuid;
 
 use crate::{
@@ -15,6 +15,23 @@ use crate::{
 
 pub fn routes() -> Router<ApplicationState> {
     Router::new().route("/api/search", post(search_events))
+}
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(search_events),
+    components(schemas(
+        SearchRequest,
+        SearchFilter,
+        SearchOperator,
+        SearchSort,
+        SearchEventRecord
+    ))
+)]
+struct SearchApiDocumentation;
+
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    SearchApiDocumentation::openapi()
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -68,6 +85,16 @@ pub struct SearchEventRecord {
     pub decoded_at: DateTime<Utc>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/search",
+    tag = "search",
+    request_body = SearchRequest,
+    responses(
+        (status = 200, description = "Search results", body = ApiResponse<Vec<SearchEventRecord>>),
+        (status = 400, description = "Invalid search request")
+    )
+)]
 async fn search_events(
     _principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,

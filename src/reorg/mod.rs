@@ -132,6 +132,8 @@ async fn invalidate_from_block(
     .execute(&mut *connection)
     .await?;
 
+    refresh_contract_registry(connection, chain_id).await?;
+
     // Rewind subscriptions that had advanced past the reorg point so the collector
     // re-fetches the affected range on its next tick.
     sqlx::query(
@@ -146,6 +148,51 @@ async fn invalidate_from_block(
     )
     .bind(chain_id)
     .bind(from_block)
+    .execute(&mut *connection)
+    .await?;
+
+    Ok(())
+}
+
+async fn refresh_contract_registry(
+    connection: &mut sqlx::PgConnection,
+    chain_id: i64,
+) -> Result<(), ApplicationError> {
+    sqlx::query(
+        r#"
+        WITH stats AS (
+            SELECT chain_id,
+                   contract_address,
+                   COUNT(*)::BIGINT AS event_count,
+                   MIN(block_number) AS first_seen_block,
+                   MAX(block_number) AS last_seen_block,
+                   MIN(decoded_at) AS first_seen_at,
+                   MAX(decoded_at) AS last_seen_at
+            FROM eventlake_decoded_events
+            WHERE chain_id = $1 AND decode_status = 'decoded'
+            GROUP BY chain_id, contract_address
+        ),
+        contracts AS (
+            SELECT chain_id, contract_address
+            FROM eventlake_contract_registry
+            WHERE chain_id = $1
+        )
+        UPDATE eventlake_contract_registry cr
+        SET event_count = COALESCE(stats.event_count, 0),
+            first_seen_block = stats.first_seen_block,
+            last_seen_block = stats.last_seen_block,
+            first_seen_at = stats.first_seen_at,
+            last_seen_at = stats.last_seen_at,
+            updated_at = now()
+        FROM contracts
+        LEFT JOIN stats
+          ON stats.chain_id = contracts.chain_id
+         AND stats.contract_address = contracts.contract_address
+        WHERE cr.chain_id = contracts.chain_id
+          AND cr.contract_address = contracts.contract_address
+        "#,
+    )
+    .bind(chain_id)
     .execute(&mut *connection)
     .await?;
 

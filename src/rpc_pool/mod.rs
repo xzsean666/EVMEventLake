@@ -6,13 +6,14 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
-use utoipa::ToSchema;
+use utoipa::{OpenApi, ToSchema};
 use uuid::Uuid;
 
 use crate::{
     api::response::{self, ApiResponse},
     app::application_state::ApplicationState,
     auth::AuthenticatedPrincipal,
+    chains,
     shared::error::ApplicationError,
 };
 
@@ -32,6 +33,24 @@ pub fn routes() -> Router<ApplicationState> {
             post(disable_rpc_endpoint),
         )
         .route("/api/rpc-endpoints/{id}/check", post(check_rpc_endpoint))
+}
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        list_rpc_endpoints,
+        get_rpc_endpoint,
+        create_rpc_endpoint,
+        enable_rpc_endpoint,
+        disable_rpc_endpoint,
+        check_rpc_endpoint
+    ),
+    components(schemas(RpcEndpointRecord, CreateRpcEndpointRequest))
+)]
+struct RpcApiDocumentation;
+
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    RpcApiDocumentation::openapi()
 }
 
 #[derive(Debug, Serialize, FromRow, Clone, ToSchema)]
@@ -56,6 +75,12 @@ pub struct CreateRpcEndpointRequest {
     pub weight: Option<i32>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/rpc-endpoints",
+    tag = "rpc",
+    responses((status = 200, description = "RPC endpoints", body = ApiResponse<Vec<RpcEndpointRecord>>))
+)]
 async fn list_rpc_endpoints(
     _principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -67,6 +92,16 @@ async fn list_rpc_endpoints(
     Ok(response::success(endpoints))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/rpc-endpoints/{id}",
+    tag = "rpc",
+    params(("id" = uuid::Uuid, Path, description = "RPC endpoint id")),
+    responses(
+        (status = 200, description = "RPC endpoint", body = ApiResponse<RpcEndpointRecord>),
+        (status = 404, description = "RPC endpoint not found")
+    )
+)]
 async fn get_rpc_endpoint(
     _principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -76,12 +111,29 @@ async fn get_rpc_endpoint(
     Ok(response::success(endpoint))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/rpc-endpoints",
+    tag = "rpc",
+    request_body = CreateRpcEndpointRequest,
+    responses(
+        (status = 200, description = "RPC endpoint created or updated", body = ApiResponse<RpcEndpointRecord>),
+        (status = 400, description = "Invalid RPC endpoint request"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden")
+    )
+)]
 async fn create_rpc_endpoint(
     principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
     Json(request): Json<CreateRpcEndpointRequest>,
 ) -> Result<Json<ApiResponse<RpcEndpointRecord>>, ApplicationError> {
     principal.require_admin()?;
+
+    let url = request.url.trim().to_owned();
+    let weight = request.weight.unwrap_or(100);
+    validate_rpc_endpoint_request(request.chain_id, &url, weight)?;
+    chains::get_collection_policy(&state.pool, request.chain_id).await?;
 
     let endpoint = sqlx::query_as::<_, RpcEndpointRecord>(
         r#"
@@ -97,14 +149,21 @@ async fn create_rpc_endpoint(
     )
     .bind(Uuid::new_v4())
     .bind(request.chain_id)
-    .bind(request.url)
-    .bind(request.weight.unwrap_or(100))
+    .bind(url)
+    .bind(weight)
     .fetch_one(&state.pool)
     .await?;
 
     Ok(response::success(endpoint))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/rpc-endpoints/{id}/enable",
+    tag = "rpc",
+    params(("id" = uuid::Uuid, Path, description = "RPC endpoint id")),
+    responses((status = 200, description = "RPC endpoint enabled", body = ApiResponse<RpcEndpointRecord>))
+)]
 async fn enable_rpc_endpoint(
     principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -115,6 +174,13 @@ async fn enable_rpc_endpoint(
     Ok(response::success(endpoint))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/rpc-endpoints/{id}/disable",
+    tag = "rpc",
+    params(("id" = uuid::Uuid, Path, description = "RPC endpoint id")),
+    responses((status = 200, description = "RPC endpoint disabled", body = ApiResponse<RpcEndpointRecord>))
+)]
 async fn disable_rpc_endpoint(
     principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -125,6 +191,16 @@ async fn disable_rpc_endpoint(
     Ok(response::success(endpoint))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/rpc-endpoints/{id}/check",
+    tag = "rpc",
+    params(("id" = uuid::Uuid, Path, description = "RPC endpoint id")),
+    responses(
+        (status = 200, description = "RPC endpoint health checked", body = ApiResponse<RpcEndpointRecord>),
+        (status = 502, description = "RPC endpoint check failed")
+    )
+)]
 async fn check_rpc_endpoint(
     principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
@@ -249,6 +325,34 @@ async fn persist_health_check(
         Err(error) => {
             mark_rpc_failure(pool, id, &error.public_message()).await?;
         }
+    }
+
+    Ok(())
+}
+
+fn validate_rpc_endpoint_request(
+    chain_id: i64,
+    url: &str,
+    weight: i32,
+) -> Result<(), ApplicationError> {
+    if chain_id <= 0 {
+        return Err(ApplicationError::BadRequest(
+            "chain_id must be greater than 0".to_owned(),
+        ));
+    }
+
+    if weight <= 0 {
+        return Err(ApplicationError::BadRequest(
+            "weight must be greater than 0".to_owned(),
+        ));
+    }
+
+    let parsed_url = reqwest::Url::parse(url)
+        .map_err(|_| ApplicationError::BadRequest("url must be a valid URL".to_owned()))?;
+    if !matches!(parsed_url.scheme(), "http" | "https") {
+        return Err(ApplicationError::BadRequest(
+            "url must use http or https".to_owned(),
+        ));
     }
 
     Ok(())
