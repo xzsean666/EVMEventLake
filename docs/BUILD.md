@@ -16,14 +16,26 @@ Created implementation files include:
 - `src/`
 - `migrations/`
 - `Dockerfile`
+- `Dockerfile.prebuilt`
+- `Dockerfile.prebuilt.cn`
 - `docker-compose.yml`
+- `docker-compose.prebuilt.yml`
+- `docker-compose.prebuilt.cn.yml`
+- `scripts/build-prebuilt-binary.sh`
+- `deploy/prebuilt/README.md`
+- `docs/DEPLOYMENT.md`
 
 Current verified commands:
 
 - `cargo check`
+- `cargo build --release --locked`
 - `cargo test`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --test e2e_real_database_tests -- --nocapture`
+- `scripts/build-prebuilt-binary.sh`
+- `docker compose --env-file .env.example config`
+- `docker compose --env-file .env.example -f docker-compose.prebuilt.yml config`
+- `docker compose --env-file .env.example -f docker-compose.prebuilt.cn.yml config`
 
 ## 2. Expected Local Requirements
 
@@ -131,11 +143,37 @@ Run with Docker Compose:
 docker compose up --build
 ```
 
+Run with Docker Compose and an explicit env file:
+
+```text
+EVENTLAKE_ENV_FILE=.env docker compose --env-file .env up -d --build eventlake
+```
+
+Build the prebuilt deployment binary:
+
+```text
+scripts/build-prebuilt-binary.sh
+```
+
+Run the prebuilt binary image:
+
+```text
+EVENTLAKE_ENV_FILE=.env docker compose --env-file .env -f docker-compose.prebuilt.yml up -d --build eventlake
+```
+
+Run the China-optimized prebuilt image:
+
+```text
+EVENTLAKE_ENV_FILE=.env docker compose --env-file .env -f docker-compose.prebuilt.cn.yml up -d --build eventlake
+```
+
 Stop local Docker services:
 
 ```text
 docker compose down
 ```
+
+See `docs/DEPLOYMENT.md` for the deployment matrix, environment-file rules, and verification commands.
 
 ## 6. Expected Database Workflow
 
@@ -255,13 +293,21 @@ Verified locally:
 
 ```text
 cargo check
+cargo build --release --locked
 cargo test
 cargo test --test e2e_real_database_tests -- --nocapture
 cargo clippy --all-targets --all-features -- -D warnings
+scripts/build-prebuilt-binary.sh
+docker compose --env-file .env.example config
+docker compose --env-file .env.example -f docker-compose.prebuilt.yml config
+docker compose --env-file .env.example -f docker-compose.prebuilt.cn.yml config
 ```
 
 Not verified in this environment:
 
+- `docker build -f Dockerfile -t eventlake:local .`
+- `docker build -f Dockerfile.prebuilt -t eventlake:prebuilt .`
+- `docker build -f Dockerfile.prebuilt.cn -t eventlake:prebuilt-cn .`
 - `docker compose up`
 - End-to-end RPC collection against a real EVM chain
 

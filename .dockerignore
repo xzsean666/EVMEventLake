@@ -1,4 +1,11 @@
-/target
-/.git
-/.env
-
+.git
+.gitignore
+target
+cache
+out
+data
+tmp
+*.log
+.env
+.env.*
+!.env.example

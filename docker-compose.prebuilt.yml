@@ -19,8 +19,10 @@ services:
   eventlake:
     build:
       context: .
-      dockerfile: Dockerfile
-    image: eventlake:local
+      dockerfile: Dockerfile.prebuilt
+      args:
+        EVENTLAKE_BINARY: ${EVENTLAKE_PREBUILT_BINARY:-deploy/prebuilt/eventlake}
+    image: eventlake:prebuilt
     restart: unless-stopped
     env_file:
       - ${EVENTLAKE_ENV_FILE:-.env.example}

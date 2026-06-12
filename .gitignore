@@ -1,5 +1,8 @@
 /target/
 /.env
+/.env.*
+!/.env.example
 *.log
 
-.env.test
+/deploy/prebuilt/*
+!/deploy/prebuilt/README.md

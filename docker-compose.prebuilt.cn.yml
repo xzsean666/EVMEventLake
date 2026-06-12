@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: ${EVENTLAKE_POSTGRES_IMAGE:-postgres:18}
+    image: ${EVENTLAKE_POSTGRES_IMAGE:-m.daocloud.io/docker.io/library/postgres:18}
     restart: unless-stopped
     environment:
       POSTGRES_DB: eventlake
@@ -19,8 +19,13 @@ services:
   eventlake:
     build:
       context: .
-      dockerfile: Dockerfile
-    image: eventlake:local
+      dockerfile: Dockerfile.prebuilt.cn
+      args:
+        EVENTLAKE_BINARY: ${EVENTLAKE_PREBUILT_BINARY:-deploy/prebuilt/eventlake}
+        DEBIAN_IMAGE: ${EVENTLAKE_DEBIAN_IMAGE:-m.daocloud.io/docker.io/library/debian:bookworm-slim}
+        DEBIAN_MIRROR: ${EVENTLAKE_DEBIAN_MIRROR:-http://mirrors.aliyun.com/debian}
+        DEBIAN_SECURITY_MIRROR: ${EVENTLAKE_DEBIAN_SECURITY_MIRROR:-http://mirrors.aliyun.com/debian-security}
+    image: eventlake:prebuilt-cn
     restart: unless-stopped
     env_file:
       - ${EVENTLAKE_ENV_FILE:-.env.example}
