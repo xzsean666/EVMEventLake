@@ -9,6 +9,8 @@ use crate::shared::{
     hex::{normalize_hex, parse_hex_u64},
 };
 
+const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+
 #[derive(Debug, Serialize)]
 struct JsonRpcRequest<'a> {
     jsonrpc: &'static str,
@@ -53,7 +55,8 @@ pub async fn check_endpoint(
     rpc_url: &str,
 ) -> Result<RpcHealthCheck, ApplicationError> {
     let started_at = Instant::now();
-    let _block_number = eth_block_number(client, rpc_url).await?;
+    let block_number = eth_block_number(client, rpc_url).await?;
+    let _logs = eth_get_logs(client, rpc_url, ZERO_ADDRESS, block_number, block_number).await?;
     Ok(RpcHealthCheck {
         latency_ms: started_at.elapsed().as_millis() as i64,
     })

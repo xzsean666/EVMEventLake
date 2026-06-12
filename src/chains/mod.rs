@@ -28,6 +28,7 @@ pub struct ChainRecord {
     pub native_token_symbol: String,
     pub status: String,
     pub safe_confirmation_depth: i64,
+    pub default_min_block_window: i64,
     pub default_max_block_window: i64,
     pub rpc_notes: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -40,8 +41,16 @@ pub struct CreateChainRequest {
     pub name: String,
     pub native_token_symbol: String,
     pub safe_confirmation_depth: Option<i64>,
+    pub default_min_block_window: Option<i64>,
     pub default_max_block_window: Option<i64>,
     pub rpc_notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CollectionPolicy {
+    pub safe_confirmation_depth: i64,
+    pub default_min_block_window: i64,
+    pub default_max_block_window: i64,
 }
 
 async fn list_chains(
@@ -51,7 +60,7 @@ async fn list_chains(
     let chains = sqlx::query_as::<_, ChainRecord>(
         r#"
         SELECT chain_id, name, native_token_symbol, status, safe_confirmation_depth,
-               default_max_block_window, rpc_notes, created_at, updated_at
+               default_min_block_window, default_max_block_window, rpc_notes, created_at, updated_at
         FROM eventlake_chains
         ORDER BY chain_id
         "#,
@@ -70,7 +79,7 @@ async fn get_chain(
     let chain = sqlx::query_as::<_, ChainRecord>(
         r#"
         SELECT chain_id, name, native_token_symbol, status, safe_confirmation_depth,
-               default_max_block_window, rpc_notes, created_at, updated_at
+               default_min_block_window, default_max_block_window, rpc_notes, created_at, updated_at
         FROM eventlake_chains
         WHERE chain_id = $1
         "#,
@@ -90,29 +99,35 @@ async fn create_chain(
 ) -> Result<Json<ApiResponse<ChainRecord>>, ApplicationError> {
     principal.require_admin()?;
 
+    let default_min_block_window = request.default_min_block_window.unwrap_or(1);
+    let default_max_block_window = request.default_max_block_window.unwrap_or(1000);
+    validate_default_block_windows(default_min_block_window, default_max_block_window)?;
+
     let chain = sqlx::query_as::<_, ChainRecord>(
         r#"
         INSERT INTO eventlake_chains (
             chain_id, name, native_token_symbol, safe_confirmation_depth,
-            default_max_block_window, rpc_notes
+            default_min_block_window, default_max_block_window, rpc_notes
         )
-        VALUES ($1, $2, $3, $4, $5, $6)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (chain_id) DO UPDATE
         SET name = EXCLUDED.name,
             native_token_symbol = EXCLUDED.native_token_symbol,
             safe_confirmation_depth = EXCLUDED.safe_confirmation_depth,
+            default_min_block_window = EXCLUDED.default_min_block_window,
             default_max_block_window = EXCLUDED.default_max_block_window,
             rpc_notes = EXCLUDED.rpc_notes,
             updated_at = now()
         RETURNING chain_id, name, native_token_symbol, status, safe_confirmation_depth,
-                  default_max_block_window, rpc_notes, created_at, updated_at
+                  default_min_block_window, default_max_block_window, rpc_notes, created_at, updated_at
         "#,
     )
     .bind(request.chain_id)
     .bind(request.name)
     .bind(request.native_token_symbol)
     .bind(request.safe_confirmation_depth.unwrap_or(12))
-    .bind(request.default_max_block_window.unwrap_or(1000))
+    .bind(default_min_block_window)
+    .bind(default_max_block_window)
     .bind(request.rpc_notes)
     .fetch_one(&state.pool)
     .await?;
@@ -123,14 +138,42 @@ async fn create_chain(
 pub async fn get_collection_policy(
     pool: &sqlx::PgPool,
     chain_id: i64,
-) -> Result<(i64, i64), ApplicationError> {
-    let row = sqlx::query_as::<_, (i64, i64)>(
-        "SELECT safe_confirmation_depth, default_max_block_window FROM eventlake_chains WHERE chain_id = $1",
+) -> Result<CollectionPolicy, ApplicationError> {
+    let row = sqlx::query_as::<_, (i64, i64, i64)>(
+        r#"
+        SELECT safe_confirmation_depth, default_min_block_window, default_max_block_window
+        FROM eventlake_chains
+        WHERE chain_id = $1
+        "#,
     )
     .bind(chain_id)
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| ApplicationError::NotFound(format!("chain {chain_id}")))?;
 
-    Ok(row)
+    Ok(CollectionPolicy {
+        safe_confirmation_depth: row.0,
+        default_min_block_window: row.1,
+        default_max_block_window: row.2,
+    })
+}
+
+fn validate_default_block_windows(
+    default_min_block_window: i64,
+    default_max_block_window: i64,
+) -> Result<(), ApplicationError> {
+    if default_min_block_window < 1 {
+        return Err(ApplicationError::BadRequest(
+            "default_min_block_window must be at least 1".to_owned(),
+        ));
+    }
+
+    if default_max_block_window < default_min_block_window {
+        return Err(ApplicationError::BadRequest(
+            "default_max_block_window must be greater than or equal to default_min_block_window"
+                .to_owned(),
+        ));
+    }
+
+    Ok(())
 }

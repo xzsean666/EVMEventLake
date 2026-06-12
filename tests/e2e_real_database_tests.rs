@@ -9,7 +9,7 @@ use axum::{
 use chrono::Utc;
 use eventlake::{
     api, app::application_state::ApplicationState, auth, collector, configuration, database,
-    decoder, indexing, reorg,
+    decoder, indexing, reorg, rpc_pool, shared::hex::parse_hex_u64,
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde_json::{Value, json};
@@ -22,6 +22,21 @@ const CONTRACT_ADDRESS: &str = "0x2222222222222222222222222222222222222222";
 const FROM_ADDRESS: &str = "0x1111111111111111111111111111111111111111";
 const TO_ADDRESS: &str = "0x3333333333333333333333333333333333333333";
 const TRANSFER_TOPIC0: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const BASE_CHAIN_ID: i64 = 8453;
+const BASE_USDC_ADDRESS: &str = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+const DEFAULT_LIVE_BASE_RPC_URL: &str = "https://mainnet.base.org";
+const LIVE_SAFE_CONFIRMATION_DEPTH: i64 = 20;
+const LIVE_DISCOVERY_WINDOW: i64 = 10;
+const LIVE_COLLECTION_WINDOW: i64 = 1;
+const LIVE_DISCOVERY_CHUNKS: i64 = 30;
+
+#[derive(Debug)]
+struct LiveChainSample {
+    from_block: i64,
+    to_block: i64,
+    log_count: usize,
+    transfer_count: usize,
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
@@ -341,6 +356,164 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_chain_collects_and_decodes_base_usdc_logs() -> anyhow::Result<()> {
+    if env::var("EVENTLAKE_RUN_LIVE_CHAIN_E2E").ok().as_deref() != Some("true") {
+        eprintln!(
+            "skipping live chain e2e: set EVENTLAKE_RUN_LIVE_CHAIN_E2E=true to run against Base"
+        );
+        return Ok(());
+    }
+
+    let Some(database_url) = test_database_url() else {
+        eprintln!("skipping live chain e2e: .env.test DATABASE_URL is not configured");
+        return Ok(());
+    };
+
+    let live_rpc_url =
+        env::var("EVENTLAKE_LIVE_RPC_URL").unwrap_or_else(|_| DEFAULT_LIVE_BASE_RPC_URL.to_owned());
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()?;
+    let sample = discover_live_base_usdc_sample(&http_client, &live_rpc_url).await?;
+    eprintln!(
+        "live e2e sample: Base USDC blocks {}..={}, {} logs, {} transfers",
+        sample.from_block, sample.to_block, sample.log_count, sample.transfer_count
+    );
+
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await?;
+    reset_eventlake_namespace_before_migration(&pool).await?;
+    database::migrate(&pool).await?;
+    reset_eventlake_tables(&pool).await?;
+
+    let state = build_test_state(database_url.clone(), pool.clone(), false);
+    let router = api::routes::build_router(state.clone());
+
+    let chain_response = post_json(
+        &router,
+        "/api/chains",
+        json!({
+            "chain_id": BASE_CHAIN_ID,
+            "name": "Base",
+            "native_token_symbol": "ETH",
+            "safe_confirmation_depth": LIVE_SAFE_CONFIRMATION_DEPTH,
+            "default_min_block_window": 1,
+            "default_max_block_window": LIVE_COLLECTION_WINDOW,
+            "rpc_notes": "live e2e sample"
+        }),
+    )
+    .await?;
+    assert_ok(chain_response, StatusCode::OK);
+
+    let rpc_response = post_json(
+        &router,
+        "/api/rpc-endpoints",
+        json!({ "chain_id": BASE_CHAIN_ID, "url": live_rpc_url, "weight": 100 }),
+    )
+    .await?;
+    assert_ok(rpc_response.clone(), StatusCode::OK);
+    let rpc_id = uuid_from_response(&rpc_response.1, "id");
+    assert_ok(
+        post_json(
+            &router,
+            &format!("/api/rpc-endpoints/{rpc_id}/check"),
+            json!({}),
+        )
+        .await?,
+        StatusCode::OK,
+    );
+    eprintln!("live e2e rpc health check passed");
+
+    let abi_response = post_json(
+        &router,
+        "/api/abis",
+        json!({
+            "name": "Live ERC20",
+            "abi_json": erc20_transfer_and_approval_abi()
+        }),
+    )
+    .await?;
+    assert_ok(abi_response.clone(), StatusCode::OK);
+    let abi_id = uuid_from_response(&abi_response.1, "id");
+
+    let subscription_response = post_json(
+        &router,
+        "/api/subscriptions",
+        json!({
+            "chain_id": BASE_CHAIN_ID,
+            "contract_address": BASE_USDC_ADDRESS,
+            "abi_id": abi_id,
+            "start_block": sample.from_block,
+            "realtime_enabled": false,
+            "min_block_window": 1,
+            "max_block_window": LIVE_COLLECTION_WINDOW
+        }),
+    )
+    .await?;
+    assert_ok(subscription_response, StatusCode::OK);
+
+    indexing::partition_manager::ensure_partitions(&pool).await?;
+    collector::worker::collect_once(&state).await?;
+
+    let raw_count = count_raw_logs_for_contract(&pool, BASE_CHAIN_ID, BASE_USDC_ADDRESS).await?;
+    eprintln!("live e2e collected {raw_count} raw logs");
+    assert!(
+        raw_count > 0,
+        "expected live Base USDC logs in {}..={}, discovery saw {} logs and {} transfers",
+        sample.from_block,
+        sample.to_block,
+        sample.log_count,
+        sample.transfer_count
+    );
+
+    for _ in 0..5 {
+        decoder::worker::decode_once(&state).await?;
+        if count_decoded_transfers(&pool, BASE_CHAIN_ID, BASE_USDC_ADDRESS).await? > 0 {
+            break;
+        }
+    }
+
+    let transfer_count = count_decoded_transfers(&pool, BASE_CHAIN_ID, BASE_USDC_ADDRESS).await?;
+    eprintln!("live e2e decoded {transfer_count} Transfer events");
+    assert!(
+        transfer_count > 0,
+        "expected at least one decoded Base USDC Transfer event"
+    );
+    assert!(
+        count_rows(&pool, "eventlake_address_index").await? > 0,
+        "expected decoded live events to populate address index"
+    );
+
+    let search_response = post_json(
+        &router,
+        "/api/search",
+        json!({
+            "page": 1,
+            "limit": 10,
+            "filters": [
+                { "field": "chain_id", "operator": "eq", "value": BASE_CHAIN_ID },
+                { "field": "contract_address", "operator": "eq", "value": BASE_USDC_ADDRESS },
+                { "field": "event_name", "operator": "eq", "value": "Transfer" }
+            ],
+            "sort": { "field": "block_number", "direction": "desc" }
+        }),
+    )
+    .await?;
+    assert_ok(search_response.clone(), StatusCode::OK);
+    assert!(
+        !response_data(&search_response.1)
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "expected live decoded Transfer events to be searchable"
+    );
+
+    Ok(())
+}
+
 async fn assert_authentication_modes(database_url: &str, pool: PgPool) -> anyhow::Result<()> {
     let admin_key = "e2e-admin-secret";
     let read_only_key = "e2e-readonly-secret";
@@ -425,6 +598,67 @@ async fn assert_authentication_modes(database_url: &str, pool: PgPool) -> anyhow
     assert_ok(jwt_response, StatusCode::OK);
 
     Ok(())
+}
+
+async fn discover_live_base_usdc_sample(
+    client: &reqwest::Client,
+    rpc_url: &str,
+) -> anyhow::Result<LiveChainSample> {
+    let chain_head = rpc_pool::evm_rpc_client::eth_block_number(client, rpc_url).await?;
+    let safe_head = chain_head.saturating_sub(LIVE_SAFE_CONFIRMATION_DEPTH);
+
+    for chunk_index in 0..LIVE_DISCOVERY_CHUNKS {
+        let to_block = safe_head.saturating_sub(chunk_index * LIVE_DISCOVERY_WINDOW);
+        let from_block = to_block.saturating_sub(LIVE_DISCOVERY_WINDOW - 1).max(1);
+        let logs = rpc_pool::evm_rpc_client::eth_get_logs(
+            client,
+            rpc_url,
+            BASE_USDC_ADDRESS,
+            from_block,
+            to_block,
+        )
+        .await?;
+
+        let mut selected_block = None;
+        for log in &logs {
+            let has_transfer_topic = log
+                .topics
+                .first()
+                .map(|topic| topic.eq_ignore_ascii_case(TRANSFER_TOPIC0))
+                .unwrap_or(false);
+            if has_transfer_topic {
+                selected_block = Some(parse_hex_u64(&log.block_number)?);
+                break;
+            }
+        }
+
+        if let Some(block_number) = selected_block {
+            let mut block_log_count = 0usize;
+            let mut block_transfer_count = 0usize;
+            for log in &logs {
+                if parse_hex_u64(&log.block_number)? == block_number {
+                    block_log_count += 1;
+                    if log
+                        .topics
+                        .first()
+                        .map(|topic| topic.eq_ignore_ascii_case(TRANSFER_TOPIC0))
+                        .unwrap_or(false)
+                    {
+                        block_transfer_count += 1;
+                    }
+                }
+            }
+
+            return Ok(LiveChainSample {
+                from_block: block_number,
+                to_block: block_number,
+                log_count: block_log_count,
+                transfer_count: block_transfer_count,
+            });
+        }
+    }
+
+    anyhow::bail!("no Base USDC Transfer logs found near safe head {safe_head} using {rpc_url}")
 }
 
 fn test_database_url() -> Option<String> {
@@ -590,6 +824,31 @@ fn erc20_transfer_abi() -> Value {
     ])
 }
 
+fn erc20_transfer_and_approval_abi() -> Value {
+    json!([
+        {
+            "anonymous": false,
+            "inputs": [
+                {"indexed": true, "internalType": "address", "name": "from", "type": "address"},
+                {"indexed": true, "internalType": "address", "name": "to", "type": "address"},
+                {"indexed": false, "internalType": "uint256", "name": "value", "type": "uint256"}
+            ],
+            "name": "Transfer",
+            "type": "event"
+        },
+        {
+            "anonymous": false,
+            "inputs": [
+                {"indexed": true, "internalType": "address", "name": "owner", "type": "address"},
+                {"indexed": true, "internalType": "address", "name": "spender", "type": "address"},
+                {"indexed": false, "internalType": "uint256", "name": "value", "type": "uint256"}
+            ],
+            "name": "Approval",
+            "type": "event"
+        }
+    ])
+}
+
 fn address_topic(address: &str) -> String {
     format!("0x{:0>64}", address.trim_start_matches("0x"))
 }
@@ -677,4 +936,44 @@ async fn count_rows(pool: &PgPool, table_name: &'static str) -> anyhow::Result<i
         .fetch_one(pool)
         .await?
         .0)
+}
+
+async fn count_raw_logs_for_contract(
+    pool: &PgPool,
+    chain_id: i64,
+    contract_address: &str,
+) -> anyhow::Result<i64> {
+    Ok(sqlx::query_as::<_, (i64,)>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM eventlake_raw_logs
+        WHERE chain_id = $1 AND contract_address = $2
+        "#,
+    )
+    .bind(chain_id)
+    .bind(contract_address)
+    .fetch_one(pool)
+    .await?
+    .0)
+}
+
+async fn count_decoded_transfers(
+    pool: &PgPool,
+    chain_id: i64,
+    contract_address: &str,
+) -> anyhow::Result<i64> {
+    Ok(sqlx::query_as::<_, (i64,)>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM eventlake_decoded_events
+        WHERE chain_id = $1
+          AND contract_address = $2
+          AND event_name = 'Transfer'
+        "#,
+    )
+    .bind(chain_id)
+    .bind(contract_address)
+    .fetch_one(pool)
+    .await?
+    .0)
 }

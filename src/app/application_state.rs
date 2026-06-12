@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use reqwest::Client;
 use sqlx::PgPool;
@@ -17,7 +17,10 @@ impl ApplicationState {
         Self {
             configuration: Arc::new(configuration),
             pool,
-            http_client: Client::new(),
+            http_client: Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("HTTP client builds"),
         }
     }
 }
