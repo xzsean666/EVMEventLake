@@ -14,7 +14,7 @@ chrono = { version = "0.4.42", features = ["serde", "clock"] }
 dotenvy = "0.15.7"
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["rust_crypto"] }
 hex = "0.4.3"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "socks"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"

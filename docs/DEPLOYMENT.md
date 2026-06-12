@@ -149,3 +149,51 @@ Runtime check:
 ```bash
 curl -fsS http://127.0.0.1:8080/health/ready
 ```
+
+## 8. Optional SSH Tunnel Proxy
+
+The prebuilt Docker images include `scripts/docker-ssh-tunnel-proxy.sh` as the
+container entrypoint. The Dockerfiles, compose files, and script default
+`SSH_TUNNEL_ENABLED=false`, so the wrapper simply starts EventLake unless you
+explicitly enable it. If tunnel variables are set and
+`SSH_TUNNEL_ENABLED=true`, it opens an SSH dynamic SOCKS5 tunnel and exports:
+
+- `ALL_PROXY`
+- `HTTP_PROXY`
+- `HTTPS_PROXY`
+- lowercase equivalents
+- `NO_PROXY`
+
+This is a process-level proxy environment, not an iptables transparent proxy.
+It covers EventLake's `reqwest` JSON-RPC calls and other clients that honor
+`ALL_PROXY`/`HTTP_PROXY`/`HTTPS_PROXY`. Arbitrary raw TCP traffic would need a
+separate privileged transparent-proxy setup.
+
+Minimum `.env` values:
+
+```bash
+SSH_TUNNEL_ENABLED=true
+SSH_TUNNEL_HOST=203.0.113.10
+SSH_TUNNEL_PORT=22
+SSH_TUNNEL_USER=root
+SSH_TUNNEL_PRIVATE_KEY_B64=...
+SSH_TUNNEL_NO_PROXY=127.0.0.1,localhost,::1,postgres,eventlake
+```
+
+Prefer `SSH_TUNNEL_PRIVATE_KEY_B64` because multiline private keys are fragile in
+environment files:
+
+```bash
+base64 -w0 ~/.ssh/id_ed25519
+```
+
+The script is generic. To reuse it in another Docker image, install
+`openssh-client`, copy the script into the image, and wrap the service command:
+
+```dockerfile
+COPY scripts/docker-ssh-tunnel-proxy.sh /usr/local/bin/docker-ssh-tunnel-proxy
+RUN chmod 0755 /usr/local/bin/docker-ssh-tunnel-proxy
+ENV SSH_TUNNEL_ENABLED=false
+ENTRYPOINT ["docker-ssh-tunnel-proxy"]
+CMD ["your-service"]
+```

@@ -17,7 +17,7 @@ RUN set -eux; \
         -e "s#http://security.debian.org/debian-security#${DEBIAN_SECURITY_MIRROR}#g" \
         "$sources_file"; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl; \
+    apt-get install -y --no-install-recommends ca-certificates curl openssh-client; \
     rm -rf /var/lib/apt/lists/*; \
     groupadd --system --gid 10001 eventlake; \
     useradd --system --uid 10001 --gid eventlake --home-dir /var/lib/eventlake eventlake; \
@@ -25,10 +25,12 @@ RUN set -eux; \
     chown -R eventlake:eventlake /var/lib/eventlake
 
 COPY ${EVENTLAKE_BINARY} /usr/local/bin/eventlake
-RUN chmod 0755 /usr/local/bin/eventlake
+COPY scripts/docker-ssh-tunnel-proxy.sh /usr/local/bin/docker-ssh-tunnel-proxy
+RUN chmod 0755 /usr/local/bin/eventlake /usr/local/bin/docker-ssh-tunnel-proxy
 
 ENV EVENTLAKE_HTTP_HOST=0.0.0.0 \
-    EVENTLAKE_HTTP_PORT=8080
+    EVENTLAKE_HTTP_PORT=8080 \
+    SSH_TUNNEL_ENABLED=false
 
 WORKDIR /var/lib/eventlake
 USER eventlake:eventlake
@@ -38,4 +40,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:${EVENTLAKE_HTTP_PORT:-8080}/health/ready" >/dev/null || exit 1
 
-ENTRYPOINT ["eventlake"]
+ENTRYPOINT ["docker-ssh-tunnel-proxy"]
+CMD ["eventlake"]
