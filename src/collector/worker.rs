@@ -54,6 +54,56 @@ async fn collect_subscription(
     state: &ApplicationState,
     subscription: &SubscriptionRecord,
 ) -> Result<(), ApplicationError> {
+    #[cfg(feature = "clickhouse")]
+    if state.configuration.clickhouse.enabled && subscription.status == "clickhouse_reorg_retrying" {
+        match crate::clickhouse::active_client(state).await.and_then(|client| {
+            client
+                .ok_or_else(|| {
+                    ApplicationError::ExternalService(
+                        "ClickHouse is enabled but no client is available".to_owned(),
+                    )
+                })
+        }) {
+            Ok(client) => match crate::clickhouse::invalidate_from_block(
+                &client,
+                subscription.chain_id,
+                subscription.current_block,
+            )
+            .await
+            {
+                Ok(()) => {
+                    subscriptions::resume_after_clickhouse_reorg(&state.pool, subscription.id)
+                        .await?;
+                    tracing::info!(
+                        subscription_id = %subscription.id,
+                        chain_id = subscription.chain_id,
+                        from_block = subscription.current_block,
+                        "ClickHouse reorg tombstones applied; collection will resume"
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(
+                        subscription_id = %subscription.id,
+                        chain_id = subscription.chain_id,
+                        from_block = subscription.current_block,
+                        error = %error,
+                        "ClickHouse reorg tombstone retry failed"
+                    );
+                }
+            },
+            Err(error) => {
+                tracing::error!(
+                    subscription_id = %subscription.id,
+                    chain_id = subscription.chain_id,
+                    from_block = subscription.current_block,
+                    error = %error,
+                    "ClickHouse is unavailable while retrying a reorg"
+                );
+            }
+        }
+        return Ok(());
+    }
+
     let collection_policy =
         chains::get_collection_policy(&state.pool, subscription.chain_id).await?;
     let endpoint = rpc_pool::select_rpc_endpoint(&state.pool, subscription.chain_id).await?;
@@ -159,36 +209,49 @@ async fn collect_subscription(
         for log in &logs {
             let block_number = parse_hex_u64(&log.block_number)?;
             if observed_blocks.insert(block_number) {
-                let result = reorg::observe_block(
+                let result = reorg::observe_block_with_postgres_search_storage(
                     &state.pool,
                     subscription.chain_id,
                     block_number,
                     &log.block_hash,
+                    !state.configuration.clickhouse.enabled,
                 )
                 .await?;
                 if matches!(result, reorg::BlockCheckpointResult::ReorgDetected { .. }) {
                     #[cfg(feature = "clickhouse")]
-                    if let Some(client) = &state.clickhouse {
-                        match crate::clickhouse::sync_reorg_from_postgres(
-                            client,
-                            &state.pool,
-                            subscription.chain_id,
-                            block_number,
-                        )
-                        .await
-                        {
-                            Ok(count) => tracing::info!(
-                                chain_id = subscription.chain_id,
-                                from_block = block_number,
-                                events = count,
-                                "mirrored reorg invalidation to ClickHouse"
-                            ),
-                            Err(error) => tracing::warn!(
+                    if state.configuration.clickhouse.enabled {
+                        let tombstone_result = match crate::clickhouse::active_client(state).await {
+                            Ok(Some(client)) => crate::clickhouse::invalidate_from_block(
+                                &client,
+                                subscription.chain_id,
+                                block_number,
+                            )
+                            .await
+                            .map_err(|error| {
+                                ApplicationError::ExternalService(format!(
+                                    "ClickHouse reorg tombstone write failed: {error}"
+                                ))
+                            }),
+                            Ok(None) => Err(ApplicationError::ExternalService(
+                                "ClickHouse is enabled but no client is available".to_owned(),
+                            )),
+                            Err(error) => Err(error),
+                        };
+                        if let Err(error) = tombstone_result {
+                            subscriptions::mark_chain_clickhouse_reorg_retrying(
+                                &state.pool,
+                                subscription.chain_id,
+                                block_number,
+                                &error.public_message(),
+                            )
+                            .await?;
+                            tracing::error!(
                                 chain_id = subscription.chain_id,
                                 from_block = block_number,
                                 error = %error,
-                                "failed to mirror reorg invalidation to ClickHouse"
-                            ),
+                                "ClickHouse reorg tombstone write failed; affected subscriptions will retry"
+                            );
+                            return Ok(());
                         }
                     }
                     tracing::warn!(

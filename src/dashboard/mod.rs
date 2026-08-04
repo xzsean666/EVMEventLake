@@ -58,5 +58,29 @@ async fn dashboard_summary(
     .fetch_one(&state.pool)
     .await?;
 
+    #[cfg(feature = "clickhouse")]
+    let summary = if state.configuration.clickhouse.enabled {
+        let client = crate::clickhouse::active_client(&state)
+            .await?
+            .ok_or_else(|| {
+                ApplicationError::ExternalService(
+                    "ClickHouse is enabled but no client is available".to_owned(),
+                )
+            })?;
+        let total_decoded_events = crate::clickhouse::decoded_event_count(&client)
+            .await
+            .map_err(|error| {
+                ApplicationError::ExternalService(format!(
+                    "ClickHouse dashboard query failed: {error}"
+                ))
+            })?;
+        DashboardSummary {
+            total_decoded_events,
+            ..summary
+        }
+    } else {
+        summary
+    };
+
     Ok(response::success(summary))
 }

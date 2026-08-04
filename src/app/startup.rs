@@ -29,7 +29,10 @@ pub async fn run(configuration: ApplicationConfiguration) -> anyhow::Result<()> 
         Ok(Some(client)) => state.with_clickhouse(client),
         Ok(None) => state,
         Err(error) => {
-            tracing::warn!(error = %error, "ClickHouse unavailable; using PostgreSQL search fallback");
+            tracing::warn!(
+                error = %error,
+                "ClickHouse unavailable at startup; indexed-event writes will retry until it recovers"
+            );
             state
         }
     };

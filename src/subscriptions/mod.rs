@@ -271,7 +271,10 @@ pub async fn runnable_subscriptions(
         SELECT {SUBSCRIPTION_COLUMNS}
         FROM eventlake_subscriptions
         WHERE active = true
-          AND status IN ('pending', 'historical_syncing', 'realtime_syncing', 'error')
+          AND status IN (
+              'pending', 'historical_syncing', 'realtime_syncing', 'error',
+              'clickhouse_reorg_retrying'
+          )
         ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, updated_at ASC
         LIMIT $1
         "#
@@ -356,6 +359,110 @@ pub async fn mark_subscription_error(
     )
     .bind(id)
     .bind(error_message)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// A ClickHouse decoded-event write has not completed. Collection pauses for this
+/// subscription while decoder retries the queued raw log; it resumes automatically
+/// once no ClickHouse retry entries remain.
+pub async fn mark_clickhouse_write_retrying(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+    error_message: &str,
+) -> Result<(), ApplicationError> {
+    sqlx::query(
+        r#"
+        UPDATE eventlake_subscriptions
+        SET status = 'clickhouse_write_retrying',
+            error_message = $2,
+            updated_at = now()
+        WHERE id = $1 AND active = true
+        "#,
+    )
+    .bind(id)
+    .bind(error_message)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Restores collection after every pending ClickHouse write for this subscription has
+/// succeeded. Non-ClickHouse decode errors retain their own retry policy and do not
+/// keep an otherwise healthy subscription blocked forever.
+pub async fn resume_after_clickhouse_writes(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+) -> Result<(), ApplicationError> {
+    sqlx::query(
+        r#"
+        UPDATE eventlake_subscriptions s
+        SET status = 'pending',
+            error_message = NULL,
+            updated_at = now()
+        WHERE s.id = $1
+          AND s.active = true
+          AND s.status = 'clickhouse_write_retrying'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM eventlake_decode_queue q
+              WHERE q.subscription_id = s.id
+                AND q.status IN ('pending', 'clickhouse_retrying')
+          )
+        "#,
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// A reorg needs ClickHouse tombstones before any affected subscription can collect
+/// the canonical fork again. The collector retries this state on every worker tick.
+pub async fn mark_chain_clickhouse_reorg_retrying(
+    pool: &sqlx::PgPool,
+    chain_id: i64,
+    from_block: i64,
+    error_message: &str,
+) -> Result<(), ApplicationError> {
+    sqlx::query(
+        r#"
+        UPDATE eventlake_subscriptions
+        SET status = 'clickhouse_reorg_retrying',
+            error_message = $3,
+            updated_at = now()
+        WHERE chain_id = $1
+          AND active = true
+          AND current_block >= $2
+        "#,
+    )
+    .bind(chain_id)
+    .bind(from_block)
+    .bind(error_message)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn resume_after_clickhouse_reorg(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+) -> Result<(), ApplicationError> {
+    sqlx::query(
+        r#"
+        UPDATE eventlake_subscriptions
+        SET status = 'pending',
+            error_message = NULL,
+            updated_at = now()
+        WHERE id = $1 AND active = true AND status = 'clickhouse_reorg_retrying'
+        "#,
+    )
+    .bind(id)
     .execute(pool)
     .await?;
 

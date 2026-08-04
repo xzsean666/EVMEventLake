@@ -21,7 +21,7 @@ pub struct ApplicationState {
     pub http_client: Client,
     pub abi_cache: AbiCache,
     #[cfg(feature = "clickhouse")]
-    pub clickhouse: Option<clickhouse::Client>,
+    clickhouse: Arc<RwLock<Option<clickhouse::Client>>>,
 }
 
 impl ApplicationState {
@@ -35,13 +35,37 @@ impl ApplicationState {
                 .expect("HTTP client builds"),
             abi_cache: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "clickhouse")]
-            clickhouse: None,
+            clickhouse: Arc::new(RwLock::new(None)),
         }
     }
 
     #[cfg(feature = "clickhouse")]
-    pub fn with_clickhouse(mut self, clickhouse: clickhouse::Client) -> Self {
-        self.clickhouse = Some(clickhouse);
+    pub fn with_clickhouse(self, clickhouse: clickhouse::Client) -> Self {
+        self.set_clickhouse_client(clickhouse);
         self
+    }
+
+    #[cfg(feature = "clickhouse")]
+    pub fn clickhouse_client(&self) -> Option<clickhouse::Client> {
+        self.clickhouse
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[cfg(feature = "clickhouse")]
+    pub fn set_clickhouse_client(&self, clickhouse: clickhouse::Client) {
+        *self
+            .clickhouse
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(clickhouse);
+    }
+
+    #[cfg(feature = "clickhouse")]
+    pub fn clear_clickhouse_client(&self) {
+        *self
+            .clickhouse
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 }

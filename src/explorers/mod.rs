@@ -5,6 +5,8 @@ use axum::{
 };
 use serde::Serialize;
 use serde_json::Value;
+#[cfg(feature = "clickhouse")]
+use serde_json::json;
 use sqlx::FromRow;
 use utoipa::{OpenApi, ToSchema};
 
@@ -111,6 +113,66 @@ async fn address_explorer(
 ) -> Result<Json<ApiResponse<AddressExplorerResponse>>, ApplicationError> {
     let address = normalize_address(&address)?;
 
+    #[cfg(feature = "clickhouse")]
+    if state.configuration.clickhouse.enabled {
+        let client = crate::clickhouse::active_client(&state)
+            .await?
+            .ok_or_else(|| {
+                ApplicationError::ExternalService(
+                    "ClickHouse is enabled but no client is available".to_owned(),
+                )
+            })?;
+        let (recent_events, related_contracts, event_statistics) =
+            crate::clickhouse::address_explorer(&client, &address)
+                .await
+                .map_err(|error| {
+                    ApplicationError::ExternalService(format!(
+                        "ClickHouse address explorer query failed: {error}"
+                    ))
+                })?;
+        let recent_events = recent_events
+            .into_iter()
+            .map(|event| {
+                Ok(AddressRecentEvent {
+                    chain_id: to_i64(event.chain_id, "chain_id")?,
+                    contract_address: event.contract_address,
+                    event_name: event.event_name,
+                    field_name: event.field_name,
+                    block_number: to_i64(event.block_number, "block_number")?,
+                    transaction_hash: event.transaction_hash,
+                })
+            })
+            .collect::<Result<Vec<_>, ApplicationError>>()?;
+        let last_activity_block = recent_events.first().map(|event| event.block_number);
+        let related_contracts = related_contracts
+            .into_iter()
+            .map(|contract| {
+                Ok(RelatedContract {
+                    chain_id: to_i64(contract.chain_id, "chain_id")?,
+                    contract_address: contract.contract_address,
+                    event_count: to_i64(contract.event_count, "event_count")?,
+                })
+            })
+            .collect::<Result<Vec<_>, ApplicationError>>()?;
+        let event_statistics = event_statistics
+            .into_iter()
+            .map(|event| {
+                Ok(EventStatistic {
+                    event_name: event.event_name,
+                    event_count: to_i64(event.event_count, "event_count")?,
+                })
+            })
+            .collect::<Result<Vec<_>, ApplicationError>>()?;
+
+        return Ok(response::success(AddressExplorerResponse {
+            address,
+            recent_events,
+            related_contracts,
+            event_statistics,
+            last_activity_block,
+        }));
+    }
+
     let recent_events = sqlx::query_as::<_, AddressRecentEvent>(
         r#"
         SELECT chain_id, contract_address, event_name, field_name, block_number, transaction_hash
@@ -183,6 +245,57 @@ async fn contract_explorer(
     Path((chain_id, contract_address)): Path<(i64, String)>,
 ) -> Result<Json<ApiResponse<ContractExplorerResponse>>, ApplicationError> {
     let contract_address = normalize_address(&contract_address)?;
+
+    #[cfg(feature = "clickhouse")]
+    if state.configuration.clickhouse.enabled {
+        let exists = sqlx::query_as::<_, (i64,)>(
+            r#"
+            SELECT chain_id
+            FROM eventlake_contract_registry
+            WHERE chain_id = $1 AND contract_address = $2
+            "#,
+        )
+        .bind(chain_id)
+        .bind(&contract_address)
+        .fetch_optional(&state.pool)
+        .await?
+        .is_some();
+        if !exists {
+            return Err(ApplicationError::NotFound(format!(
+                "contract {chain_id}:{contract_address}"
+            )));
+        }
+
+        let client = crate::clickhouse::active_client(&state)
+            .await?
+            .ok_or_else(|| {
+                ApplicationError::ExternalService(
+                    "ClickHouse is enabled but no client is available".to_owned(),
+                )
+            })?;
+        let statistics = crate::clickhouse::contract_explorer(&client, chain_id, &contract_address)
+            .await
+            .map_err(|error| {
+                ApplicationError::ExternalService(format!(
+                    "ClickHouse contract explorer query failed: {error}"
+                ))
+            })?;
+        return Ok(response::success(ContractExplorerResponse {
+            chain_id,
+            contract_address,
+            event_count: to_i64(statistics.event_count, "event_count")?,
+            first_seen_block: statistics
+                .first_seen_block
+                .map(|block_number| to_i64(block_number, "first_seen_block"))
+                .transpose()?,
+            last_seen_block: statistics
+                .last_seen_block
+                .map(|block_number| to_i64(block_number, "last_seen_block"))
+                .transpose()?,
+            event_types: json!(statistics.event_types),
+        }));
+    }
+
     let record = sqlx::query_as::<_, ContractExplorerResponse>(
         r#"
         SELECT cr.chain_id,
@@ -224,6 +337,46 @@ async fn event_explorer(
     State(state): State<ApplicationState>,
     Path(event_name): Path<String>,
 ) -> Result<Json<ApiResponse<EventExplorerResponse>>, ApplicationError> {
+    #[cfg(feature = "clickhouse")]
+    if state.configuration.clickhouse.enabled {
+        let (signatures, topic0_values) = sqlx::query_as::<_, (Value, Value)>(
+            r#"
+            SELECT jsonb_agg(DISTINCT signature) AS signatures,
+                   jsonb_agg(DISTINCT topic0) AS topic0_values
+            FROM eventlake_event_registry
+            WHERE event_name = $1
+            GROUP BY event_name
+            "#,
+        )
+        .bind(&event_name)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or_else(|| ApplicationError::NotFound("event".to_owned()))?;
+
+        let client = crate::clickhouse::active_client(&state)
+            .await?
+            .ok_or_else(|| {
+                ApplicationError::ExternalService(
+                    "ClickHouse is enabled but no client is available".to_owned(),
+                )
+            })?;
+        let statistics = crate::clickhouse::event_explorer(&client, &event_name)
+            .await
+            .map_err(|error| {
+                ApplicationError::ExternalService(format!(
+                    "ClickHouse event explorer query failed: {error}"
+                ))
+            })?;
+
+        return Ok(response::success(EventExplorerResponse {
+            event_name,
+            signatures,
+            topic0_values,
+            contract_count: to_i64(statistics.contract_count, "contract_count")?,
+            total_count: to_i64(statistics.total_count, "total_count")?,
+        }));
+    }
+
     let record = sqlx::query_as::<_, EventExplorerResponse>(
         r#"
         SELECT er.event_name,
@@ -245,4 +398,11 @@ async fn event_explorer(
     .ok_or_else(|| ApplicationError::NotFound("event".to_owned()))?;
 
     Ok(response::success(record))
+}
+
+#[cfg(feature = "clickhouse")]
+fn to_i64(value: u64, field: &str) -> Result<i64, ApplicationError> {
+    i64::try_from(value).map_err(|_| {
+        ApplicationError::ExternalService(format!("ClickHouse {field} exceeds PostgreSQL BIGINT"))
+    })
 }

@@ -3,11 +3,11 @@ use chrono::{DateTime, Utc};
 use clickhouse::{Client, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::FromRow;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
+    app::application_state::ApplicationState,
     configuration::ClickHouseConfig,
     indexing::DecodedFieldValue,
     search::{SearchEventRecord, SearchFilter, SearchOperator, SearchRequest, SearchSort},
@@ -123,6 +123,27 @@ pub async fn connect(configuration: &ClickHouseConfig) -> anyhow::Result<Option<
     Ok(Some(client))
 }
 
+/// Returns a live analytical client when ClickHouse is enabled. A failed startup
+/// connection is retried here so collection can resume without restarting EventLake.
+pub async fn active_client(state: &ApplicationState) -> Result<Option<Client>, ApplicationError> {
+    if !state.configuration.clickhouse.enabled {
+        return Ok(None);
+    }
+
+    if let Some(client) = state.clickhouse_client() {
+        return Ok(Some(client));
+    }
+
+    let client = connect(&state.configuration.clickhouse)
+        .await
+        .map_err(|error| ApplicationError::ExternalService(format!("ClickHouse unavailable: {error}")))?
+        .ok_or_else(|| {
+            ApplicationError::ExternalService("ClickHouse is enabled but no client is available".to_owned())
+        })?;
+    state.set_clickhouse_client(client.clone());
+    Ok(Some(client))
+}
+
 pub async fn initialize_schema(client: &Client) -> anyhow::Result<()> {
     for statement in SCHEMA
         .split(';')
@@ -139,9 +160,8 @@ pub async fn initialize_schema(client: &Client) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Mirrors one committed PostgreSQL decoded event. The caller owns the source-of-truth
-/// transaction and invokes this only after it commits, so a replica failure never rolls
-/// PostgreSQL state back.
+/// Writes one decoded-event search projection. The caller has already persisted the raw log
+/// and queue row in PostgreSQL, and marks that queue row complete only after this succeeds.
 pub async fn write_indexed_event(client: &Client, event: IndexedEvent) -> anyhow::Result<()> {
     let chain_id = as_u64(event.chain_id, "chain_id")?;
     let block_number = as_u64(event.block_number, "block_number")?;
@@ -220,92 +240,71 @@ pub async fn write_indexed_event(client: &Client, event: IndexedEvent) -> anyhow
     Ok(())
 }
 
-#[derive(FromRow)]
-struct ReorgEventRow {
-    id: Uuid,
-    raw_log_id: Uuid,
-    subscription_id: Option<Uuid>,
-    chain_id: i64,
-    block_number: i64,
-    block_hash: String,
-    transaction_hash: String,
-    log_index: i64,
-    contract_address: String,
-    abi_id: Option<Uuid>,
-    event_name: String,
-    topic0: String,
-    indexed_fields: Value,
-    non_indexed_fields: Value,
-    decoded_at: DateTime<Utc>,
-}
-
-/// Mirrors PostgreSQL's reorg invalidation as newer tombstone rows. `FINAL` on the
-/// ClickHouse search path makes the invalidation visible before background merges run.
-pub async fn sync_reorg_from_postgres(
+/// Writes tombstone versions directly from ClickHouse's own projection tables. This keeps
+/// reorg repair independent from PostgreSQL decoded-event rows.
+pub async fn invalidate_from_block(
     client: &Client,
-    pool: &sqlx::PgPool,
     chain_id: i64,
     from_block: i64,
-) -> anyhow::Result<usize> {
-    let rows = sqlx::query_as::<_, ReorgEventRow>(
+) -> anyhow::Result<()> {
+    let chain_id = as_u64(chain_id, "chain_id")?;
+    let from_block = as_u64(from_block, "from_block")?;
+
+    execute_reorg_tombstone(
+        client,
         r#"
-        SELECT d.id,
-               d.raw_log_id,
-               rl.subscription_id,
-               d.chain_id,
-               d.block_number,
-               rl.block_hash,
-               rl.transaction_hash,
-               rl.log_index,
-               d.contract_address,
-               d.abi_id,
-               d.event_name,
-               d.topic0,
-               d.indexed_fields,
-               d.non_indexed_fields,
-               d.decoded_at
-        FROM eventlake_decoded_events d
-        JOIN eventlake_raw_logs rl
-          ON rl.id = d.raw_log_id AND rl.block_number = d.block_number
-        WHERE d.chain_id = $1
-          AND d.block_number >= $2
-          AND d.decode_status = 'reorged'
+        INSERT INTO decoded_events
+        SELECT id, raw_log_id, subscription_id, chain_id, block_number, block_hash,
+               transaction_hash, log_index, contract_address, event_name, topic0, abi_id,
+               indexed_fields, non_indexed_fields, decoded_fields, true, decoded_at, now64(3)
+        FROM decoded_events FINAL
+        WHERE chain_id = ? AND block_number >= ? AND is_removed = false
         "#,
+        chain_id,
+        from_block,
     )
-    .bind(chain_id)
-    .bind(from_block)
-    .fetch_all(pool)
+    .await?;
+    execute_reorg_tombstone(
+        client,
+        r#"
+        INSERT INTO address_index
+        SELECT chain_id, address, block_number, transaction_hash, log_index, event_name,
+               contract_address, role, field_name, true, now64(3)
+        FROM address_index FINAL
+        WHERE chain_id = ? AND block_number >= ? AND is_removed = false
+        "#,
+        chain_id,
+        from_block,
+    )
+    .await?;
+    execute_reorg_tombstone(
+        client,
+        r#"
+        INSERT INTO event_field_index
+        SELECT chain_id, topic0, field_name, field_value, block_number, transaction_hash,
+               log_index, true, now64(3)
+        FROM event_field_index FINAL
+        WHERE chain_id = ? AND block_number >= ? AND is_removed = false
+        "#,
+        chain_id,
+        from_block,
+    )
     .await
-    .context("failed to read PostgreSQL reorg rows for ClickHouse sync")?;
+}
 
-    let count = rows.len();
-    for row in rows {
-        write_indexed_event(
-            client,
-            IndexedEvent {
-                id: row.id,
-                raw_log_id: row.raw_log_id,
-                subscription_id: row.subscription_id,
-                chain_id: row.chain_id,
-                block_number: row.block_number,
-                block_hash: row.block_hash,
-                transaction_hash: row.transaction_hash,
-                log_index: row.log_index,
-                contract_address: row.contract_address,
-                event_name: row.event_name,
-                topic0: row.topic0,
-                abi_id: row.abi_id,
-                indexed_fields: row.indexed_fields.clone(),
-                non_indexed_fields: row.non_indexed_fields.clone(),
-                fields: decoded_fields_from_json(&row.indexed_fields, &row.non_indexed_fields),
-                is_removed: true,
-                decoded_at: row.decoded_at,
-            },
-        )
-        .await?;
-    }
-
-    Ok(count)
+async fn execute_reorg_tombstone(
+    client: &Client,
+    statement: &str,
+    chain_id: u64,
+    from_block: u64,
+) -> anyhow::Result<()> {
+    client
+        .query(statement)
+        .bind(chain_id)
+        .bind(from_block)
+        .execute()
+        .await
+        .context("failed to write ClickHouse reorg tombstones")
 }
 
 async fn write_rows<T>(client: &Client, table: &str, rows: &[T]) -> anyhow::Result<()>
@@ -331,33 +330,6 @@ where
 
 fn should_index_field_value(value: &Value) -> bool {
     matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_))
-}
-
-fn decoded_fields_from_json(
-    indexed_fields: &Value,
-    non_indexed_fields: &Value,
-) -> Vec<DecodedFieldValue> {
-    let mut fields = Vec::new();
-    for object in [indexed_fields, non_indexed_fields] {
-        if let Some(values) = object.as_object() {
-            for (field_name, json_value) in values {
-                fields.push(DecodedFieldValue {
-                    field_name: field_name.clone(),
-                    field_type: "unknown".to_owned(),
-                    normalized_value: normalized_json_value(json_value),
-                    json_value: json_value.clone(),
-                });
-            }
-        }
-    }
-    fields
-}
-
-fn normalized_json_value(value: &Value) -> String {
-    match value {
-        Value::String(value) => value.to_ascii_lowercase(),
-        other => other.to_string().to_ascii_lowercase(),
-    }
 }
 
 fn as_u64(value: i64, field: &str) -> anyhow::Result<u64> {
@@ -444,6 +416,148 @@ pub async fn search_events(
         .collect()
 }
 
+pub async fn decoded_event_count(client: &Client) -> anyhow::Result<i64> {
+    let count = client
+        .query("SELECT count() FROM decoded_events FINAL WHERE is_removed = false")
+        .fetch_one::<u64>()
+        .await?;
+    i64::try_from(count).context("ClickHouse decoded-event count exceeds PostgreSQL BIGINT")
+}
+
+#[derive(Row, Deserialize)]
+pub struct AddressRecentEvent {
+    pub chain_id: u64,
+    pub contract_address: String,
+    pub event_name: String,
+    pub field_name: String,
+    pub block_number: u64,
+    pub transaction_hash: String,
+}
+
+#[derive(Row, Deserialize)]
+pub struct RelatedContract {
+    pub chain_id: u64,
+    pub contract_address: String,
+    pub event_count: u64,
+}
+
+#[derive(Row, Deserialize)]
+pub struct EventStatistic {
+    pub event_name: String,
+    pub event_count: u64,
+}
+
+pub async fn address_explorer(
+    client: &Client,
+    address: &str,
+) -> anyhow::Result<(
+    Vec<AddressRecentEvent>,
+    Vec<RelatedContract>,
+    Vec<EventStatistic>,
+)> {
+    let recent_events = client
+        .query(
+            r#"
+            SELECT chain_id, contract_address, event_name, field_name, block_number,
+                   transaction_hash
+            FROM address_index FINAL
+            WHERE is_removed = false AND address = ?
+            ORDER BY block_number DESC
+            LIMIT 50
+            "#,
+        )
+        .bind(address)
+        .fetch_all::<AddressRecentEvent>()
+        .await?;
+    let related_contracts = client
+        .query(
+            r#"
+            SELECT chain_id, contract_address, count() AS event_count
+            FROM address_index FINAL
+            WHERE is_removed = false AND address = ?
+            GROUP BY chain_id, contract_address
+            ORDER BY event_count DESC
+            LIMIT 50
+            "#,
+        )
+        .bind(address)
+        .fetch_all::<RelatedContract>()
+        .await?;
+    let event_statistics = client
+        .query(
+            r#"
+            SELECT event_name, count() AS event_count
+            FROM address_index FINAL
+            WHERE is_removed = false AND address = ?
+            GROUP BY event_name
+            ORDER BY event_count DESC
+            LIMIT 50
+            "#,
+        )
+        .bind(address)
+        .fetch_all::<EventStatistic>()
+        .await?;
+
+    Ok((recent_events, related_contracts, event_statistics))
+}
+
+#[derive(Row, Deserialize)]
+pub struct ContractExplorerStatistics {
+    pub event_count: u64,
+    pub first_seen_block: Option<u64>,
+    pub last_seen_block: Option<u64>,
+    pub event_types: Vec<String>,
+}
+
+pub async fn contract_explorer(
+    client: &Client,
+    chain_id: i64,
+    contract_address: &str,
+) -> anyhow::Result<ContractExplorerStatistics> {
+    let chain_id = as_u64(chain_id, "chain_id")?;
+    client
+        .query(
+            r#"
+            SELECT count() AS event_count,
+                   minOrNull(block_number) AS first_seen_block,
+                   maxOrNull(block_number) AS last_seen_block,
+                   groupUniqArray(event_name) AS event_types
+            FROM decoded_events FINAL
+            WHERE is_removed = false AND chain_id = ? AND contract_address = ?
+            "#,
+        )
+        .bind(chain_id)
+        .bind(contract_address)
+        .fetch_one::<ContractExplorerStatistics>()
+        .await
+        .context("failed to query ClickHouse contract explorer")
+}
+
+#[derive(Row, Deserialize)]
+pub struct EventExplorerStatistics {
+    pub contract_count: u64,
+    pub total_count: u64,
+}
+
+pub async fn event_explorer(
+    client: &Client,
+    event_name: &str,
+) -> anyhow::Result<EventExplorerStatistics> {
+    client
+        .query(
+            r#"
+            SELECT uniqExact(contract_address) AS contract_count,
+                   count() AS total_count
+            FROM decoded_events FINAL
+            WHERE is_removed = false AND event_name = ?
+            "#,
+        )
+        .bind(event_name)
+        .fetch_one::<EventExplorerStatistics>()
+        .await
+        .context("failed to query ClickHouse event explorer")
+}
+
 fn chrono_from_offset_datetime(value: OffsetDateTime) -> anyhow::Result<DateTime<Utc>> {
     DateTime::<Utc>::from_timestamp(value.unix_timestamp(), value.nanosecond())
         .context("ClickHouse timestamp cannot be converted to chrono")
@@ -465,9 +579,11 @@ fn build_search_query(
         ),
         arguments: Vec::new(),
     };
+    let chain_id = exact_integer_filter(request, "chain_id");
+    let topic0 = exact_text_filter(request, "topic0");
 
     for filter in &request.filters {
-        push_search_filter(&mut query, filter)?;
+        push_search_filter(&mut query, filter, chain_id, topic0.as_deref())?;
     }
 
     push_search_sort(&mut query, request.sort.as_ref())?;
@@ -486,9 +602,27 @@ fn build_search_query(
     Ok(query)
 }
 
+fn exact_integer_filter(request: &SearchRequest, field: &str) -> Option<i64> {
+    request.filters.iter().find_map(|filter| {
+        (filter.field == field && matches!(filter.operator, SearchOperator::Eq))
+            .then(|| filter.value.as_i64())
+            .flatten()
+    })
+}
+
+fn exact_text_filter(request: &SearchRequest, field: &str) -> Option<String> {
+    request.filters.iter().find_map(|filter| {
+        (filter.field == field && matches!(filter.operator, SearchOperator::Eq))
+            .then(|| filter.value.as_str().map(str::to_owned))
+            .flatten()
+    })
+}
+
 fn push_search_filter(
     query: &mut SearchQuery,
     filter: &SearchFilter,
+    chain_id: Option<i64>,
+    topic0: Option<&str>,
 ) -> Result<(), ApplicationError> {
     match filter.field.as_str() {
         "chain_id" => push_integer_filter(query, "chain_id", filter),
@@ -510,9 +644,9 @@ fn push_search_filter(
             string_value(&filter.value)?,
         ),
         "transaction_hash" => push_transaction_filter(query, filter),
-        "address" => push_address_filter(query, filter),
+        "address" => push_address_filter(query, filter, chain_id),
         field if field.starts_with("field.") => {
-            push_event_field_filter(query, field.trim_start_matches("field."), filter)
+            push_event_field_filter(query, field.trim_start_matches("field."), filter, chain_id, topic0)
         }
         _ => Err(ApplicationError::BadRequest("invalid filter".to_owned())),
     }
@@ -623,6 +757,7 @@ fn push_transaction_filter(
 fn push_address_filter(
     query: &mut SearchQuery,
     filter: &SearchFilter,
+    chain_id: Option<i64>,
 ) -> Result<(), ApplicationError> {
     if !matches!(filter.operator, SearchOperator::Eq) {
         return Err(ApplicationError::BadRequest(
@@ -636,14 +771,20 @@ fn push_address_filter(
             SELECT chain_id, transaction_hash, log_index, block_number
             FROM address_index FINAL
             WHERE is_removed = false AND role = 'field' AND address = ?
+        "#,
+    );
+    query.arguments.push(QueryArgument::Text(normalize_address(
+        &string_value(&filter.value)?,
+    )?));
+    if let Some(chain_id) = chain_id {
+        query.sql.push_str(" AND chain_id = ?");
+        query.arguments.push(QueryArgument::Signed(chain_id));
+    }
+    query.sql.push_str(
+        r#"
         )
         "#,
     );
-    query
-        .arguments
-        .push(QueryArgument::Text(normalize_address(&string_value(
-            &filter.value,
-        )?)?));
     Ok(())
 }
 
@@ -651,6 +792,8 @@ fn push_event_field_filter(
     query: &mut SearchQuery,
     field_name: &str,
     filter: &SearchFilter,
+    chain_id: Option<i64>,
+    topic0: Option<&str>,
 ) -> Result<(), ApplicationError> {
     let condition = match filter.operator {
         SearchOperator::Eq => "field_value = ?",
@@ -670,13 +813,21 @@ fn push_event_field_filter(
             WHERE is_removed = false AND field_name = ? AND "#,
     );
     query.sql.push_str(condition);
-    query.sql.push_str(")");
     query
         .arguments
         .push(QueryArgument::Text(field_name.to_owned()));
     query.arguments.push(QueryArgument::Text(
         string_value(&filter.value)?.to_ascii_lowercase(),
     ));
+    if let Some(chain_id) = chain_id {
+        query.sql.push_str(" AND chain_id = ?");
+        query.arguments.push(QueryArgument::Signed(chain_id));
+    }
+    if let Some(topic0) = topic0 {
+        query.sql.push_str(" AND topic0 = ?");
+        query.arguments.push(QueryArgument::Text(topic0.to_owned()));
+    }
+    query.sql.push_str(")");
     Ok(())
 }
 

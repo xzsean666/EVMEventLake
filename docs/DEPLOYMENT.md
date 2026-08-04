@@ -2,7 +2,7 @@
 
 Version: 1.0
 
-Status: Draft
+Status: Current implementation
 
 ## 1. Deployment Modes
 
@@ -22,8 +22,9 @@ The original modes use:
 - `postgres`
 - `eventlake`
 
-The ClickHouse variants add a `clickhouse` service. PostgreSQL remains the source of truth;
-ClickHouse is an optional analytical-search replica.
+The ClickHouse variants add a `clickhouse` service for large analytical searches.
+PostgreSQL remains the raw-log and operational source of truth; in this mode decoded
+events and search indexes are stored only in ClickHouse.
 
 ## 2. Runtime Facts
 
@@ -35,7 +36,7 @@ ClickHouse is an optional analytical-search replica.
 - Default container port: `8080`
 - Default host port: `EVENTLAKE_HTTP_PORT`, default `8080`
 - Health endpoint: `/health/ready`
-- Persistent state: PostgreSQL; ClickHouse variants also persist their analytical replica
+- Persistent state: PostgreSQL; ClickHouse variants also persist the selected derived-event search store
 
 The application compiles migrations into the binary with `sqlx::migrate!("./migrations")`.
 The source-build Dockerfile copies `migrations/` into the builder stage so the release

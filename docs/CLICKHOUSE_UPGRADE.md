@@ -1,162 +1,160 @@
-# ClickHouse Upgrade Design
+# ClickHouse Upgrade
 
-Version: 1.0
-Status: Completed
+Version: 1.2
+
+Status: Current implementation
+
 Date: 2026-08-04
 
-## 1. 目标
+## 1. Goal
 
-在现有 PostgreSQL 架构基础上引入 ClickHouse，用于大规模事件数据的分析查询。
+ClickHouse is an optional scale-out search store. It is intended for large event
+volumes and multi-filter analytical queries, not for subscriptions, RPC management,
+authentication, or queues.
 
-**两者分工：**
+The upgrade deliberately does not keep a second copy of every decoded event and its
+search indexes.
 
-| 职责 | PostgreSQL | ClickHouse |
-|---|---|---|
-| 订阅、任务、检查点 | 是 | 否 |
-| 用户、API Key、Auth | 是 | 否 |
-| Chain、RPC 元数据 | 是 | 否 |
-| ABI、合约注册 | 是 | 否 |
-| 工作队列（decode、repair） | 是 | 否 |
-| 原始日志（raw_logs） | 是（来源真相） | 是（搜索副本） |
-| 解码事件（decoded_events） | 是（当前） | 是（分析查询主路径） |
-| 地址索引（address_index） | 是（当前） | 是（按地址大范围搜索） |
-| 事件字段索引（event_field_index） | 是（当前） | 是（按字段大范围搜索） |
+| Data or responsibility | PostgreSQL-only mode | ClickHouse mode |
+| --- | --- | --- |
+| Chain, RPC, ABI, contract metadata | PostgreSQL | PostgreSQL |
+| Subscription, checkpoint, decode queue, auth | PostgreSQL | PostgreSQL |
+| Raw EVM log | PostgreSQL | PostgreSQL |
+| Decoded event | PostgreSQL | ClickHouse only |
+| Address index | PostgreSQL | ClickHouse only |
+| Custom event-field index | PostgreSQL | ClickHouse only |
+| Search and explorer event statistics | PostgreSQL | ClickHouse |
 
-ClickHouse 只接收来自 `indexing` 模块的数据副本，不是来源真相。所有修复/reorg 仍以 PostgreSQL 为准，修复后重新同步到 ClickHouse。
+PostgreSQL raw logs are retained as the source record so ABI fixes and re-decoding
+remain possible. They are encoded chain logs, not a duplicate decoded-event/index
+projection. Raw-log retention still consumes PostgreSQL disk; this upgrade removes
+the duplicate *derived* data, not the source record.
 
-## 2. Cargo Feature
+## 2. Storage Mode
 
-```toml
-[features]
-default = []
-clickhouse = ["dep:clickhouse", "dep:time"]
-
-[dependencies]
-clickhouse = { version = "=0.13.3", optional = true, features = ["time", "uuid"] }
-time = { version = "0.3.44", optional = true }
-```
-
-编译：
-```
-cargo build --release --features clickhouse
-```
-
-不带 `--features clickhouse` 的构建行为与现在完全一致。
-
-## 3. 新增环境变量
+The runtime flag selects one mode for the process:
 
 ```env
-EVENTLAKE_CLICKHOUSE_HOST=localhost
-EVENTLAKE_CLICKHOUSE_PORT=8123
-EVENTLAKE_CLICKHOUSE_USER=eventlake
-EVENTLAKE_CLICKHOUSE_PASSWORD=eventlake
-EVENTLAKE_CLICKHOUSE_DB=eventlake
-# 是否启用 ClickHouse（运行时开关，仅在 clickhouse feature 编译时有效）
+# Default: PostgreSQL stores the derived event/search tables.
+EVENTLAKE_CLICKHOUSE_ENABLED=false
+
+# Large-data mode: ClickHouse stores those tables instead.
 EVENTLAKE_CLICKHOUSE_ENABLED=true
 ```
 
-## 4. ClickHouse 表设计
+The enabled mode also requires a binary built with the Cargo feature:
 
-### 4.1 decoded_events
-
-```sql
-CREATE TABLE IF NOT EXISTS decoded_events (
-    id              UUID,
-    raw_log_id      UUID,
-    subscription_id Nullable(UUID),
-    chain_id        UInt64,
-    block_number    UInt64,
-    block_hash      String,
-    transaction_hash String,
-    log_index       UInt32,
-    contract_address String,
-    event_name      String,
-    topic0          String,
-    abi_id          Nullable(UUID),
-    indexed_fields  String,  -- JSON
-    non_indexed_fields String,  -- JSON
-    decoded_fields  String,  -- JSON
-    is_removed      Bool     DEFAULT false,
-    decoded_at      DateTime64(3, 'UTC'),
-    indexed_at      DateTime64(3, 'UTC'),
-) ENGINE = ReplacingMergeTree(indexed_at)
-PARTITION BY (chain_id, toYYYYMM(toDateTime(intDiv(block_number, 5) + 1438300000)))
-ORDER BY (chain_id, block_number, log_index);
+```bash
+cargo build --release --locked --features clickhouse
 ```
 
-> 注：block_number 分区用 ReplacingMergeTree，reorg 后用新记录覆盖旧记录。
+The source Docker deployment is:
 
-### 4.2 address_index
-
-```sql
-CREATE TABLE IF NOT EXISTS address_index (
-    chain_id        UInt64,
-    address         String,
-    block_number    UInt64,
-    transaction_hash String,
-    log_index       UInt32,
-    event_name      String,
-    contract_address String,
-    role            String,  -- 'emitter' | 'field'
-    field_name      String,
-    is_removed      Bool DEFAULT false,
-    indexed_at      DateTime64(3, 'UTC')
-) ENGINE = ReplacingMergeTree(indexed_at)
-ORDER BY (chain_id, address, block_number, transaction_hash, log_index, field_name);
+```bash
+docker compose --env-file .env -f docker-compose.clickhouse.yml up -d --build
 ```
 
-### 4.3 event_field_index
+The client uses ClickHouse HTTP on port `8123`.
 
-```sql
-CREATE TABLE IF NOT EXISTS event_field_index (
-    chain_id        UInt64,
-    topic0          String,
-    field_name      String,
-    field_value     String,
-    block_number    UInt64,
-    transaction_hash String,
-    log_index       UInt32,
-    is_removed      Bool DEFAULT false,
-    indexed_at      DateTime64(3, 'UTC')
-) ENGINE = ReplacingMergeTree(indexed_at)
-ORDER BY (chain_id, topic0, field_name, field_value, block_number, transaction_hash, log_index);
+## 3. Write and Retry Semantics
+
+In ClickHouse mode the decoder follows this sequence:
+
+```text
+RPC log -> PostgreSQL raw_log + decode_queue commit
+        -> ABI decode
+        -> ClickHouse decoded_events + address_index + event_field_index
+        -> mark PostgreSQL queue entry decoded
 ```
 
-DDL 文件路径：`clickhouse/schema.sql`
+The queue item is acknowledged only after the ClickHouse writes complete. A failed
+write is logged, the queue entry becomes `clickhouse_retrying`, and the subscription
+becomes `clickhouse_write_retrying`. The decoder retries on later worker ticks with
+no attempt limit for this storage failure. Once all ClickHouse-retrying entries for
+that subscription succeed, collection resumes automatically.
 
-## 5. 模块实施顺序
+This means a ClickHouse outage pauses affected subscriptions rather than silently
+losing data or allowing PostgreSQL and ClickHouse to diverge. A failed client is
+discarded so the next retry establishes a fresh connection and reapplies the
+idempotent schema DDL.
 
-每个模块完成后写对应交接记录到 `docs/CLICKHOUSE_HANDOVER.md`。
+For a chain reorganization, PostgreSQL first marks raw logs removed and rewinds the
+affected subscriptions. ClickHouse then writes `is_removed=true` tombstone versions.
+If that write fails, collection remains in `clickhouse_reorg_retrying` until it
+succeeds. Queries use `FINAL`, so tombstones are visible before background merges.
 
-| 序号 | 模块 | 文件 | 说明 |
-|---|---|---|---|
-| M0 | Docker 基础设施 | Dockerfile.clickhouse 等 6 个文件 | **已完成** |
-| M1 | Cargo feature + 依赖 | `Cargo.toml` | 声明 feature，添加 clickhouse crate |
-| M2 | configuration | `src/configuration/mod.rs` | 添加 `ClickHouseConfig` 结构体 |
-| M3 | clickhouse 连接模块 | `src/clickhouse/mod.rs`（新建） | Client 封装、healthcheck、初始化 DDL |
-| M4 | ApplicationState | `src/app/application_state.rs` | 添加 `Option<clickhouse::Client>` |
-| M5 | startup | `src/app/startup.rs` | 连接初始化，feature gate |
-| M6 | ClickHouse DDL | `clickhouse/schema.sql` | 建表语句，startup 时执行 |
-| M7 | indexing 双写 | `src/indexing/mod.rs` | decoded_events / address_index / event_field_index 写入 ClickHouse |
-| M8 | search 路由 | `src/search/mod.rs` | 有 ClickHouse 时走 ClickHouse，否则保持 PostgreSQL |
-| M9 | 集成测试 | `tests/clickhouse_*.rs` | 端到端验证双写和查询路由 |
+## 4. Search Behaviour
 
-## 6. 数据一致性策略
+In PostgreSQL-only mode, `/api/search` and explorers use PostgreSQL's decoded-event,
+address, and field index tables. In ClickHouse mode they use ClickHouse tables:
 
-- **写入顺序**：先提交 PostgreSQL，成功后写 ClickHouse。ClickHouse 写失败记录到日志，不回滚 PostgreSQL 事务。
-- **Reorg 修复**：PostgreSQL 标记 removed 后，重新 trigger indexing 写新状态到 ClickHouse（ReplacingMergeTree 用 `indexed_at` 去重）。
-- **查询路由**：`search` 模块编译期通过 `#[cfg(feature = "clickhouse")]` 决定查询路径，运行时通过 `AppState.clickhouse` 是否为 `Some` 再次判断。
+- `decoded_events FINAL`
+- `address_index FINAL`
+- `event_field_index FINAL`
 
-## 7. 测试策略
+This includes custom `field.<name>` filters, address filters, transaction hashes,
+block ranges, event names, contracts, topics, sorting, the address explorer, contract
+explorer, event explorer, and the dashboard's decoded-event total. Event definitions,
+ABI metadata, and contract existence are still read from PostgreSQL because they are
+small operational metadata.
 
-见 `docs/CLICKHOUSE_HANDOVER.md` M9 节。总体要求：
-- 每个模块 unit test 覆盖配置解析和结构体
-- M7 indexing 双写需要集成测试（docker-compose.clickhouse.yml 启动环境）
-- M8 search 路由需要 e2e 测试：写入 → 搜索 → 验证结果来自 ClickHouse
-- 最终运行 `cargo test --features clickhouse` 全量通过
+There is intentionally no PostgreSQL fallback while ClickHouse mode is selected. A
+fallback would either serve incomplete data or require retaining a duplicate derived
+dataset. A ClickHouse search outage returns a service error while the writer retries.
 
-## 8. 不影响现有行为的约束
+## 5. ClickHouse Tables
 
-- 不加 `--features clickhouse` 时，编译和运行行为与 V1 完全相同
-- PostgreSQL 模块不依赖 ClickHouse 模块
-- ClickHouse 连接失败只打 warn 日志，不 panic，服务仍可启动（降级到 PostgreSQL 查询）
+`clickhouse/schema.sql` creates these `ReplacingMergeTree(indexed_at)` tables:
+
+- `decoded_events`, ordered by `(chain_id, block_number, log_index)`.
+- `address_index`, ordered by address and event position.
+- `event_field_index`, ordered by chain, topic, field name/value, and event position.
+
+The two secondary tables make a query such as "a user's Transfer events with custom
+field filters" an indexed ClickHouse semi-join instead of a scan of decoded JSON.
+
+## 6. Existing Deployments
+
+This change prevents new duplicate derived writes. It does not automatically migrate
+or delete a pre-existing PostgreSQL `eventlake_decoded_events`,
+`eventlake_address_index`, or `eventlake_event_field_index` dataset.
+
+For an already-running PostgreSQL-only deployment, perform a controlled backfill from
+the retained raw logs, verify ClickHouse counts and representative searches, then
+remove the old PostgreSQL derived projection in a separately approved maintenance
+operation. Do not set `EVENTLAKE_CLICKHOUSE_ENABLED=true` on a live historical
+dataset until that backfill is complete: new decoded data will go only to ClickHouse.
+
+## 7. Operational Checks
+
+```bash
+curl -fsS http://127.0.0.1:8080/health/ready
+docker compose --env-file .env -f docker-compose.clickhouse.yml logs -f eventlake
+docker compose --env-file .env -f docker-compose.clickhouse.yml logs -f clickhouse
+```
+
+Useful PostgreSQL states during an outage:
+
+```sql
+SELECT id, status, current_block, error_message
+FROM eventlake_subscriptions
+WHERE status LIKE 'clickhouse_%';
+
+SELECT status, COUNT(*)
+FROM eventlake_decode_queue
+GROUP BY status;
+```
+
+The migration `202608040001_clickhouse_retry_statuses.sql` adds the durable retry
+statuses to PostgreSQL constraints.
+
+## 8. Verification Commands
+
+```bash
+cargo fmt --check
+cargo check --locked --features clickhouse
+cargo test --locked --features clickhouse
+EVENTLAKE_RUN_CLICKHOUSE_INTEGRATION=true \
+  cargo test --locked --features clickhouse --test clickhouse_integration_tests -- --nocapture
+docker compose -f docker-compose.clickhouse.yml config --quiet
+```

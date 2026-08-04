@@ -1,12 +1,14 @@
 # EventLake Build and Usage Guide
 
-Version: 1.0
+Version: 1.1
 
-Status: Draft
+Status: Current implementation
 
 ## 1. Current Stage
 
-The repository is currently in Step 4 implementation stage.
+The repository contains the Step 4 Rust monolith implementation.
+
+For an end-user quick start and API workflow, see [`USAGE.md`](USAGE.md).
 
 The first Rust monolith implementation has been created.
 
@@ -39,7 +41,7 @@ Current verified commands:
 
 ## 2. Expected Local Requirements
 
-Future implementation should assume:
+Local development assumes:
 
 - Rust stable toolchain.
 - Cargo.
@@ -62,9 +64,9 @@ Current Rust stack:
 
 ## 3. Expected Environment Variables
 
-All configuration must be centralized in the future `configuration` module.
+All configuration is centralized in the `configuration` module.
 
-Expected variables:
+Implemented variables include:
 
 ```text
 EVENTLAKE_HTTP_HOST=0.0.0.0
@@ -78,18 +80,27 @@ EVENTLAKE_REQUIRE_AUTHENTICATION=false
 EVENTLAKE_BACKGROUND_WORKERS_ENABLED=true
 EVENTLAKE_WORKER_TICK_SECONDS=5
 EVENTLAKE_DECODE_BATCH_SIZE=100
+EVENTLAKE_CLICKHOUSE_ENABLED=false
+EVENTLAKE_CLICKHOUSE_HOST=clickhouse
+EVENTLAKE_CLICKHOUSE_PORT=8123
+EVENTLAKE_CLICKHOUSE_USER=eventlake
+EVENTLAKE_CLICKHOUSE_PASSWORD=eventlake
+EVENTLAKE_CLICKHOUSE_DB=eventlake
 ```
 
 RPC endpoints should be stored and managed through the database, not hard-coded environment variables.
 
 ## 4. Expected Docker Services
 
-V1 allows only:
+The default deployment uses:
 
 - `postgres`
 - `eventlake`
 
-No Redis, Kafka, ClickHouse, S3, or Elasticsearch service is allowed in V1.
+The ClickHouse Compose variants add an optional `clickhouse` service and compile
+the feature-gated derived-event search store. PostgreSQL remains the source of truth
+for raw logs and operational state; the decoded event and search indexes are stored
+in exactly one selected search store.
 
 ## 5. Expected Development Commands
 
@@ -177,7 +188,7 @@ See `docs/DEPLOYMENT.md` for the deployment matrix, environment-file rules, and 
 
 ## 6. Expected Database Workflow
 
-The future implementation should use migrations for all database schema changes.
+The implementation uses migrations for all PostgreSQL schema changes.
 
 Expected workflow:
 
@@ -211,18 +222,16 @@ After implementation, a normal local run should support:
 
 ## 8. Expected Health Checks
 
-The future service should expose:
+The service exposes:
 
 - Liveness check.
-- Readiness check.
-- Database connectivity check.
-- Background worker status.
+- Readiness check with PostgreSQL connectivity.
 
-The exact route names should be defined during API implementation.
+The routes are `/health/live` and `/health/ready`.
 
 ## 9. Expected OpenAPI Output
 
-The future implementation should generate OpenAPI documentation from route and schema definitions.
+The implementation generates OpenAPI documentation from route and schema definitions.
 
 OpenAPI must describe:
 
@@ -234,7 +243,6 @@ OpenAPI must describe:
 - Search endpoint.
 - Explorer endpoints.
 - Dashboard endpoints.
-- Job monitor endpoints.
 
 ## 10. Testing Strategy
 
@@ -253,7 +261,7 @@ Large-chain behavior should be tested with bounded fixtures first, then load tes
 
 ## 11. Local Usage Examples
 
-These examples describe intended usage after implementation.
+These examples describe the current API.
 
 Upload ABI:
 
@@ -279,13 +287,13 @@ View address:
 GET /api/explorer/address/{address}
 ```
 
-View job status:
+View the operational dashboard:
 
 ```text
-GET /api/jobs/{job_id}
+GET /api/dashboard
 ```
 
-Exact route names may be adjusted during Step 4, but the API must remain REST-based and OpenAPI-documented.
+The API remains REST-based and is described at `GET /api/openapi.json`.
 
 ## 12. Current Verification Notes
 

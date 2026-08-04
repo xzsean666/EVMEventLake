@@ -1,14 +1,14 @@
 # EventLake System Specification
 
-Version: 1.0
+Version: 1.1
 
-Status: Draft
+Status: Current implementation
 
 Language: Rust
 
 Architecture: Monolith First
 
-Database: PostgreSQL
+Database: PostgreSQL operational store + optional ClickHouse search store
 
 Deployment: Docker
 
@@ -41,17 +41,19 @@ V1 is successful when the system can:
 
 ## 3. Non-Goals for V1
 
-V1 must not include:
+The default deployment must not require:
 
 - Kafka.
-- ClickHouse.
 - S3 archive.
 - Elasticsearch.
 - Redis.
 - Multi-service worker deployment.
 - Distributed cluster management.
 
-These are future roadmap items and must not leak into the V1 design as required infrastructure.
+ClickHouse is an optional feature-gated search store for large event volumes. It is
+not required for the PostgreSQL-only default deployment. PostgreSQL always retains
+raw logs and operational state; decoded events and indexes are stored in exactly one
+selected search store.
 
 ## 4. Supported Chains
 
@@ -658,14 +660,17 @@ Primary API groups:
 - Contract explorer.
 - Event explorer.
 - Dashboard.
-- Job monitor.
 
 ## 22. Deployment Specification
 
-V1 deployment has exactly two services:
+The default deployment has exactly two services:
 
 - `postgres`
 - `eventlake`
+
+The ClickHouse-enabled deployment adds one optional `clickhouse` service. It stores
+the derived search rows instead of PostgreSQL; PostgreSQL remains authoritative for
+raw logs and operational state.
 
 Required runtime concerns:
 
@@ -691,7 +696,8 @@ V4:
 
 V5:
 
-- ClickHouse for analytical workloads.
+- Separate the ClickHouse writer or search executor if the monolith becomes
+  a bottleneck.
 
 V6:
 
@@ -701,7 +707,7 @@ Roadmap items must not be required for V1.
 
 ## 24. Open Decisions
 
-These decisions should be resolved before implementation:
+These decisions remain for hardening and future product work:
 
 - Exact Rust crate versions.
 - Exact partition size by block range per chain.
@@ -710,4 +716,3 @@ These decisions should be resolved before implementation:
 - Whether ABI upload is global first or contract-scoped first.
 - Search DSL JSON shape.
 - Initial admin user bootstrap strategy.
-

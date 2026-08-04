@@ -29,8 +29,8 @@ pub async fn ensure_partitions(pool: &sqlx::PgPool) -> Result<(), ApplicationErr
 
     for (block_number,) in block_numbers {
         let start = floor_partition_start(block_number);
-        create_partition_pair(pool, start).await?;
-        create_partition_pair(pool, start + PARTITION_BLOCK_SIZE).await?;
+        create_raw_partition(pool, start).await?;
+        create_raw_partition(pool, start + PARTITION_BLOCK_SIZE).await?;
     }
 
     Ok(())
@@ -42,7 +42,7 @@ pub async fn ensure_partitions_for_range(
     to_block: i64,
 ) -> Result<(), ApplicationError> {
     for start in partition_starts(from_block, to_block)? {
-        create_partition_pair(pool, start).await?;
+        create_raw_partition(pool, start).await?;
     }
 
     Ok(())
@@ -83,13 +83,6 @@ fn partition_starts(from_block: i64, to_block: i64) -> Result<Vec<i64>, Applicat
 
 fn floor_partition_start(block_number: i64) -> i64 {
     block_number.div_euclid(PARTITION_BLOCK_SIZE) * PARTITION_BLOCK_SIZE
-}
-
-async fn create_partition_pair(pool: &sqlx::PgPool, start: i64) -> Result<(), ApplicationError> {
-    create_raw_partition(pool, start).await?;
-    create_decoded_partition(pool, start).await?;
-
-    Ok(())
 }
 
 async fn create_raw_partition(pool: &sqlx::PgPool, start: i64) -> Result<(), ApplicationError> {

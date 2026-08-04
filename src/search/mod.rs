@@ -49,7 +49,7 @@ pub struct SearchFilter {
     pub value: Value,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchOperator {
     Eq,
@@ -107,14 +107,19 @@ async fn search_events(
     };
     let meta = page.normalized();
     #[cfg(feature = "clickhouse")]
-    let results = if let Some(client) = &state.clickhouse {
-        match crate::clickhouse::search_events(client, &request, meta.limit, page.offset()).await {
-            Ok(results) => results,
-            Err(error) => {
-                tracing::warn!(error = %error, "ClickHouse search failed; falling back to PostgreSQL");
-                execute_postgres_search(&state.pool, &request, meta.limit, page.offset()).await?
-            }
-        }
+    let results = if state.configuration.clickhouse.enabled {
+        let client = crate::clickhouse::active_client(&state)
+            .await?
+            .ok_or_else(|| {
+                ApplicationError::ExternalService(
+                    "ClickHouse is enabled but no client is available".to_owned(),
+                )
+            })?;
+        crate::clickhouse::search_events(&client, &request, meta.limit, page.offset())
+            .await
+            .map_err(|error| {
+                ApplicationError::ExternalService(format!("ClickHouse search failed: {error}"))
+            })?
     } else {
         execute_postgres_search(&state.pool, &request, meta.limit, page.offset()).await?
     };

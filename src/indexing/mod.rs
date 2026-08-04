@@ -105,8 +105,8 @@ pub async fn index_decoded_event(
     Ok(())
 }
 
-/// Writes the analytical-search replica after the source PostgreSQL transaction has
-/// committed. This intentionally does not participate in the PostgreSQL transaction.
+/// Writes the ClickHouse search projection after the raw log and queue row are durable in
+/// PostgreSQL. In ClickHouse mode this is the only decoded-event/index write path.
 #[cfg(feature = "clickhouse")]
 pub async fn mirror_decoded_event(
     client: &clickhouse::Client,

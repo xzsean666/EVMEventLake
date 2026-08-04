@@ -1,10 +1,15 @@
 use std::str::FromStr;
 
+#[cfg(feature = "clickhouse")]
+use std::collections::HashSet;
+
 use alloy_dyn_abi::{DynSolValue, EventExt};
 use alloy_json_abi::Event;
 use alloy_primitives::B256;
 #[cfg(feature = "clickhouse")]
-use chrono::{DateTime, Utc};
+use chrono::Utc;
+#[cfg(feature = "clickhouse")]
+use crate::subscriptions;
 use serde_json::{Map, Value, json};
 use sqlx::FromRow;
 use tokio::time::{MissedTickBehavior, interval};
@@ -52,11 +57,54 @@ pub async fn run(state: ApplicationState) {
 
 pub async fn decode_once(state: &ApplicationState) -> Result<(), ApplicationError> {
     let batch = fetch_decode_batch(state).await?;
+    #[cfg(feature = "clickhouse")]
+    let mut clickhouse_blocked_subscriptions = HashSet::new();
 
     for item in batch {
+        #[cfg(feature = "clickhouse")]
+        if state.configuration.clickhouse.enabled
+            && item
+                .subscription_id
+                .is_some_and(|id| clickhouse_blocked_subscriptions.contains(&id))
+        {
+            continue;
+        }
+
         // The success path marks the queue entry inside its own transaction, so here we
         // only need to record failures.
         if let Err(error) = decode_work_item(state, &item).await {
+            #[cfg(feature = "clickhouse")]
+            if state.configuration.clickhouse.enabled
+                && matches!(&error, ApplicationError::ExternalService(_))
+            {
+                // Force the next retry to perform a fresh health check and schema setup.
+                // The queue row remains durable, so no event is skipped while ClickHouse is down.
+                state.clear_clickhouse_client();
+                mark_queue_status(
+                    &state.pool,
+                    item.queue_id,
+                    "clickhouse_retrying",
+                    Some(&error.public_message()),
+                )
+                .await?;
+                if let Some(subscription_id) = item.subscription_id {
+                    clickhouse_blocked_subscriptions.insert(subscription_id);
+                    subscriptions::mark_clickhouse_write_retrying(
+                        &state.pool,
+                        subscription_id,
+                        &error.public_message(),
+                    )
+                    .await?;
+                }
+                tracing::error!(
+                    raw_log_id = %item.raw_log_id,
+                    block_number = item.block_number,
+                    error = %error,
+                    "ClickHouse write failed; keeping subscription queued for retry"
+                );
+                continue;
+            }
+
             mark_queue_status(
                 &state.pool,
                 item.queue_id,
@@ -90,9 +138,9 @@ async fn fetch_decode_batch(
         FROM eventlake_decode_queue dq
         JOIN eventlake_raw_logs rl ON rl.id = dq.raw_log_id AND rl.block_number = dq.block_number
         LEFT JOIN eventlake_subscriptions s ON s.id = dq.subscription_id
-        WHERE dq.status IN ('pending', 'error')
+        WHERE dq.status IN ('pending', 'error', 'clickhouse_retrying')
           AND rl.removed = false
-          AND dq.attempt_count < $2
+          AND (dq.status = 'clickhouse_retrying' OR dq.attempt_count < $2)
         ORDER BY dq.created_at
         LIMIT $1
         "#,
@@ -129,6 +177,45 @@ async fn decode_work_item(
         .map_err(|error| ApplicationError::BadRequest(format!("decode failed: {error}")))?;
 
     let decoded_fields = decoded_event_fields(event, decoded.indexed, decoded.body)?;
+
+    #[cfg(feature = "clickhouse")]
+    if state.configuration.clickhouse.enabled {
+        let client = crate::clickhouse::active_client(state)
+            .await?
+            .ok_or_else(|| {
+                ApplicationError::ExternalService(
+                    "ClickHouse is enabled but no client is available".to_owned(),
+                )
+            })?;
+        let event = crate::clickhouse::IndexedEvent {
+            // Reusing the raw-log id makes retries idempotent at the event boundary.
+            id: item.raw_log_id,
+            raw_log_id: item.raw_log_id,
+            subscription_id: item.subscription_id,
+            chain_id: item.chain_id,
+            block_number: item.block_number,
+            block_hash: item.block_hash.clone(),
+            transaction_hash: item.transaction_hash.clone(),
+            log_index: item.log_index,
+            contract_address: item.contract_address.clone(),
+            event_name,
+            topic0,
+            abi_id: Some(abi_id),
+            indexed_fields: decoded_fields.indexed_json,
+            non_indexed_fields: decoded_fields.non_indexed_json,
+            fields: decoded_fields.all_fields,
+            is_removed: false,
+            decoded_at: Utc::now(),
+        };
+        indexing::mirror_decoded_event(&client, event)
+            .await
+            .map_err(|error| {
+                ApplicationError::ExternalService(format!("ClickHouse indexed-event write failed: {error}"))
+            })?;
+        complete_clickhouse_decoding(state, item).await?;
+        return Ok(());
+    }
+
     let decoded_event_id = Uuid::new_v4();
     indexing::partition_manager::ensure_decoded_partitions_for_range(
         &state.pool,
@@ -138,8 +225,7 @@ async fn decode_work_item(
     .await?;
 
     // The decoded event, its PostgreSQL-derived indexes, the contract activity bump, and the
-    // queue status are one logical unit. ClickHouse is deliberately written only after this
-    // transaction commits because it is a best-effort analytical replica.
+    // queue status are one logical unit when the PostgreSQL-only mode is active.
     let mut transaction = state.pool.begin().await?;
 
     // Partitioned tables cannot return system columns (e.g. xmax), so we detect a fresh
@@ -238,50 +324,22 @@ async fn decode_work_item(
 
     mark_queue_status(&mut *transaction, item.queue_id, "decoded", None).await?;
 
-    #[cfg(feature = "clickhouse")]
-    let (stored_event_id, stored_decoded_at) = sqlx::query_as::<_, (Uuid, DateTime<Utc>)>(
-        r#"
-        SELECT id, decoded_at
-        FROM eventlake_decoded_events
-        WHERE raw_log_id = $1 AND block_number = $2
-        "#,
-    )
-    .bind(item.raw_log_id)
-    .bind(item.block_number)
-    .fetch_one(&mut *transaction)
-    .await?;
-
     transaction.commit().await?;
 
-    #[cfg(feature = "clickhouse")]
-    if let Some(client) = &state.clickhouse {
-        let replica_event = crate::clickhouse::IndexedEvent {
-            id: stored_event_id,
-            raw_log_id: item.raw_log_id,
-            subscription_id: item.subscription_id,
-            chain_id: item.chain_id,
-            block_number: item.block_number,
-            block_hash: item.block_hash.clone(),
-            transaction_hash: item.transaction_hash.clone(),
-            log_index: item.log_index,
-            contract_address: item.contract_address.clone(),
-            event_name,
-            topic0,
-            abi_id: Some(abi_id),
-            indexed_fields: decoded_fields.indexed_json,
-            non_indexed_fields: decoded_fields.non_indexed_json,
-            fields: decoded_fields.all_fields,
-            is_removed: false,
-            decoded_at: stored_decoded_at,
-        };
-        if let Err(error) = indexing::mirror_decoded_event(client, replica_event).await {
-            tracing::warn!(
-                raw_log_id = %item.raw_log_id,
-                block_number = item.block_number,
-                error = %error,
-                "failed to mirror decoded event to ClickHouse"
-            );
-        }
+    Ok(())
+}
+
+#[cfg(feature = "clickhouse")]
+async fn complete_clickhouse_decoding(
+    state: &ApplicationState,
+    item: &DecodeWorkItem,
+) -> Result<(), ApplicationError> {
+    let mut transaction = state.pool.begin().await?;
+    mark_queue_status(&mut *transaction, item.queue_id, "decoded", None).await?;
+    transaction.commit().await?;
+
+    if let Some(subscription_id) = item.subscription_id {
+        subscriptions::resume_after_clickhouse_writes(&state.pool, subscription_id).await?;
     }
 
     Ok(())
@@ -300,7 +358,10 @@ where
         r#"
         UPDATE eventlake_decode_queue
         SET status = $2,
-            attempt_count = CASE WHEN $2 = 'error' THEN attempt_count + 1 ELSE attempt_count END,
+            attempt_count = CASE
+                WHEN $2 IN ('error', 'clickhouse_retrying') THEN attempt_count + 1
+                ELSE attempt_count
+            END,
             last_error = $3,
             updated_at = now()
         WHERE id = $1

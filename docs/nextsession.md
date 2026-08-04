@@ -1,6 +1,6 @@
 # EventLake Next Session Handoff
 
-Last updated: 2026-06-11
+Last updated: 2026-08-04
 
 Repository: `/home/sean/git/EVMEventLake`
 
@@ -33,6 +33,7 @@ Read these files before making future changes:
 - `docs/ARCHITECTURE.md`
 - `docs/SPEC.md`
 - `docs/BUILD.md`
+- `docs/USAGE.md`
 - `docs/EXTERNAL_DOCS.md`
 - `docs/nextsession.md`
 
@@ -40,13 +41,15 @@ Read these files before making future changes:
 
 EventLake is an EVM event collection, indexing, and search platform.
 
-V1 architecture:
+Current architecture:
 
 - Rust monolith.
-- PostgreSQL database.
+- PostgreSQL transactional source of truth.
+- Optional, feature-gated ClickHouse derived-event search store.
 - Docker deployment.
-- Two services only: `postgres` and `eventlake`.
-- No Kafka, ClickHouse, S3, Elasticsearch, or Redis in V1.
+- Default services: `postgres` and `eventlake`; ClickHouse Compose variants add
+  `clickhouse`.
+- No Kafka, S3, Elasticsearch, Redis, or external queue is required.
 
 Core data flow:
 
@@ -72,7 +75,12 @@ Decoder creates decoded events
 Indexer creates address and field indexes
         |
         v
-Search DSL queries indexed data
+In ClickHouse mode, durable raw-log and queue rows are followed by ClickHouse-only
+decoded-event/index writes
+        |
+        v
+Search DSL queries the selected PostgreSQL or ClickHouse store; ClickHouse failures
+leave the queue retryable and the affected subscription blocked
 ```
 
 Primary module boundaries:
@@ -82,6 +90,7 @@ Primary module boundaries:
 - `auth` - JWT, API key, roles.
 - `configuration` - centralized typed runtime configuration.
 - `database` - PostgreSQL pool, migrations, transactions.
+- `clickhouse` - optional derived-event search store, schema initialization, search, and reorg tombstones.
 - `chains` - chain metadata and dynamic chain registration.
 - `rpc_pool` - independent RPC resources, health, selection, retries.
 - `abi_registry` - ABI versions, event parsing, event registry.
@@ -105,11 +114,15 @@ Created:
 - `docs/ARCHITECTURE.md`
 - `docs/SPEC.md`
 - `docs/BUILD.md`
+- `docs/USAGE.md`
 - `docs/EXTERNAL_DOCS.md`
 - `docs/nextsession.md`
 - `Cargo.toml`
 - `Dockerfile`
+- `Dockerfile.clickhouse`
 - `docker-compose.yml`
+- `docker-compose.clickhouse.yml`
+- `clickhouse/schema.sql`
 - `migrations/202606110001_initial_schema.sql`
 - `src/`
 - `tests/`
@@ -141,6 +154,9 @@ Documented:
 - Dashboard summary endpoint.
 - Unit/integration tests for ABI parsing, Search DSL validation, and address/topic validation.
 - Real PostgreSQL E2E coverage through `tests/e2e_real_database_tests.rs`.
+- ClickHouse feature, ClickHouse-only derived writes, durable retry states, and
+  integration coverage through `tests/clickhouse_integration_tests.rs`.
+- End-user quick-start and API workflow in `docs/USAGE.md`.
 
 ## 5. Pending Tasks
 
