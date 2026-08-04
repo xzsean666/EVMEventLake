@@ -4,6 +4,7 @@ use std::{env, net::IpAddr, time::Duration};
 pub struct ApplicationConfiguration {
     pub http: HttpConfiguration,
     pub database: DatabaseConfiguration,
+    pub clickhouse: ClickHouseConfig,
     pub auth: AuthConfiguration,
     pub background: BackgroundConfiguration,
     pub telemetry: TelemetryConfiguration,
@@ -21,6 +22,23 @@ pub struct HttpConfiguration {
 pub struct DatabaseConfiguration {
     pub database_url: String,
     pub max_connections: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClickHouseConfig {
+    pub host: String,
+    /// HTTP port. The Rust client uses ClickHouse's HTTP interface, not its native protocol.
+    pub port: u16,
+    pub user: String,
+    pub password: String,
+    pub database: String,
+    pub enabled: bool,
+}
+
+impl ClickHouseConfig {
+    pub fn url(&self) -> String {
+        format!("http://{}:{}", self.host, self.port)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +82,16 @@ impl ApplicationConfiguration {
             max_connections: read_positive_u32_env("EVENTLAKE_DATABASE_MAX_CONNECTIONS", "10")?,
         };
 
+        let clickhouse = ClickHouseConfig {
+            host: read_env("EVENTLAKE_CLICKHOUSE_HOST", "localhost"),
+            port: read_positive_u16_env("EVENTLAKE_CLICKHOUSE_PORT", "8123")?,
+            user: read_env("EVENTLAKE_CLICKHOUSE_USER", "eventlake"),
+            password: read_env("EVENTLAKE_CLICKHOUSE_PASSWORD", "eventlake"),
+            database: read_env("EVENTLAKE_CLICKHOUSE_DB", "eventlake"),
+            // The feature alone never changes the existing PostgreSQL-only deployment.
+            enabled: read_env("EVENTLAKE_CLICKHOUSE_ENABLED", "false").parse()?,
+        };
+
         let auth = AuthConfiguration {
             jwt_secret: read_env("EVENTLAKE_JWT_SECRET", "change-me"),
             require_authentication: read_env("EVENTLAKE_REQUIRE_AUTHENTICATION", "false")
@@ -91,6 +119,7 @@ impl ApplicationConfiguration {
         Ok(Self {
             http,
             database,
+            clickhouse,
             auth,
             background,
             telemetry,
@@ -103,6 +132,15 @@ fn read_env(name: &str, default_value: &str) -> String {
 }
 
 fn read_positive_u32_env(name: &str, default_value: &str) -> anyhow::Result<u32> {
+    let value = read_env(name, default_value).parse()?;
+    if value == 0 {
+        anyhow::bail!("{name} must be greater than 0");
+    }
+
+    Ok(value)
+}
+
+fn read_positive_u16_env(name: &str, default_value: &str) -> anyhow::Result<u16> {
     let value = read_env(name, default_value).parse()?;
     if value == 0 {
         anyhow::bail!("{name} must be greater than 0");
@@ -136,4 +174,23 @@ fn parse_comma_separated(value: &str) -> Vec<String> {
         .filter(|entry| !entry.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClickHouseConfig;
+
+    #[test]
+    fn clickhouse_url_targets_the_http_endpoint() {
+        let configuration = ClickHouseConfig {
+            host: "clickhouse".to_owned(),
+            port: 8123,
+            user: "eventlake".to_owned(),
+            password: "eventlake".to_owned(),
+            database: "eventlake".to_owned(),
+            enabled: true,
+        };
+
+        assert_eq!(configuration.url(), "http://clickhouse:8123");
+    }
 }

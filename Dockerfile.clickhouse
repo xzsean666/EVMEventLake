@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1
+
+ARG RUST_VERSION=1.94
+
+FROM rust:${RUST_VERSION}-bookworm AS builder
+
+WORKDIR /app
+
+COPY Cargo.toml Cargo.lock ./
+COPY clickhouse ./clickhouse
+COPY migrations ./migrations
+COPY src ./src
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo build --release --locked --features clickhouse && \
+    cp /app/target/release/eventlake /usr/local/bin/eventlake
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd --system --gid 10001 eventlake && \
+    useradd --system --uid 10001 --gid eventlake --home-dir /var/lib/eventlake eventlake && \
+    mkdir -p /var/lib/eventlake && \
+    chown -R eventlake:eventlake /var/lib/eventlake
+
+COPY --from=builder /usr/local/bin/eventlake /usr/local/bin/eventlake
+
+ENV EVENTLAKE_HTTP_HOST=0.0.0.0 \
+    EVENTLAKE_HTTP_PORT=8080
+
+WORKDIR /var/lib/eventlake
+USER eventlake:eventlake
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS "http://127.0.0.1:${EVENTLAKE_HTTP_PORT:-8080}/health/ready" >/dev/null || exit 1
+
+ENTRYPOINT ["eventlake"]

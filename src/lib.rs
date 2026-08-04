@@ -4,6 +4,8 @@ pub mod app;
 pub mod auth;
 pub mod background;
 pub mod chains;
+#[cfg(feature = "clickhouse")]
+pub mod clickhouse;
 pub mod collector;
 pub mod configuration;
 pub mod dashboard;

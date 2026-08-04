@@ -775,6 +775,14 @@ fn build_test_state(
                 database_url,
                 max_connections: 5,
             },
+            clickhouse: configuration::ClickHouseConfig {
+                host: "localhost".to_owned(),
+                port: 8123,
+                user: "eventlake".to_owned(),
+                password: "eventlake".to_owned(),
+                database: "eventlake".to_owned(),
+                enabled: false,
+            },
             auth: configuration::AuthConfiguration {
                 jwt_secret: "test-secret".to_owned(),
                 require_authentication,

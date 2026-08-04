@@ -13,11 +13,17 @@ EventLake supports three Docker deployment entrypoints:
 | Source build | `Dockerfile`, `docker-compose.yml` | CI or hosts that can download Rust crates and Debian packages. |
 | Prebuilt binary | `scripts/build-prebuilt-binary.sh`, `Dockerfile.prebuilt`, `docker-compose.prebuilt.yml` | Hosts that should only package and run an already-built Linux binary. |
 | China prebuilt binary | `Dockerfile.prebuilt.cn`, `docker-compose.prebuilt.cn.yml` | China mainland hosts where Docker Hub, Debian apt, or Cargo access is unstable. |
+| ClickHouse source build | `Dockerfile.clickhouse`, `docker-compose.clickhouse.yml` | Build EventLake with analytical search enabled. |
+| ClickHouse prebuilt binary | `Dockerfile.prebuilt.clickhouse`, `docker-compose.prebuilt.clickhouse.yml` | Run the ClickHouse-enabled prebuilt binary. |
+| ClickHouse China prebuilt | `Dockerfile.prebuilt.clickhouse.cn`, `docker-compose.prebuilt.clickhouse.cn.yml` | China-optimized ClickHouse prebuilt deployment. |
 
-All modes keep the V1 service boundary to exactly:
+The original modes use:
 
 - `postgres`
 - `eventlake`
+
+The ClickHouse variants add a `clickhouse` service. PostgreSQL remains the source of truth;
+ClickHouse is an optional analytical-search replica.
 
 ## 2. Runtime Facts
 
@@ -29,7 +35,7 @@ All modes keep the V1 service boundary to exactly:
 - Default container port: `8080`
 - Default host port: `EVENTLAKE_HTTP_PORT`, default `8080`
 - Health endpoint: `/health/ready`
-- Persistent state: PostgreSQL only
+- Persistent state: PostgreSQL; ClickHouse variants also persist their analytical replica
 
 The application compiles migrations into the binary with `sqlx::migrate!("./migrations")`.
 The source-build Dockerfile copies `migrations/` into the builder stage so the release
@@ -124,7 +130,26 @@ Overridable China network variables:
 | `EVENTLAKE_DEBIAN_SECURITY_MIRROR` | `http://mirrors.aliyun.com/debian-security` |
 | `EVENTLAKE_POSTGRES_IMAGE` | `m.daocloud.io/docker.io/library/postgres:18` |
 
-## 7. Verification
+## 7. ClickHouse Deployment
+
+Build the ClickHouse-enabled binary for a prebuilt variant:
+
+```bash
+EVENTLAKE_PREBUILT_BINARY=deploy/prebuilt/eventlake-clickhouse scripts/build-prebuilt-binary.sh
+```
+
+Run the source-build variant:
+
+```bash
+docker compose --env-file .env.example -f docker-compose.clickhouse.yml up -d --build
+```
+
+For prebuilt variants, replace the Compose file with
+`docker-compose.prebuilt.clickhouse.yml` or `docker-compose.prebuilt.clickhouse.cn.yml`.
+The ClickHouse Compose files set `EVENTLAKE_CLICKHOUSE_ENABLED=true` and connect to the
+`clickhouse` service over HTTP port `8123`.
+
+## 8. Verification
 
 Static checks:
 
@@ -134,6 +159,9 @@ scripts/build-prebuilt-binary.sh
 docker compose config
 docker compose -f docker-compose.prebuilt.yml config
 docker compose -f docker-compose.prebuilt.cn.yml config
+docker compose -f docker-compose.clickhouse.yml config
+docker compose -f docker-compose.prebuilt.clickhouse.yml config
+docker compose -f docker-compose.prebuilt.clickhouse.cn.yml config
 ```
 
 Image checks:
@@ -142,6 +170,7 @@ Image checks:
 docker build -f Dockerfile -t eventlake:local .
 docker build -f Dockerfile.prebuilt -t eventlake:prebuilt .
 docker build -f Dockerfile.prebuilt.cn -t eventlake:prebuilt-cn .
+docker build -f Dockerfile.clickhouse -t eventlake:clickhouse .
 ```
 
 Runtime check:
@@ -150,7 +179,7 @@ Runtime check:
 curl -fsS http://127.0.0.1:8080/health/ready
 ```
 
-## 8. Optional SSH Tunnel Proxy
+## 9. Optional SSH Tunnel Proxy
 
 The prebuilt Docker images include `scripts/docker-ssh-tunnel-proxy.sh` as the
 container entrypoint. The Dockerfiles, compose files, and script default
@@ -177,7 +206,7 @@ SSH_TUNNEL_HOST=203.0.113.10
 SSH_TUNNEL_PORT=22
 SSH_TUNNEL_USER=root
 SSH_TUNNEL_PRIVATE_KEY_B64=...
-SSH_TUNNEL_NO_PROXY=127.0.0.1,localhost,::1,postgres,eventlake
+SSH_TUNNEL_NO_PROXY=127.0.0.1,localhost,::1,postgres,clickhouse,eventlake
 ```
 
 Prefer `SSH_TUNNEL_PRIVATE_KEY_B64` because multiline private keys are fragile in

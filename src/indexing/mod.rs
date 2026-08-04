@@ -31,7 +31,7 @@ pub struct DecodedEventIndexInput {
 /// event with N fields costs at most two round trips rather than up to 2N.
 pub async fn index_decoded_event(
     connection: &mut sqlx::PgConnection,
-    input: DecodedEventIndexInput,
+    input: &DecodedEventIndexInput,
 ) -> Result<(), ApplicationError> {
     let address_fields: Vec<&DecodedFieldValue> = input
         .fields
@@ -103,6 +103,16 @@ pub async fn index_decoded_event(
     }
 
     Ok(())
+}
+
+/// Writes the analytical-search replica after the source PostgreSQL transaction has
+/// committed. This intentionally does not participate in the PostgreSQL transaction.
+#[cfg(feature = "clickhouse")]
+pub async fn mirror_decoded_event(
+    client: &clickhouse::Client,
+    input: crate::clickhouse::IndexedEvent,
+) -> anyhow::Result<()> {
+    crate::clickhouse::write_indexed_event(client, input).await
 }
 
 fn should_index_field_value(value: &Value) -> bool {

@@ -3,6 +3,8 @@ use std::str::FromStr;
 use alloy_dyn_abi::{DynSolValue, EventExt};
 use alloy_json_abi::Event;
 use alloy_primitives::B256;
+#[cfg(feature = "clickhouse")]
+use chrono::{DateTime, Utc};
 use serde_json::{Map, Value, json};
 use sqlx::FromRow;
 use tokio::time::{MissedTickBehavior, interval};
@@ -21,10 +23,16 @@ const MAX_DECODE_ATTEMPTS: i32 = 5;
 struct DecodeWorkItem {
     queue_id: Uuid,
     raw_log_id: Uuid,
+    #[cfg(feature = "clickhouse")]
+    subscription_id: Option<Uuid>,
     block_number: i64,
     chain_id: i64,
     contract_address: String,
+    #[cfg(feature = "clickhouse")]
+    block_hash: String,
     transaction_hash: String,
+    #[cfg(feature = "clickhouse")]
+    log_index: i64,
     topics: Value,
     data: String,
     abi_id: Option<Uuid>,
@@ -69,10 +77,13 @@ async fn fetch_decode_batch(
         r#"
         SELECT dq.id AS queue_id,
                dq.raw_log_id,
+               rl.subscription_id,
                dq.block_number,
                rl.chain_id,
                rl.contract_address,
+               rl.block_hash,
                rl.transaction_hash,
+               rl.log_index,
                rl.topics,
                rl.data,
                s.abi_id
@@ -126,8 +137,9 @@ async fn decode_work_item(
     )
     .await?;
 
-    // The decoded event, its derived indexes, the contract activity bump, and the queue
-    // status are one logical unit and are committed together.
+    // The decoded event, its PostgreSQL-derived indexes, the contract activity bump, and the
+    // queue status are one logical unit. ClickHouse is deliberately written only after this
+    // transaction commits because it is a best-effort analytical replica.
     let mut transaction = state.pool.begin().await?;
 
     // Partitioned tables cannot return system columns (e.g. xmax), so we detect a fresh
@@ -203,19 +215,16 @@ async fn decode_work_item(
         .await?;
     }
 
-    indexing::index_decoded_event(
-        &mut transaction,
-        DecodedEventIndexInput {
-            chain_id: item.chain_id,
-            contract_address: item.contract_address.clone(),
-            event_name,
-            raw_log_id: item.raw_log_id,
-            block_number: item.block_number,
-            transaction_hash: item.transaction_hash.clone(),
-            fields: decoded_fields.all_fields,
-        },
-    )
-    .await?;
+    let postgres_index_input = DecodedEventIndexInput {
+        chain_id: item.chain_id,
+        contract_address: item.contract_address.clone(),
+        event_name: event_name.clone(),
+        raw_log_id: item.raw_log_id,
+        block_number: item.block_number,
+        transaction_hash: item.transaction_hash.clone(),
+        fields: decoded_fields.all_fields.clone(),
+    };
+    indexing::index_decoded_event(&mut transaction, &postgres_index_input).await?;
 
     if inserted || !was_decoded_before_update {
         update_contract_activity(
@@ -229,7 +238,51 @@ async fn decode_work_item(
 
     mark_queue_status(&mut *transaction, item.queue_id, "decoded", None).await?;
 
+    #[cfg(feature = "clickhouse")]
+    let (stored_event_id, stored_decoded_at) = sqlx::query_as::<_, (Uuid, DateTime<Utc>)>(
+        r#"
+        SELECT id, decoded_at
+        FROM eventlake_decoded_events
+        WHERE raw_log_id = $1 AND block_number = $2
+        "#,
+    )
+    .bind(item.raw_log_id)
+    .bind(item.block_number)
+    .fetch_one(&mut *transaction)
+    .await?;
+
     transaction.commit().await?;
+
+    #[cfg(feature = "clickhouse")]
+    if let Some(client) = &state.clickhouse {
+        let replica_event = crate::clickhouse::IndexedEvent {
+            id: stored_event_id,
+            raw_log_id: item.raw_log_id,
+            subscription_id: item.subscription_id,
+            chain_id: item.chain_id,
+            block_number: item.block_number,
+            block_hash: item.block_hash.clone(),
+            transaction_hash: item.transaction_hash.clone(),
+            log_index: item.log_index,
+            contract_address: item.contract_address.clone(),
+            event_name,
+            topic0,
+            abi_id: Some(abi_id),
+            indexed_fields: decoded_fields.indexed_json,
+            non_indexed_fields: decoded_fields.non_indexed_json,
+            fields: decoded_fields.all_fields,
+            is_removed: false,
+            decoded_at: stored_decoded_at,
+        };
+        if let Err(error) = indexing::mirror_decoded_event(client, replica_event).await {
+            tracing::warn!(
+                raw_log_id = %item.raw_log_id,
+                block_number = item.block_number,
+                error = %error,
+                "failed to mirror decoded event to ClickHouse"
+            );
+        }
+    }
 
     Ok(())
 }

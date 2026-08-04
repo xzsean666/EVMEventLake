@@ -9,6 +9,10 @@ output_path="${EVENTLAKE_PREBUILT_BINARY:-deploy/prebuilt/eventlake}"
 cargo_target_dir="${CARGO_TARGET_DIR:-target}"
 cargo_args=(build --release --locked)
 
+if [[ "$output_path" == "deploy/prebuilt/eventlake-clickhouse" ]]; then
+  cargo_args+=(--features clickhouse)
+fi
+
 if [[ -n "${EVENTLAKE_CARGO_TARGET:-}" ]]; then
   cargo_args+=(--target "$EVENTLAKE_CARGO_TARGET")
   built_binary="$cargo_target_dir/$EVENTLAKE_CARGO_TARGET/release/$binary_name"

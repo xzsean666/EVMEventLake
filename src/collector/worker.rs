@@ -167,6 +167,30 @@ async fn collect_subscription(
                 )
                 .await?;
                 if matches!(result, reorg::BlockCheckpointResult::ReorgDetected { .. }) {
+                    #[cfg(feature = "clickhouse")]
+                    if let Some(client) = &state.clickhouse {
+                        match crate::clickhouse::sync_reorg_from_postgres(
+                            client,
+                            &state.pool,
+                            subscription.chain_id,
+                            block_number,
+                        )
+                        .await
+                        {
+                            Ok(count) => tracing::info!(
+                                chain_id = subscription.chain_id,
+                                from_block = block_number,
+                                events = count,
+                                "mirrored reorg invalidation to ClickHouse"
+                            ),
+                            Err(error) => tracing::warn!(
+                                chain_id = subscription.chain_id,
+                                from_block = block_number,
+                                error = %error,
+                                "failed to mirror reorg invalidation to ClickHouse"
+                            ),
+                        }
+                    }
                     tracing::warn!(
                         subscription_id = %subscription.id,
                         chain_id = subscription.chain_id,

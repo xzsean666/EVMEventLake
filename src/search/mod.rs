@@ -106,7 +106,21 @@ async fn search_events(
         limit: request.limit,
     };
     let meta = page.normalized();
-    let results = execute_search(&state.pool, &request, meta.limit, page.offset()).await?;
+    #[cfg(feature = "clickhouse")]
+    let results = if let Some(client) = &state.clickhouse {
+        match crate::clickhouse::search_events(client, &request, meta.limit, page.offset()).await {
+            Ok(results) => results,
+            Err(error) => {
+                tracing::warn!(error = %error, "ClickHouse search failed; falling back to PostgreSQL");
+                execute_postgres_search(&state.pool, &request, meta.limit, page.offset()).await?
+            }
+        }
+    } else {
+        execute_postgres_search(&state.pool, &request, meta.limit, page.offset()).await?
+    };
+
+    #[cfg(not(feature = "clickhouse"))]
+    let results = execute_postgres_search(&state.pool, &request, meta.limit, page.offset()).await?;
 
     Ok(response::success_with_meta(
         results,
@@ -133,7 +147,7 @@ pub fn validate_search_request(request: &SearchRequest) -> Result<(), Applicatio
     Ok(())
 }
 
-async fn execute_search(
+async fn execute_postgres_search(
     pool: &sqlx::PgPool,
     request: &SearchRequest,
     limit: i64,

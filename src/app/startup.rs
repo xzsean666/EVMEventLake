@@ -24,6 +24,16 @@ pub async fn run(configuration: ApplicationConfiguration) -> anyhow::Result<()> 
     let cors = build_cors_layer(&configuration.http.cors_allowed_origins);
     let state = ApplicationState::new(configuration, pool);
 
+    #[cfg(feature = "clickhouse")]
+    let state = match crate::clickhouse::connect(&state.configuration.clickhouse).await {
+        Ok(Some(client)) => state.with_clickhouse(client),
+        Ok(None) => state,
+        Err(error) => {
+            tracing::warn!(error = %error, "ClickHouse unavailable; using PostgreSQL search fallback");
+            state
+        }
+    };
+
     background::spawn_workers(state.clone());
 
     let router = api::routes::build_router(state)

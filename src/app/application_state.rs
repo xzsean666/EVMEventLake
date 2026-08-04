@@ -20,6 +20,8 @@ pub struct ApplicationState {
     pub pool: PgPool,
     pub http_client: Client,
     pub abi_cache: AbiCache,
+    #[cfg(feature = "clickhouse")]
+    pub clickhouse: Option<clickhouse::Client>,
 }
 
 impl ApplicationState {
@@ -32,6 +34,14 @@ impl ApplicationState {
                 .build()
                 .expect("HTTP client builds"),
             abi_cache: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "clickhouse")]
+            clickhouse: None,
         }
+    }
+
+    #[cfg(feature = "clickhouse")]
+    pub fn with_clickhouse(mut self, clickhouse: clickhouse::Client) -> Self {
+        self.clickhouse = Some(clickhouse);
+        self
     }
 }
