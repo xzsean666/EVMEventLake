@@ -9,7 +9,7 @@ use axum::{
 use chrono::Utc;
 use eventlake::{
     api, app::application_state::ApplicationState, auth, collector, configuration, database,
-    decoder, indexing, reorg, rpc_pool, shared::hex::parse_hex_u64,
+    reorg, rpc_pool, shared::hex::parse_hex_u64,
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde_json::{Value, json};
@@ -19,6 +19,8 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 const CONTRACT_ADDRESS: &str = "0x2222222222222222222222222222222222222222";
+const BATCH_CONTRACT_A: &str = "0x4444444444444444444444444444444444444444";
+const BATCH_CONTRACT_B: &str = "0x5555555555555555555555555555555555555555";
 const FROM_ADDRESS: &str = "0x1111111111111111111111111111111111111111";
 const TO_ADDRESS: &str = "0x3333333333333333333333333333333333333333";
 const TRANSFER_TOPIC0: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -65,7 +67,17 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
     assert!(openapi_response.1["paths"].get("/api/search").is_some());
     assert!(
         openapi_response.1["paths"]
+            .get("/api/raw-logs/search")
+            .is_some()
+    );
+    assert!(
+        openapi_response.1["paths"]
             .get("/api/subscriptions")
+            .is_some()
+    );
+    assert!(
+        openapi_response.1["paths"]
+            .get("/api/subscriptions/batch")
             .is_some()
     );
     assert!(
@@ -107,6 +119,52 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
     assert_ok(get(&router, "/api/chains/31337").await?, StatusCode::OK);
     assert_ok(get(&router, "/api/chains").await?, StatusCode::OK);
 
+    let batch_response = post_json(
+        &router,
+        "/api/subscriptions/batch",
+        json!({
+            "chain_id": 31337,
+            "contract_addresses": [BATCH_CONTRACT_A, BATCH_CONTRACT_A, BATCH_CONTRACT_B],
+            "start_block": 100
+        }),
+    )
+    .await?;
+    assert_ok(batch_response.clone(), StatusCode::OK);
+    let batch_records = response_data(&batch_response.1)
+        .as_array()
+        .expect("batch response data is an array");
+    assert_eq!(batch_records.len(), 2);
+    assert!(batch_records.iter().all(|record| record["abi_id"].is_null()));
+    assert!(batch_records
+        .iter()
+        .all(|record| record["start_block"] == 100 && record["current_block"] == 100));
+
+    let batch_retry = post_json(
+        &router,
+        "/api/subscriptions/batch",
+        json!({
+            "chain_id": 31337,
+            "contract_addresses": [BATCH_CONTRACT_B, BATCH_CONTRACT_A],
+            "start_block": 1
+        }),
+    )
+    .await?;
+    assert_ok(batch_retry.clone(), StatusCode::OK);
+    let retry_records = response_data(&batch_retry.1)
+        .as_array()
+        .expect("batch retry data is an array");
+    assert_eq!(retry_records.len(), 2);
+    assert_eq!(
+        batch_records
+            .iter()
+            .map(|record| record["id"].as_str().unwrap())
+            .collect::<std::collections::HashSet<_>>(),
+        retry_records
+            .iter()
+            .map(|record| record["id"].as_str().unwrap())
+            .collect::<std::collections::HashSet<_>>()
+    );
+
     assert_error(
         post_json(
             &router,
@@ -116,6 +174,20 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
                 "name": "Invalid",
                 "native_token_symbol": "ETH",
                 "safe_confirmation_depth": -1
+            }),
+        )
+        .await?,
+        StatusCode::BAD_REQUEST,
+    );
+
+    assert_error(
+        post_json(
+            &router,
+            "/api/subscriptions",
+            json!({
+                "chain_id": 31337,
+                "collection_scope": "all_events",
+                "start_block": 100
             }),
         )
         .await?,
@@ -226,6 +298,8 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
     .await?;
     assert_ok(subscription_response.clone(), StatusCode::OK);
     let subscription_id = uuid_from_response(&subscription_response.1, "id");
+    assert_eq!(response_data(&subscription_response.1)["start_block"], 100);
+    assert_eq!(response_data(&subscription_response.1)["current_block"], 100);
 
     let duplicate_subscription_response = post_json(
         &router,
@@ -271,96 +345,31 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
 
     collector::worker::collect_once(&state).await?;
     assert_eq!(count_rows(&pool, "eventlake_raw_logs").await?, 1);
-    assert_eq!(count_rows(&pool, "eventlake_decode_queue").await?, 1);
+    assert_eq!(count_rows(&pool, "eventlake_decode_queue").await?, 0);
 
-    decoder::worker::decode_once(&state).await?;
-    assert_eq!(count_rows(&pool, "eventlake_decoded_events").await?, 1);
-    assert_eq!(count_rows(&pool, "eventlake_address_index").await?, 2);
-    assert!(count_rows(&pool, "eventlake_event_field_index").await? >= 3);
-
-    let search_by_event = post_json(
+    let raw_search = post_json(
         &router,
-        "/api/search",
+        "/api/raw-logs/search",
         json!({
             "page": 1,
             "limit": 10,
             "filters": [
-                { "field": "event_name", "operator": "eq", "value": "Transfer" }
+                { "field": "chain_id", "operator": "eq", "value": 31337 },
+                { "field": "block_number", "operator": "eq", "value": 100 },
+                { "field": "topic0", "operator": "eq", "value": TRANSFER_TOPIC0 }
             ],
             "sort": { "field": "block_number", "direction": "desc" }
         }),
     )
     .await?;
-    assert_ok(search_by_event.clone(), StatusCode::OK);
-    assert_eq!(
-        response_data(&search_by_event.1).as_array().unwrap().len(),
-        1
-    );
-
-    let search_by_address = post_json(
-        &router,
-        "/api/search",
-        json!({
-            "page": 1,
-            "limit": 10,
-            "filters": [
-                { "field": "address", "operator": "eq", "value": FROM_ADDRESS }
-            ],
-            "sort": { "field": "block_number", "direction": "desc" }
-        }),
-    )
-    .await?;
-    assert_ok(search_by_address.clone(), StatusCode::OK);
-    assert_eq!(
-        response_data(&search_by_address.1)
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-
-    let search_by_field = post_json(
-        &router,
-        "/api/search",
-        json!({
-            "page": 1,
-            "limit": 10,
-            "filters": [
-                { "field": "field.value", "operator": "eq", "value": "1234" }
-            ],
-            "sort": { "field": "block_number", "direction": "desc" }
-        }),
-    )
-    .await?;
-    assert_ok(search_by_field.clone(), StatusCode::OK);
-    assert_eq!(
-        response_data(&search_by_field.1).as_array().unwrap().len(),
-        1
-    );
-
-    let address_explorer = get(&router, &format!("/api/explorer/address/{FROM_ADDRESS}")).await?;
-    assert_ok(address_explorer.clone(), StatusCode::OK);
-    assert_eq!(
-        response_data(&address_explorer.1)["recent_events"][0]["event_name"],
-        "Transfer"
-    );
-
-    let contract_explorer = get(
-        &router,
-        &format!("/api/explorer/contracts/31337/{CONTRACT_ADDRESS}"),
-    )
-    .await?;
-    assert_ok(contract_explorer.clone(), StatusCode::OK);
-    assert_eq!(response_data(&contract_explorer.1)["event_count"], 1);
-
-    let event_explorer = get(&router, "/api/explorer/events/Transfer").await?;
-    assert_ok(event_explorer.clone(), StatusCode::OK);
-    assert_eq!(response_data(&event_explorer.1)["total_count"], 1);
+    assert_ok(raw_search.clone(), StatusCode::OK);
+    assert_eq!(response_data(&raw_search.1).as_array().unwrap().len(), 1);
+    assert_eq!(response_data(&raw_search.1)[0]["data"], uint256_topic_data(1234));
 
     let dashboard = get(&router, "/api/dashboard").await?;
     assert_ok(dashboard.clone(), StatusCode::OK);
     assert_eq!(response_data(&dashboard.1)["total_raw_logs"], 1);
-    assert_eq!(response_data(&dashboard.1)["total_decoded_events"], 1);
+    assert_eq!(response_data(&dashboard.1)["total_decoded_events"], 0);
 
     assert_authentication_modes(&database_url, pool.clone()).await?;
 
@@ -382,17 +391,15 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
             .0,
         1
     );
-    assert_eq!(count_rows(&pool, "eventlake_address_index").await?, 0);
-    assert_eq!(count_rows(&pool, "eventlake_event_field_index").await?, 0);
-
     let post_reorg_search = post_json(
         &router,
-        "/api/search",
+        "/api/raw-logs/search",
         json!({
             "page": 1,
             "limit": 10,
             "filters": [
-                { "field": "event_name", "operator": "eq", "value": "Transfer" }
+                { "field": "chain_id", "operator": "eq", "value": 31337 },
+                { "field": "topic0", "operator": "eq", "value": TRANSFER_TOPIC0 }
             ]
         }),
     )
@@ -405,18 +412,6 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
             .len(),
         0
     );
-
-    let post_reorg_contract = get(
-        &router,
-        &format!("/api/explorer/contracts/31337/{CONTRACT_ADDRESS}"),
-    )
-    .await?;
-    assert_ok(post_reorg_contract.clone(), StatusCode::OK);
-    assert_eq!(response_data(&post_reorg_contract.1)["event_count"], 0);
-
-    let post_reorg_event = get(&router, "/api/explorer/events/Transfer").await?;
-    assert_ok(post_reorg_event.clone(), StatusCode::OK);
-    assert_eq!(response_data(&post_reorg_event.1)["total_count"], 0);
 
     let post_reorg_dashboard = get(&router, "/api/dashboard").await?;
     assert_ok(post_reorg_dashboard.clone(), StatusCode::OK);
@@ -448,7 +443,7 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn live_chain_collects_and_decodes_base_usdc_logs() -> anyhow::Result<()> {
+async fn live_chain_collects_and_searches_raw_base_usdc_logs() -> anyhow::Result<()> {
     if env::var("EVENTLAKE_RUN_LIVE_CHAIN_E2E").ok().as_deref() != Some("true") {
         eprintln!(
             "skipping live chain e2e: set EVENTLAKE_RUN_LIVE_CHAIN_E2E=true to run against Base"
@@ -546,7 +541,6 @@ async fn live_chain_collects_and_decodes_base_usdc_logs() -> anyhow::Result<()> 
     .await?;
     assert_ok(subscription_response, StatusCode::OK);
 
-    indexing::partition_manager::ensure_partitions(&pool).await?;
     collector::worker::collect_once(&state).await?;
 
     let raw_count = count_raw_logs_for_contract(&pool, BASE_CHAIN_ID, BASE_USDC_ADDRESS).await?;
@@ -560,34 +554,16 @@ async fn live_chain_collects_and_decodes_base_usdc_logs() -> anyhow::Result<()> 
         sample.transfer_count
     );
 
-    for _ in 0..5 {
-        decoder::worker::decode_once(&state).await?;
-        if count_decoded_transfers(&pool, BASE_CHAIN_ID, BASE_USDC_ADDRESS).await? > 0 {
-            break;
-        }
-    }
-
-    let transfer_count = count_decoded_transfers(&pool, BASE_CHAIN_ID, BASE_USDC_ADDRESS).await?;
-    eprintln!("live e2e decoded {transfer_count} Transfer events");
-    assert!(
-        transfer_count > 0,
-        "expected at least one decoded Base USDC Transfer event"
-    );
-    assert!(
-        count_rows(&pool, "eventlake_address_index").await? > 0,
-        "expected decoded live events to populate address index"
-    );
-
     let search_response = post_json(
         &router,
-        "/api/search",
+        "/api/raw-logs/search",
         json!({
             "page": 1,
             "limit": 10,
             "filters": [
                 { "field": "chain_id", "operator": "eq", "value": BASE_CHAIN_ID },
                 { "field": "contract_address", "operator": "eq", "value": BASE_USDC_ADDRESS },
-                { "field": "event_name", "operator": "eq", "value": "Transfer" }
+                { "field": "topic0", "operator": "eq", "value": TRANSFER_TOPIC0 }
             ],
             "sort": { "field": "block_number", "direction": "desc" }
         }),
@@ -599,7 +575,7 @@ async fn live_chain_collects_and_decodes_base_usdc_logs() -> anyhow::Result<()> 
             .as_array()
             .unwrap()
             .is_empty(),
-        "expected live decoded Transfer events to be searchable"
+        "expected live raw Transfer logs to be searchable"
     );
 
     Ok(())
@@ -704,7 +680,7 @@ async fn discover_live_base_usdc_sample(
         let logs = rpc_pool::evm_rpc_client::eth_get_logs(
             client,
             rpc_url,
-            BASE_USDC_ADDRESS,
+            Some(BASE_USDC_ADDRESS),
             from_block,
             to_block,
         )
@@ -1058,27 +1034,6 @@ async fn count_raw_logs_for_contract(
         SELECT COUNT(*)::BIGINT
         FROM eventlake_raw_logs
         WHERE chain_id = $1 AND contract_address = $2
-        "#,
-    )
-    .bind(chain_id)
-    .bind(contract_address)
-    .fetch_one(pool)
-    .await?
-    .0)
-}
-
-async fn count_decoded_transfers(
-    pool: &PgPool,
-    chain_id: i64,
-    contract_address: &str,
-) -> anyhow::Result<i64> {
-    Ok(sqlx::query_as::<_, (i64,)>(
-        r#"
-        SELECT COUNT(*)::BIGINT
-        FROM eventlake_decoded_events
-        WHERE chain_id = $1
-          AND contract_address = $2
-          AND event_name = 'Transfer'
         "#,
     )
     .bind(chain_id)

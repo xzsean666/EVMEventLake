@@ -67,6 +67,13 @@ async fn dashboard_summary(
                     "ClickHouse is enabled but no client is available".to_owned(),
                 )
             })?;
+        let total_raw_logs = crate::clickhouse::raw_log_count(&client)
+            .await
+            .map_err(|error| {
+                ApplicationError::ExternalService(format!(
+                    "ClickHouse dashboard query failed: {error}"
+                ))
+            })?;
         let total_decoded_events = crate::clickhouse::decoded_event_count(&client)
             .await
             .map_err(|error| {
@@ -75,6 +82,9 @@ async fn dashboard_summary(
                 ))
             })?;
         DashboardSummary {
+            total_raw_logs,
+            // This legacy field is preserved for historical pre-upgrade rows. New
+            // raw-event-lake collection does not create decoded-event rows.
             total_decoded_events,
             ..summary
         }

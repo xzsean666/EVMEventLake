@@ -140,11 +140,20 @@ async fn collect_subscription(
 
     loop {
         let to_block = block_range_end(from_block, block_window, safe_head);
-        partition_manager::ensure_partitions_for_range(&state.pool, from_block, to_block).await?;
+        // In ClickHouse mode raw logs never enter PostgreSQL, so PostgreSQL partition
+        // maintenance is only needed for the PostgreSQL raw-log deployment.
+        #[cfg(feature = "clickhouse")]
+        let postgres_raw_storage = !state.configuration.clickhouse.enabled;
+        #[cfg(not(feature = "clickhouse"))]
+        let postgres_raw_storage = true;
+        if postgres_raw_storage {
+            partition_manager::ensure_partitions_for_range(&state.pool, from_block, to_block)
+                .await?;
+        }
         let logs_result = rpc_pool::evm_rpc_client::eth_get_logs(
             &state.http_client,
             &endpoint.url,
-            &subscription.contract_address,
+            subscription.contract_address.as_deref(),
             from_block,
             to_block,
         )
@@ -161,7 +170,7 @@ async fn collect_subscription(
                 tracing::info!(
                     subscription_id = %subscription.id,
                     chain_id = subscription.chain_id,
-                    contract_address = %subscription.contract_address,
+                    contract_address = ?subscription.contract_address,
                     from_block,
                     to_block,
                     previous_window = block_window,
@@ -209,12 +218,13 @@ async fn collect_subscription(
         for log in &logs {
             let block_number = parse_hex_u64(&log.block_number)?;
             if observed_blocks.insert(block_number) {
-                let result = reorg::observe_block_with_postgres_search_storage(
+                let result = reorg::observe_block_with_postgres_storage(
                     &state.pool,
                     subscription.chain_id,
                     block_number,
                     &log.block_hash,
-                    !state.configuration.clickhouse.enabled,
+                    postgres_raw_storage,
+                    postgres_raw_storage,
                 )
                 .await?;
                 if matches!(result, reorg::BlockCheckpointResult::ReorgDetected { .. }) {
@@ -265,8 +275,34 @@ async fn collect_subscription(
             }
         }
 
-        for log in &logs {
-            store_raw_log(&state.pool, subscription, log).await?;
+        #[cfg(feature = "clickhouse")]
+        if state.configuration.clickhouse.enabled {
+            let client = crate::clickhouse::active_client(state)
+                .await?
+                .ok_or_else(|| {
+                    ApplicationError::ExternalService(
+                        "ClickHouse is enabled but no client is available".to_owned(),
+                    )
+                })?;
+            let raw_logs = logs
+                .iter()
+                .map(|log| clickhouse_raw_log(subscription, log))
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Err(error) = crate::clickhouse::write_raw_logs(&client, &raw_logs).await {
+                // The checkpoint is deliberately not advanced. On the next worker tick we
+                // fetch and write the same range again; ReplacingMergeTree makes that retry
+                // idempotent at the `(chain, block, tx, log_index)` key.
+                state.clear_clickhouse_client();
+                return Err(ApplicationError::ExternalService(format!(
+                    "ClickHouse raw-log write failed: {error}"
+                )));
+            }
+        }
+
+        if postgres_raw_storage {
+            for log in &logs {
+                store_raw_log(&state.pool, subscription, log).await?;
+            }
         }
 
         let next_block = to_block + 1;
@@ -308,14 +344,9 @@ async fn store_raw_log(
     let topics_value = serde_json::to_value(&topics)
         .map_err(|error| ApplicationError::BadRequest(error.to_string()))?;
 
-    // The raw log and its decode-queue entry must be written together: a raw log with no
-    // queue entry would silently never be decoded.
-    let mut transaction = pool.begin().await?;
-
-    // On re-collection (e.g. after a reorg rewind) the log already exists and is flagged
-    // removed; the upsert clears that flag and refreshes the block hash so the canonical
-    // fork supersedes the stale row instead of being dropped by the unique index.
-    let raw_log_id = sqlx::query_as::<_, (Uuid,)>(
+    // PostgreSQL-only mode still retains raw logs, but raw-event-lake mode has no local
+    // decode queue. A ClickHouse deployment bypasses this function completely.
+    sqlx::query(
         r#"
         INSERT INTO eventlake_raw_logs (
             id, subscription_id, chain_id, contract_address, block_number, block_hash,
@@ -328,7 +359,6 @@ async fn store_raw_log(
             data = EXCLUDED.data,
             topics = EXCLUDED.topics,
             ingested_at = now()
-        RETURNING id
         "#,
     )
     .bind(Uuid::new_v4())
@@ -343,34 +373,32 @@ async fn store_raw_log(
     .bind(topics_value)
     .bind(&log.data)
     .bind(log.removed.unwrap_or(false))
-    .fetch_one(&mut *transaction)
-    .await?
-    .0;
-
-    // Reset the queue entry to pending on conflict so a re-collected log is decoded again
-    // against the canonical fork. In steady state blocks are collected exactly once, so
-    // this only fires on genuine re-collection.
-    sqlx::query(
-        r#"
-        INSERT INTO eventlake_decode_queue (id, raw_log_id, block_number, subscription_id)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (raw_log_id, block_number) DO UPDATE
-        SET status = 'pending',
-            attempt_count = 0,
-            last_error = NULL,
-            updated_at = now()
-        "#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(raw_log_id)
-    .bind(block_number)
-    .bind(subscription.id)
-    .execute(&mut *transaction)
+    .execute(pool)
     .await?;
 
-    transaction.commit().await?;
-
     Ok(())
+}
+
+#[cfg(feature = "clickhouse")]
+fn clickhouse_raw_log(
+    subscription: &SubscriptionRecord,
+    log: &RpcLog,
+) -> Result<crate::clickhouse::RawLog, ApplicationError> {
+    let topics = normalize_topics(&log.topics)?;
+    Ok(crate::clickhouse::RawLog {
+        id: Uuid::new_v4(),
+        subscription_id: Some(subscription.id),
+        chain_id: subscription.chain_id,
+        block_number: parse_hex_u64(&log.block_number)?,
+        block_hash: log.block_hash.clone(),
+        transaction_hash: log.transaction_hash.clone(),
+        transaction_index: parse_hex_u64(&log.transaction_index)?,
+        log_index: parse_hex_u64(&log.log_index)?,
+        contract_address: normalize_address(&log.address)?,
+        topics,
+        data: log.data.clone(),
+        is_removed: log.removed.unwrap_or(false),
+    })
 }
 
 fn normalize_topics(topics: &[String]) -> Result<Vec<String>, ApplicationError> {

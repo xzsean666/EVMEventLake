@@ -13,9 +13,10 @@
 | 已构建 ClickHouse 二进制 | `docker-compose.prebuilt.clickhouse.yml` |
 | 中国大陆网络环境 | 对应的 `.cn.yml` 文件 |
 
-默认部署只启动 PostgreSQL 和 EventLake。ClickHouse 模式只用于大量事件的搜索：
-PostgreSQL 保留 raw log、订阅、队列、认证和 reorg 状态，解码事件及地址/字段索引
-只写 ClickHouse，不在两边双写。
+默认部署只启动 PostgreSQL 和 EventLake。PostgreSQL-only 模式把 raw log 存在
+PostgreSQL；ClickHouse 模式把 raw log 只存到 ClickHouse，PostgreSQL 只保留订阅、
+checkpoint、认证和 reorg 状态。这个项目不再启动 ABI decoder，所有订阅的 `topics` 和
+`data` 都由下游项目解码。
 
 ## 2. 启动本地服务
 
@@ -51,9 +52,8 @@ curl -fsS http://127.0.0.1:8080/health/ready
 
 该 Compose 文件使用 `clickhouse/clickhouse-server:24.8`，通过 HTTP `8123` 连接，
 并把数据和日志分别保存到 `data/clickhouse`、`logs/clickhouse`。应用镜像使用
-`--features clickhouse` 构建；ClickHouse 连接失败时服务仍会启动，但搜索会返回服务
-错误，解码队列持续重试且受影响订阅暂停，成功后自动恢复。它不会回退 PostgreSQL，
-否则必须保留同一份派生数据。
+`--features clickhouse` 构建；ClickHouse 连接失败时服务仍会启动，但 raw-log 写入和
+查询会等待 ClickHouse 恢复，不会回退 PostgreSQL，也不会推进失败区间的 checkpoint。
 
 预编译部署：
 
@@ -134,30 +134,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/rpc-endpoints \
 可用 `POST /api/rpc-endpoints/{id}/check` 主动检查 endpoint；后台 worker 也会持续
 检查并按失败次数、权重和延迟选择 endpoint。
 
-### 5.3 上传 ABI
-
-`abi_json` 可以是标准 Solidity ABI 数组。上传后响应中的 `data.id` 是订阅需要的
-`abi_id`。
-
-```bash
-curl -sS -X POST http://127.0.0.1:8080/api/abis \
-  -H 'content-type: application/json' \
-  -d '{
-    "name":"MyContract",
-    "abi_json":[{
-      "type":"event",
-      "name":"Transfer",
-      "anonymous":false,
-      "inputs":[
-        {"name":"from","type":"address","indexed":true},
-        {"name":"to","type":"address","indexed":true},
-        {"name":"value","type":"uint256","indexed":false}
-      ]
-    }]
-  }'
-```
-
-### 5.4 创建订阅
+### 5.3 创建合约订阅
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/api/subscriptions \
@@ -165,51 +142,85 @@ curl -sS -X POST http://127.0.0.1:8080/api/subscriptions \
   -d '{
     "chain_id":31337,
     "contract_address":"0x0000000000000000000000000000000000000001",
-    "abi_id":"REPLACE_WITH_ABI_UUID",
     "start_block":0,
     "realtime_enabled":true
   }'
 ```
 
-同一 `chain_id + contract_address` 只能有一个 active subscription。启动后台 worker
-后，流程为：RPC 拉取 raw logs -> PostgreSQL 保存 raw log 和 decode queue -> ABI 解码
--> 根据启动模式写入 PostgreSQL 或 ClickHouse 的解码事件和地址/字段索引。ClickHouse
-写入未成功前 queue 不会确认，订阅会重试并暂停采集。
+省略 `collection_scope` 时默认为 `contract`。同一
+`chain_id + collection_scope + contract_address` 只能有一个 active subscription。启动
+后台 worker 后，流程为：RPC 拉取 raw logs -> 写入当前 raw store -> 推进 PostgreSQL
+checkpoint。`start_block` 是必填的起始区块，第一次请求范围从该区块开始（包含该区块），
+完成后 checkpoint 推进到下一块；项目不会解码 topics 或 data。
+为避免全量和按合约重复拉取，同一链不能同时存在 active 的 `all_events` 与
+`contract` subscriptions。
+
+如果只想按合约地址收集该合约的全部 raw logs，不需要 ABI，可以批量创建：
+
+~~~bash
+curl -sS -X POST http://127.0.0.1:8080/api/subscriptions/batch \
+  -H 'content-type: application/json' \
+  -d '{
+    "chain_id":31337,
+    "contract_addresses":[
+      "0x4444444444444444444444444444444444444444",
+      "0x5555555555555555555555555555555555555555"
+    ],
+    "start_block":100,
+    "realtime_enabled":true
+  }'
+~~~
+
+批量接口会规范化并去重输入地址；同一链同一地址已有 active subscription 时返回已有记录，
+不会重新创建或重复采集。abi_id 可以省略。
+
+### 5.4 创建全量事件订阅
+
+`EVENTLAKE_CLICKHOUSE_ENABLED=true` 只是启用 ClickHouse raw store，并不会自动创建全量
+订阅。全量模式需要该开关且二进制必须以 `clickhouse` feature 构建；创建订阅时设置
+`collection_scope: "all_events"`，不传 `contract_address`，RPC `eth_getLogs` 才会不带
+地址过滤：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/subscriptions \
+  -H 'content-type: application/json' \
+  -d '{
+    "chain_id":31337,
+    "collection_scope":"all_events",
+    "start_block":0,
+    "realtime_enabled":true,
+    "min_block_window":1,
+    "max_block_window":100
+  }'
+```
+
+`all_events` 与合约订阅一样使用 `start_block`，从指定区块开始收集整条链的所有日志。
+`abi_id` 在当前 raw-event-lake 模式仅为兼容字段，不会触发本项目解码。
 
 ## 6. 搜索和探索
 
-`POST /api/search` 支持字段 `chain_id`、`block_number`、`contract_address`、
-`event_name`、`topic0`、`transaction_hash`、`address` 和 `field.<name>`。过滤器在
-当前实现中按 AND 组合。
+主搜索接口为 `POST /api/raw-logs/search`。它要求 `chain_id` 的 `eq` 过滤器，并支持
+`block_number`、`contract_address`、`transaction_hash`、`topic0` 到 `topic3`；过滤器按
+AND 组合。返回 raw `topics` 和 `data`，不包含 ABI 解码字段。
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8080/api/search \
+curl -sS -X POST http://127.0.0.1:8080/api/raw-logs/search \
   -H 'content-type: application/json' \
   -d '{
     "page":1,
     "limit":50,
     "filters":[
       {"field":"chain_id","operator":"eq","value":31337},
-      {"field":"event_name","operator":"eq","value":"Transfer"},
-      {"field":"field.value","operator":"eq","value":"1000"}
+      {"field":"block_number","operator":"gte","value":100},
+      {"field":"topic0","operator":"eq","value":"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"}
     ],
     "sort":{"field":"block_number","direction":"desc"}
   }'
 ```
 
-探索接口：
-
-- `GET /api/explorer/address/{address}`
-- `GET /api/explorer/contracts/{chain_id}/{contract_address}`
-- `GET /api/explorer/events/{event_name}`
-- `GET /api/dashboard`
-
-ClickHouse 模式读取 `decoded_events FINAL` 及其索引；PostgreSQL-only 模式读取
-PostgreSQL 派生表。前者不可用时不会回退到 PostgreSQL，以免结果不完整或重新引入双份
-派生数据。
-
-已有 PostgreSQL-only 历史数据时，先完成从 retained raw logs 的受控回填和核验，再切换
-到 ClickHouse 模式；当前版本不会自动迁移或删除旧的 PostgreSQL 派生表。
+ClickHouse 模式查询 `raw_logs FINAL`；PostgreSQL-only 模式查询
+`eventlake_raw_logs`。ClickHouse 不可用时不会回退 PostgreSQL，避免返回不完整数据。
+`/api/search` 和 explorer 接口保留为历史 decoded 数据兼容读取面，新采集不会填充它们。
 
 ## 7. 配置和日志
 
@@ -220,10 +231,10 @@ PostgreSQL 派生表。前者不可用时不会回退到 PostgreSQL，以免结�
 | `EVENTLAKE_HTTP_HOST` | `0.0.0.0`（Compose） | HTTP 监听地址 |
 | `EVENTLAKE_HTTP_PORT` | `8080` | HTTP 监听端口 |
 | `EVENTLAKE_DATABASE_URL` | Compose 内部 PostgreSQL URL | PostgreSQL 连接 |
-| `EVENTLAKE_BACKGROUND_WORKERS_ENABLED` | `true` | 启用采集、解码和维护 worker |
+| `EVENTLAKE_BACKGROUND_WORKERS_ENABLED` | `true` | 启用采集、RPC 检查和维护 worker |
 | `EVENTLAKE_WORKER_TICK_SECONDS` | `5` | worker 调度间隔 |
-| `EVENTLAKE_DECODE_BATCH_SIZE` | `100` | 每次解码批量大小 |
-| `EVENTLAKE_CLICKHOUSE_ENABLED` | `false` | 启用 ClickHouse（需 feature 构建） |
+| `EVENTLAKE_DECODE_BATCH_SIZE` | `100` | 已废弃的兼容配置，不启动 decoder |
+| `EVENTLAKE_CLICKHOUSE_ENABLED` | `false` | 启用 ClickHouse raw store（需 feature 构建） |
 | `EVENTLAKE_LOG_LEVEL` | `info` | tracing 过滤级别 |
 
 查看日志：

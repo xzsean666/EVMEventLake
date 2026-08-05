@@ -16,17 +16,18 @@ pub async fn observe_block(
     block_number: i64,
     block_hash: &str,
 ) -> Result<BlockCheckpointResult, ApplicationError> {
-    observe_block_with_postgres_search_storage(pool, chain_id, block_number, block_hash, true).await
+    observe_block_with_postgres_storage(pool, chain_id, block_number, block_hash, true, true).await
 }
 
-/// Observes one canonical block. PostgreSQL-only deployments invalidate their decoded
-/// event/index tables; ClickHouse deployments leave those tables empty and invalidate the
-/// ClickHouse projection separately before collection resumes.
-pub async fn observe_block_with_postgres_search_storage(
+/// Observes one canonical block. PostgreSQL-only deployments invalidate raw logs and
+/// legacy decoded projections locally. ClickHouse deployments keep both raw logs and
+/// their reorg tombstones in ClickHouse, while PostgreSQL only rewinds checkpoints.
+pub async fn observe_block_with_postgres_storage(
     pool: &sqlx::PgPool,
     chain_id: i64,
     block_number: i64,
     block_hash: &str,
+    postgres_raw_storage: bool,
     postgres_search_storage: bool,
 ) -> Result<BlockCheckpointResult, ApplicationError> {
     let previous = sqlx::query_as::<_, (String,)>(
@@ -65,6 +66,7 @@ pub async fn observe_block_with_postgres_search_storage(
                 &mut transaction,
                 chain_id,
                 block_number,
+                postgres_raw_storage,
                 postgres_search_storage,
             )
             .await?;
@@ -97,21 +99,24 @@ async fn invalidate_from_block(
     connection: &mut sqlx::PgConnection,
     chain_id: i64,
     from_block: i64,
+    postgres_raw_storage: bool,
     postgres_search_storage: bool,
 ) -> Result<(), ApplicationError> {
-    // Raw logs are preserved (per the "keep raw logs permanently" rule) but flagged so
-    // collection can re-ingest the canonical fork without violating the unique index.
-    sqlx::query(
-        r#"
-        UPDATE eventlake_raw_logs
-        SET removed = true
-        WHERE chain_id = $1 AND block_number >= $2
-        "#,
-    )
-    .bind(chain_id)
-    .bind(from_block)
-    .execute(&mut *connection)
-    .await?;
+    if postgres_raw_storage {
+        // Raw logs are preserved but flagged so collection can re-ingest the canonical
+        // fork without violating the unique index.
+        sqlx::query(
+            r#"
+            UPDATE eventlake_raw_logs
+            SET removed = true
+            WHERE chain_id = $1 AND block_number >= $2
+            "#,
+        )
+        .bind(chain_id)
+        .bind(from_block)
+        .execute(&mut *connection)
+        .await?;
+    }
 
     if postgres_search_storage {
         // Decoded events are kept for audit but flipped out of the 'decoded' status so the

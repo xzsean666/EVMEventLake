@@ -1,7 +1,9 @@
+use std::collections::HashSet;
+
 use axum::{
     Json, Router,
     extract::{Path, State},
-    routing::get,
+    routing::{get, post},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,10 @@ pub fn routes() -> Router<ApplicationState> {
             get(list_subscriptions).post(create_subscription),
         )
         .route(
+            "/api/subscriptions/batch",
+            post(create_contract_subscriptions_batch),
+        )
+        .route(
             "/api/subscriptions/{id}",
             get(get_subscription).delete(delete_subscription),
         )
@@ -43,11 +49,17 @@ pub fn routes() -> Router<ApplicationState> {
         list_subscriptions,
         get_subscription,
         create_subscription,
+        create_contract_subscriptions_batch,
         pause_subscription,
         resume_subscription,
         delete_subscription
     ),
-    components(schemas(SubscriptionRecord, CreateSubscriptionRequest))
+    components(schemas(
+        SubscriptionRecord,
+        CreateSubscriptionRequest,
+        CreateContractSubscriptionsRequest,
+        CollectionScope
+    ))
 )]
 struct SubscriptionsApiDocumentation;
 
@@ -59,7 +71,10 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
 pub struct SubscriptionRecord {
     pub id: Uuid,
     pub chain_id: i64,
-    pub contract_address: String,
+    /// `None` identifies an all-events subscription. Contract-scoped subscriptions
+    /// always have a normalized address.
+    pub contract_address: Option<String>,
+    pub collection_scope: String,
     pub abi_id: Option<Uuid>,
     pub start_block: i64,
     pub current_block: i64,
@@ -78,7 +93,13 @@ pub struct SubscriptionRecord {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateSubscriptionRequest {
     pub chain_id: i64,
-    pub contract_address: String,
+    /// Omit this only with `collection_scope: "all_events"`.
+    pub contract_address: Option<String>,
+    /// `contract` is backward-compatible and requires `contract_address`.
+    /// `all_events` issues `eth_getLogs` without an address filter.
+    pub collection_scope: Option<CollectionScope>,
+    /// Retained only for request compatibility. Raw-event-lake collection does not
+    /// decode logs, so this value is not used by the collector.
     pub abi_id: Option<Uuid>,
     pub start_block: i64,
     pub realtime_enabled: Option<bool>,
@@ -86,9 +107,38 @@ pub struct CreateSubscriptionRequest {
     pub max_block_window: Option<i64>,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateContractSubscriptionsRequest {
+    pub chain_id: i64,
+    /// Contract addresses are normalized and de-duplicated before subscriptions are created.
+    pub contract_addresses: Vec<String>,
+    /// Optional because raw collection does not decode logs.
+    pub abi_id: Option<Uuid>,
+    pub start_block: i64,
+    pub realtime_enabled: Option<bool>,
+    pub min_block_window: Option<i64>,
+    pub max_block_window: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionScope {
+    Contract,
+    AllEvents,
+}
+
+impl CollectionScope {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Contract => "contract",
+            Self::AllEvents => "all_events",
+        }
+    }
+}
+
 /// The full `SubscriptionRecord` column list, kept in one place so the many SELECT and
 /// RETURNING clauses below cannot drift out of sync with each other or the struct.
-const SUBSCRIPTION_COLUMNS: &str = "id, chain_id, contract_address, abi_id, start_block, \
+const SUBSCRIPTION_COLUMNS: &str = "id, chain_id, contract_address, collection_scope, abi_id, start_block, \
     current_block, target_block, min_block_window, max_block_window, current_block_window, \
     status, realtime_enabled, active, error_message, created_at, updated_at";
 
@@ -149,7 +199,36 @@ async fn create_subscription(
     principal.require_admin()?;
 
     validate_subscription_request(&request)?;
-    let contract_address = normalize_address(&request.contract_address)?;
+    let collection_scope = request
+        .collection_scope
+        .as_ref()
+        .map(CollectionScope::as_str)
+        .unwrap_or("contract");
+    let contract_address = match collection_scope {
+        "contract" => Some(normalize_address(
+            request.contract_address.as_deref().ok_or_else(|| {
+                ApplicationError::BadRequest(
+                    "contract_address is required when collection_scope is contract".to_owned(),
+                )
+            })?,
+        )?),
+        "all_events" => {
+            if request.contract_address.is_some() {
+                return Err(ApplicationError::BadRequest(
+                    "contract_address must be omitted when collection_scope is all_events"
+                        .to_owned(),
+                ));
+            }
+            if !state.configuration.clickhouse.enabled {
+                return Err(ApplicationError::BadRequest(
+                    "all_events collection requires EVENTLAKE_CLICKHOUSE_ENABLED=true"
+                        .to_owned(),
+                ));
+            }
+            None
+        }
+        _ => unreachable!("CollectionScope only exposes known values"),
+    };
 
     let collection_policy = chains::get_collection_policy(&state.pool, request.chain_id).await?;
     let min_block_window = request
@@ -160,14 +239,65 @@ async fn create_subscription(
         .unwrap_or(collection_policy.default_max_block_window);
     validate_block_windows(min_block_window, max_block_window)?;
 
+    // Serialize subscription changes per chain. This closes the race where one request
+    // creates `all_events` while another creates a contract scope on the same chain.
+    let mut transaction = state.pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(request.chain_id)
+        .execute(&mut *transaction)
+        .await?;
+
+    let all_events_active = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM eventlake_subscriptions WHERE chain_id = $1 AND collection_scope = 'all_events' AND active = true)",
+    )
+    .bind(request.chain_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+
+    if collection_scope == "contract" && all_events_active {
+        return Err(ApplicationError::Conflict(
+            "an active all_events subscription already collects this chain".to_owned(),
+        ));
+    }
+
+    if collection_scope == "all_events" {
+        let existing_all_events = sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(
+            format!(
+                "SELECT {SUBSCRIPTION_COLUMNS} FROM eventlake_subscriptions \
+                 WHERE chain_id = $1 AND collection_scope = 'all_events' AND active = true"
+            ),
+        ))
+        .bind(request.chain_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+
+        if let Some(record) = existing_all_events {
+            transaction.commit().await?;
+            return Ok(response::success(record));
+        }
+
+        let contract_active = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM eventlake_subscriptions WHERE chain_id = $1 AND collection_scope = 'contract' AND active = true)",
+        )
+        .bind(request.chain_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if contract_active {
+            return Err(ApplicationError::Conflict(
+                "active contract subscriptions already collect this chain; pause or delete them before enabling all_events"
+                    .to_owned(),
+            ));
+        }
+    }
+
     let insert_query = format!(
         r#"
         INSERT INTO eventlake_subscriptions (
-            id, chain_id, contract_address, abi_id, start_block, current_block,
+            id, chain_id, contract_address, collection_scope, abi_id, start_block, current_block,
             min_block_window, max_block_window, current_block_window, realtime_enabled
         )
-        VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $7, $8)
-        ON CONFLICT (chain_id, contract_address) WHERE active = true DO NOTHING
+        VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $8, $9)
+        ON CONFLICT DO NOTHING
         RETURNING {SUBSCRIPTION_COLUMNS}
         "#
     );
@@ -175,18 +305,27 @@ async fn create_subscription(
         .bind(Uuid::new_v4())
         .bind(request.chain_id)
         .bind(&contract_address)
+        .bind(collection_scope)
         .bind(request.abi_id)
         .bind(request.start_block)
         .bind(min_block_window)
         .bind(max_block_window)
         .bind(request.realtime_enabled.unwrap_or(true))
-        .fetch_optional(&state.pool)
+        .fetch_optional(&mut *transaction)
         .await?;
 
     let record = match inserted {
         Some(record) => record,
         None => {
-            find_active_subscription_by_contract(&state.pool, request.chain_id, &contract_address)
+            sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(format!(
+                "SELECT {SUBSCRIPTION_COLUMNS} FROM eventlake_subscriptions \
+                 WHERE chain_id = $1 AND collection_scope = $2 \
+                   AND contract_address IS NOT DISTINCT FROM $3 AND active = true"
+            )))
+                .bind(request.chain_id)
+                .bind(collection_scope)
+                .bind(contract_address.as_deref())
+                .fetch_optional(&mut *transaction)
                 .await?
                 .ok_or_else(|| {
                     ApplicationError::Conflict(
@@ -197,15 +336,87 @@ async fn create_subscription(
         }
     };
 
-    upsert_contract_registry(
-        &state.pool,
-        record.chain_id,
-        &record.contract_address,
-        record.abi_id,
-    )
-    .await?;
+    transaction.commit().await?;
+
+    if let Some(contract_address) = record.contract_address.as_deref() {
+        upsert_contract_registry(
+            &state.pool,
+            record.chain_id,
+            contract_address,
+            record.abi_id,
+        )
+        .await?;
+    }
 
     Ok(response::success(record))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/subscriptions/batch",
+    tag = "subscriptions",
+    request_body = CreateContractSubscriptionsRequest,
+    responses(
+        (status = 200, description = "Contract subscriptions created or existing active subscriptions returned", body = ApiResponse<Vec<SubscriptionRecord>>),
+        (status = 400, description = "Invalid batch subscription request"),
+        (status = 409, description = "Subscription scope conflict")
+    )
+)]
+async fn create_contract_subscriptions_batch(
+    principal: AuthenticatedPrincipal,
+    State(state): State<ApplicationState>,
+    Json(request): Json<CreateContractSubscriptionsRequest>,
+) -> Result<Json<ApiResponse<Vec<SubscriptionRecord>>>, ApplicationError> {
+    principal.require_admin()?;
+
+    if request.contract_addresses.is_empty() {
+        return Err(ApplicationError::BadRequest(
+            "contract_addresses must contain at least one address".to_owned(),
+        ));
+    }
+    if request.contract_addresses.len() > 1_000 {
+        return Err(ApplicationError::BadRequest(
+            "contract_addresses cannot contain more than 1000 addresses".to_owned(),
+        ));
+    }
+
+    // Normalize and de-duplicate the input before touching the database. This makes retries
+    // safe and ensures one request cannot create duplicate work for the same contract.
+    let mut addresses = Vec::with_capacity(request.contract_addresses.len());
+    let mut seen = HashSet::with_capacity(request.contract_addresses.len());
+    for address in &request.contract_addresses {
+        let normalized = normalize_address(address)?;
+        if seen.insert(normalized.clone()) {
+            addresses.push(normalized);
+        }
+    }
+
+    let mut records = Vec::with_capacity(addresses.len());
+    for contract_address in addresses {
+        let response = create_subscription(
+            principal.clone(),
+            State(state.clone()),
+            Json(CreateSubscriptionRequest {
+                chain_id: request.chain_id,
+                contract_address: Some(contract_address),
+                collection_scope: Some(CollectionScope::Contract),
+                abi_id: request.abi_id,
+                start_block: request.start_block,
+                realtime_enabled: request.realtime_enabled,
+                min_block_window: request.min_block_window,
+                max_block_window: request.max_block_window,
+            }),
+        )
+        .await?;
+        let record = response.0.data.ok_or_else(|| {
+            ApplicationError::Internal(
+                "subscription creation returned an empty success response".to_owned(),
+            )
+        })?;
+        records.push(record);
+    }
+
+    Ok(response::success(records))
 }
 
 #[utoipa::path(
@@ -479,27 +690,6 @@ async fn find_subscription(
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| ApplicationError::NotFound(format!("subscription {id}")))
-}
-
-async fn find_active_subscription_by_contract(
-    pool: &sqlx::PgPool,
-    chain_id: i64,
-    contract_address: &str,
-) -> Result<Option<SubscriptionRecord>, ApplicationError> {
-    let query = format!(
-        r#"
-        SELECT {SUBSCRIPTION_COLUMNS}
-        FROM eventlake_subscriptions
-        WHERE chain_id = $1 AND contract_address = $2 AND active = true
-        "#
-    );
-    let record = sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(query))
-        .bind(chain_id)
-        .bind(contract_address)
-        .fetch_optional(pool)
-        .await?;
-
-    Ok(record)
 }
 
 async fn update_status(

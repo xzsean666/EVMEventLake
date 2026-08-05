@@ -22,9 +22,9 @@ The original modes use:
 - `postgres`
 - `eventlake`
 
-The ClickHouse variants add a `clickhouse` service for large analytical searches.
-PostgreSQL remains the raw-log and operational source of truth; in this mode decoded
-events and search indexes are stored only in ClickHouse.
+The ClickHouse variants add a `clickhouse` service for large raw-event datasets.
+In this mode raw logs are written only to ClickHouse; PostgreSQL remains the
+operational source of truth for subscriptions, checkpoints, RPC, and auth.
 
 ## 2. Runtime Facts
 
@@ -36,7 +36,7 @@ events and search indexes are stored only in ClickHouse.
 - Default container port: `8080`
 - Default host port: `EVENTLAKE_HTTP_PORT`, default `8080`
 - Health endpoint: `/health/ready`
-- Persistent state: PostgreSQL; ClickHouse variants also persist the selected derived-event search store
+- Persistent state: PostgreSQL operational state; ClickHouse variants also persist the raw-event store
 
 The application compiles migrations into the binary with `sqlx::migrate!("./migrations")`.
 The source-build Dockerfile copies `migrations/` into the builder stage so the release

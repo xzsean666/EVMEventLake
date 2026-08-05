@@ -105,8 +105,8 @@ pub async fn index_decoded_event(
     Ok(())
 }
 
-/// Writes the ClickHouse search projection after the raw log and queue row are durable in
-/// PostgreSQL. In ClickHouse mode this is the only decoded-event/index write path.
+/// Compatibility helper for callers that explicitly maintain old decoded-event history.
+/// The raw-event-lake collector does not call this path or enqueue decoding work.
 #[cfg(feature = "clickhouse")]
 pub async fn mirror_decoded_event(
     client: &clickhouse::Client,

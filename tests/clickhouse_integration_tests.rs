@@ -10,7 +10,7 @@ use chrono::Utc;
 use eventlake::{
     api,
     app::application_state::ApplicationState,
-    clickhouse::{self, IndexedEvent},
+    clickhouse::{self, IndexedEvent, RawLog},
     configuration::{
         ApplicationConfiguration, AuthConfiguration, BackgroundConfiguration, ClickHouseConfig,
         DatabaseConfiguration, HttpConfiguration, TelemetryConfiguration,
@@ -86,6 +86,22 @@ async fn mirrors_events_routes_search_and_hides_tombstones() -> anyhow::Result<(
     };
     indexing::mirror_decoded_event(&client, event.clone()).await?;
 
+    let raw_log = RawLog {
+        id: raw_log_id,
+        subscription_id: event.subscription_id,
+        chain_id: event.chain_id,
+        block_number: event.block_number,
+        block_hash: event.block_hash.clone(),
+        transaction_hash: event.transaction_hash.clone(),
+        transaction_index: 3,
+        log_index: event.log_index,
+        contract_address: event.contract_address.clone(),
+        topics: vec![TOPIC0.to_owned(), format!("0x{:064x}", 1)],
+        data: "0x1234".to_owned(),
+        is_removed: false,
+    };
+    clickhouse::write_raw_logs(&client, &[raw_log]).await?;
+
     let state = ApplicationState::new(test_configuration(clickhouse_configuration), lazy_pool()?)
         .with_clickhouse(client.clone());
     let router = api::routes::build_router(state);
@@ -105,6 +121,21 @@ async fn mirrors_events_routes_search_and_hides_tombstones() -> anyhow::Result<(
     assert_eq!(response.1["data"].as_array().map(Vec::len), Some(1));
     assert_eq!(response.1["data"][0]["id"], json!(event_id));
 
+    let raw_response = search_raw_logs(
+        &router,
+        json!({
+            "filters": [
+                { "field": "chain_id", "operator": "eq", "value": 31337 },
+                { "field": "block_number", "operator": "eq", "value": 123456 },
+                { "field": "topic0", "operator": "eq", "value": TOPIC0 }
+            ]
+        }),
+    )
+    .await?;
+    assert_eq!(raw_response.0, StatusCode::OK);
+    assert_eq!(raw_response.1["data"].as_array().map(Vec::len), Some(1));
+    assert_eq!(raw_response.1["data"][0]["data"], json!("0x1234"));
+
     let mut removed_event = event;
     removed_event.is_removed = true;
     clickhouse::write_indexed_event(&client, removed_event).await?;
@@ -121,6 +152,26 @@ async fn mirrors_events_routes_search_and_hides_tombstones() -> anyhow::Result<(
     assert_eq!(response.0, StatusCode::OK);
     assert!(
         response.1["data"]
+            .as_array()
+            .expect("data is an array")
+            .is_empty()
+    );
+
+    clickhouse::invalidate_from_block(&client, 31_337, 123_456).await?;
+    let raw_response = search_raw_logs(
+        &router,
+        json!({
+            "filters": [
+                { "field": "chain_id", "operator": "eq", "value": 31337 },
+                { "field": "block_number", "operator": "eq", "value": 123456 },
+                { "field": "topic0", "operator": "eq", "value": TOPIC0 }
+            ]
+        }),
+    )
+    .await?;
+    assert_eq!(raw_response.0, StatusCode::OK);
+    assert!(
+        raw_response.1["data"]
             .as_array()
             .expect("data is an array")
             .is_empty()
@@ -166,6 +217,21 @@ async fn search(router: &axum::Router, body: Value) -> anyhow::Result<(StatusCod
     let request = Request::builder()
         .method("POST")
         .uri("/api/search")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body)?))?;
+    let response = router.clone().oneshot(request).await?;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+    Ok((status, serde_json::from_slice(&bytes)?))
+}
+
+async fn search_raw_logs(
+    router: &axum::Router,
+    body: Value,
+) -> anyhow::Result<(StatusCode, Value)> {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/raw-logs/search")
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body)?))?;
     let response = router.clone().oneshot(request).await?;

@@ -10,8 +10,14 @@ use crate::{
     app::application_state::ApplicationState,
     configuration::ClickHouseConfig,
     indexing::DecodedFieldValue,
-    search::{SearchEventRecord, SearchFilter, SearchOperator, SearchRequest, SearchSort},
-    shared::{error::ApplicationError, validation::normalize_address},
+    search::{
+        RawLogRecord, RawLogSearchRequest, SearchEventRecord, SearchFilter, SearchOperator,
+        SearchRequest, SearchSort,
+    },
+    shared::{
+        error::ApplicationError,
+        validation::{normalize_address, normalize_topic},
+    },
 };
 
 const SCHEMA: &str = include_str!("../../clickhouse/schema.sql");
@@ -35,6 +41,24 @@ pub struct IndexedEvent {
     pub fields: Vec<DecodedFieldValue>,
     pub is_removed: bool,
     pub decoded_at: DateTime<Utc>,
+}
+
+/// An encoded EVM log. ClickHouse raw-event-lake mode writes this directly from the
+/// collector and intentionally never requires an ABI or a decoding queue.
+#[derive(Clone, Debug)]
+pub struct RawLog {
+    pub id: Uuid,
+    pub subscription_id: Option<Uuid>,
+    pub chain_id: i64,
+    pub block_number: i64,
+    pub block_hash: String,
+    pub transaction_hash: String,
+    pub transaction_index: i64,
+    pub log_index: i64,
+    pub contract_address: String,
+    pub topics: Vec<String>,
+    pub data: String,
+    pub is_removed: bool,
 }
 
 #[derive(Row, Serialize)]
@@ -93,6 +117,32 @@ struct EventFieldIndexRow {
     is_removed: bool,
     #[serde(with = "clickhouse::serde::time::datetime64::millis")]
     indexed_at: OffsetDateTime,
+}
+
+#[derive(Row, Serialize)]
+struct RawLogRow {
+    #[serde(with = "clickhouse::serde::uuid")]
+    id: Uuid,
+    #[serde(with = "clickhouse::serde::uuid::option")]
+    subscription_id: Option<Uuid>,
+    chain_id: u64,
+    block_number: u64,
+    block_hash: String,
+    transaction_hash: String,
+    transaction_index: u32,
+    log_index: u32,
+    contract_address: String,
+    topic0: String,
+    topic1: String,
+    topic2: String,
+    topic3: String,
+    topics: String,
+    data: String,
+    is_removed: bool,
+    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
+    ingested_at: OffsetDateTime,
+    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
+    stored_at: OffsetDateTime,
 }
 
 pub async fn connect(configuration: &ClickHouseConfig) -> anyhow::Result<Option<Client>> {
@@ -240,8 +290,48 @@ pub async fn write_indexed_event(client: &Client, event: IndexedEvent) -> anyhow
     Ok(())
 }
 
-/// Writes tombstone versions directly from ClickHouse's own projection tables. This keeps
-/// reorg repair independent from PostgreSQL decoded-event rows.
+/// Persists an entire RPC response atomically at the collector checkpoint boundary. The
+/// caller advances PostgreSQL's subscription checkpoint only after this returns success.
+pub async fn write_raw_logs(client: &Client, logs: &[RawLog]) -> anyhow::Result<()> {
+    if logs.is_empty() {
+        return Ok(());
+    }
+
+    let stored_at = Utc::now();
+    let stored_at_offset = to_offset_datetime(stored_at)?;
+    let rows = logs
+        .iter()
+        .map(|log| {
+            let topics = serde_json::to_string(&log.topics)
+                .context("raw-log topics cannot be serialized as JSON")?;
+            Ok(RawLogRow {
+                id: log.id,
+                subscription_id: log.subscription_id,
+                chain_id: as_u64(log.chain_id, "chain_id")?,
+                block_number: as_u64(log.block_number, "block_number")?,
+                block_hash: log.block_hash.clone(),
+                transaction_hash: log.transaction_hash.clone(),
+                transaction_index: as_u32(log.transaction_index, "transaction_index")?,
+                log_index: as_u32(log.log_index, "log_index")?,
+                contract_address: log.contract_address.clone(),
+                topic0: log.topics.first().cloned().unwrap_or_default(),
+                topic1: log.topics.get(1).cloned().unwrap_or_default(),
+                topic2: log.topics.get(2).cloned().unwrap_or_default(),
+                topic3: log.topics.get(3).cloned().unwrap_or_default(),
+                topics,
+                data: log.data.clone(),
+                is_removed: log.is_removed,
+                ingested_at: stored_at_offset,
+                stored_at: stored_at_offset,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    write_rows(client, "raw_logs", &rows).await
+}
+
+/// Writes raw-log tombstone versions directly from ClickHouse. Legacy projection
+/// tombstones are also retained so a pre-upgrade decoded-data reader stays consistent.
 pub async fn invalidate_from_block(
     client: &Client,
     chain_id: i64,
@@ -249,6 +339,21 @@ pub async fn invalidate_from_block(
 ) -> anyhow::Result<()> {
     let chain_id = as_u64(chain_id, "chain_id")?;
     let from_block = as_u64(from_block, "from_block")?;
+
+    execute_reorg_tombstone(
+        client,
+        r#"
+        INSERT INTO raw_logs
+        SELECT id, subscription_id, chain_id, block_number, block_hash, transaction_hash,
+               transaction_index, log_index, contract_address, topic0, topic1, topic2, topic3,
+               topics, data, true, ingested_at, now64(3)
+        FROM raw_logs FINAL
+        WHERE chain_id = ? AND block_number >= ? AND is_removed = false
+        "#,
+        chain_id,
+        from_block,
+    )
+    .await?;
 
     execute_reorg_tombstone(
         client,
@@ -366,6 +471,26 @@ struct SearchRow {
     decoded_at: OffsetDateTime,
 }
 
+#[derive(Row, Deserialize)]
+struct RawLogSearchRow {
+    #[serde(with = "clickhouse::serde::uuid")]
+    id: Uuid,
+    #[serde(with = "clickhouse::serde::uuid::option")]
+    subscription_id: Option<Uuid>,
+    chain_id: u64,
+    block_number: u64,
+    block_hash: String,
+    transaction_hash: String,
+    transaction_index: u32,
+    log_index: u32,
+    contract_address: String,
+    topics: String,
+    data: String,
+    is_removed: bool,
+    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
+    ingested_at: OffsetDateTime,
+}
+
 enum QueryArgument {
     Text(String),
     Signed(i64),
@@ -414,6 +539,57 @@ pub async fn search_events(
             })
         })
         .collect()
+}
+
+pub async fn search_raw_logs(
+    client: &Client,
+    request: &RawLogSearchRequest,
+    limit: i64,
+    offset: i64,
+) -> anyhow::Result<Vec<RawLogRecord>> {
+    let search = build_raw_log_search_query(request, limit, offset)?;
+    let mut query = client.query(&search.sql);
+    for argument in search.arguments {
+        query = match argument {
+            QueryArgument::Text(value) => query.bind(value),
+            QueryArgument::Signed(value) => query.bind(value),
+            QueryArgument::Unsigned(value) => query.bind(value),
+        };
+    }
+
+    query
+        .fetch_all::<RawLogSearchRow>()
+        .await?
+        .into_iter()
+        .map(|row| {
+            Ok(RawLogRecord {
+                id: row.id,
+                subscription_id: row.subscription_id,
+                chain_id: i64::try_from(row.chain_id)
+                    .context("ClickHouse chain ID exceeds PostgreSQL BIGINT")?,
+                block_number: i64::try_from(row.block_number)
+                    .context("ClickHouse block number exceeds PostgreSQL BIGINT")?,
+                block_hash: row.block_hash,
+                transaction_hash: row.transaction_hash,
+                transaction_index: i64::from(row.transaction_index),
+                log_index: i64::from(row.log_index),
+                contract_address: row.contract_address,
+                topics: serde_json::from_str(&row.topics)
+                    .context("invalid raw-log topics JSON in ClickHouse")?,
+                data: row.data,
+                removed: row.is_removed,
+                ingested_at: chrono_from_offset_datetime(row.ingested_at)?,
+            })
+        })
+        .collect()
+}
+
+pub async fn raw_log_count(client: &Client) -> anyhow::Result<i64> {
+    let count = client
+        .query("SELECT count() FROM raw_logs FINAL WHERE is_removed = false")
+        .fetch_one::<u64>()
+        .await?;
+    i64::try_from(count).context("ClickHouse raw-log count exceeds PostgreSQL BIGINT")
 }
 
 pub async fn decoded_event_count(client: &Client) -> anyhow::Result<i64> {
@@ -600,6 +776,119 @@ fn build_search_query(
         )?));
 
     Ok(query)
+}
+
+fn build_raw_log_search_query(
+    request: &RawLogSearchRequest,
+    limit: i64,
+    offset: i64,
+) -> Result<SearchQuery, ApplicationError> {
+    let mut query = SearchQuery {
+        sql: String::from(
+            r#"
+            SELECT id, subscription_id, chain_id, block_number, block_hash, transaction_hash,
+                   transaction_index, log_index, contract_address, topics, data, is_removed,
+                   ingested_at
+            FROM raw_logs FINAL
+            WHERE is_removed = false
+            "#,
+        ),
+        arguments: Vec::new(),
+    };
+
+    for filter in &request.filters {
+        push_raw_log_search_filter(&mut query, filter)?;
+    }
+
+    push_raw_log_search_sort(&mut query, request.sort.as_ref())?;
+    query.sql.push_str(" LIMIT ? OFFSET ?");
+    query
+        .arguments
+        .push(QueryArgument::Unsigned(u64::try_from(limit).map_err(
+            |_| ApplicationError::BadRequest("raw-log search limit cannot be negative".to_owned()),
+        )?));
+    query
+        .arguments
+        .push(QueryArgument::Unsigned(u64::try_from(offset).map_err(
+            |_| ApplicationError::BadRequest("raw-log search offset cannot be negative".to_owned()),
+        )?));
+
+    Ok(query)
+}
+
+fn push_raw_log_search_filter(
+    query: &mut SearchQuery,
+    filter: &SearchFilter,
+) -> Result<(), ApplicationError> {
+    match filter.field.as_str() {
+        "chain_id" => push_integer_filter(query, "chain_id", filter),
+        "block_number" => push_integer_filter(query, "block_number", filter),
+        "contract_address" => {
+            let normalized = normalize_address(&string_value(&filter.value)?)?;
+            push_text_filter(query, "contract_address", &filter.operator, normalized)
+        }
+        "transaction_hash" => {
+            if !matches!(filter.operator, SearchOperator::Eq) {
+                return Err(ApplicationError::BadRequest(
+                    "transaction_hash currently supports eq".to_owned(),
+                ));
+            }
+            query.sql.push_str(" AND lowerUTF8(transaction_hash) = ?");
+            query.arguments.push(QueryArgument::Text(
+                string_value(&filter.value)?.to_ascii_lowercase(),
+            ));
+            Ok(())
+        }
+        "topic0" | "topic1" | "topic2" | "topic3" => {
+            if !matches!(filter.operator, SearchOperator::Eq) {
+                return Err(ApplicationError::BadRequest(format!(
+                    "{} currently supports eq",
+                    filter.field
+                )));
+            }
+            let topic = normalize_topic(&string_value(&filter.value)?)?;
+            query.sql.push_str(" AND ");
+            query.sql.push_str(filter.field.as_str());
+            query.sql.push_str(" = ?");
+            query.arguments.push(QueryArgument::Text(topic));
+            Ok(())
+        }
+        _ => Err(ApplicationError::BadRequest("invalid raw-log filter".to_owned())),
+    }
+}
+
+fn push_raw_log_search_sort(
+    query: &mut SearchQuery,
+    sort: Option<&SearchSort>,
+) -> Result<(), ApplicationError> {
+    match sort {
+        Some(sort) if sort.field == "block_number" => {
+            query.sql.push_str(" ORDER BY block_number ");
+            push_clickhouse_direction(query, sort.direction.as_deref());
+            query.sql.push_str(", log_index ");
+            push_clickhouse_direction(query, sort.direction.as_deref());
+        }
+        Some(sort) if sort.field == "log_index" => {
+            query.sql.push_str(" ORDER BY log_index ");
+            push_clickhouse_direction(query, sort.direction.as_deref());
+        }
+        Some(sort) if sort.field == "ingested_at" => {
+            query.sql.push_str(" ORDER BY ingested_at ");
+            push_clickhouse_direction(query, sort.direction.as_deref());
+        }
+        Some(sort) => {
+            return Err(ApplicationError::BadRequest(format!(
+                "unsupported raw-log sort field: {}",
+                sort.field
+            )));
+        }
+        None => {
+            query
+                .sql
+                .push_str(" ORDER BY block_number DESC, log_index DESC");
+        }
+    }
+    Ok(())
 }
 
 fn exact_integer_filter(request: &SearchRequest, field: &str) -> Option<i64> {
@@ -860,6 +1149,16 @@ fn push_search_sort(
     }
 
     Ok(())
+}
+
+fn push_clickhouse_direction(query: &mut SearchQuery, direction: Option<&str>) {
+    query.sql.push_str(
+        if matches!(direction, Some("asc") | Some("ASC")) {
+            "ASC"
+        } else {
+            "DESC"
+        },
+    );
 }
 
 fn string_value(value: &Value) -> Result<String, ApplicationError> {

@@ -1,154 +1,167 @@
-# ClickHouse Upgrade
+# ClickHouse Raw Event Lake Upgrade
 
-Version: 1.2
+Version: 2.0
 
 Status: Current implementation
 
-Date: 2026-08-04
+Date: 2026-08-05
 
 ## 1. Goal
 
-ClickHouse is an optional scale-out search store. It is intended for large event
-volumes and multi-filter analytical queries, not for subscriptions, RPC management,
-authentication, or queues.
+ClickHouse is the raw EVM-log store for large deployments. It is not a decoded-event
+projection. With ClickHouse enabled, the collector writes encoded logs to ClickHouse
+only; PostgreSQL retains only operational state.
 
-The upgrade deliberately does not keep a second copy of every decoded event and its
-search indexes.
-
-| Data or responsibility | PostgreSQL-only mode | ClickHouse mode |
+| Data or responsibility | PostgreSQL-only mode | ClickHouse raw mode |
 | --- | --- | --- |
-| Chain, RPC, ABI, contract metadata | PostgreSQL | PostgreSQL |
-| Subscription, checkpoint, decode queue, auth | PostgreSQL | PostgreSQL |
-| Raw EVM log | PostgreSQL | PostgreSQL |
-| Decoded event | PostgreSQL | ClickHouse only |
-| Address index | PostgreSQL | ClickHouse only |
-| Custom event-field index | PostgreSQL | ClickHouse only |
-| Search and explorer event statistics | PostgreSQL | ClickHouse |
+| Chain, RPC, subscription, checkpoint, auth | PostgreSQL | PostgreSQL |
+| Raw EVM log | PostgreSQL | ClickHouse only |
+| Raw-log search | PostgreSQL | ClickHouse |
+| ABI decoding and derived indexes | No new writes | No new writes |
 
-PostgreSQL raw logs are retained as the source record so ABI fixes and re-decoding
-remain possible. They are encoded chain logs, not a duplicate decoded-event/index
-projection. Raw-log retention still consumes PostgreSQL disk; this upgrade removes
-the duplicate *derived* data, not the source record.
+This service no longer decodes. Consumers that need decoded events should read raw
+data and apply their own ABI registry and decoding policy.
 
-## 2. Storage Mode
+## 2. Enable the Mode
 
-The runtime flag selects one mode for the process:
-
-```env
-# Default: PostgreSQL stores the derived event/search tables.
-EVENTLAKE_CLICKHOUSE_ENABLED=false
-
-# Large-data mode: ClickHouse stores those tables instead.
-EVENTLAKE_CLICKHOUSE_ENABLED=true
-```
-
-The enabled mode also requires a binary built with the Cargo feature:
+Build the feature-enabled binary and set the runtime flag:
 
 ```bash
 cargo build --release --locked --features clickhouse
-```
-
-The source Docker deployment is:
-
-```bash
 docker compose --env-file .env -f docker-compose.clickhouse.yml up -d --build
 ```
 
-The client uses ClickHouse HTTP on port `8123`.
+```env
+EVENTLAKE_CLICKHOUSE_ENABLED=true
+```
+
+The flag is rejected if the binary was not compiled with `--features clickhouse`.
+There is deliberately no PostgreSQL raw-log fallback in this mode.
 
 ## 3. Write and Retry Semantics
 
-In ClickHouse mode the decoder follows this sequence:
-
 ```text
-RPC log -> PostgreSQL raw_log + decode_queue commit
-        -> ABI decode
-        -> ClickHouse decoded_events + address_index + event_field_index
-        -> mark PostgreSQL queue entry decoded
+RPC eth_getLogs response
+        |
+        v
+observe PostgreSQL block checkpoints / detect reorg
+        |
+        v
+batch INSERT ClickHouse raw_logs
+        |
+        +--> success: advance PostgreSQL subscription checkpoint
+        |
+        +--> failure: do not advance checkpoint; reconnect and retry range next tick
 ```
 
-The queue item is acknowledged only after the ClickHouse writes complete. A failed
-write is logged, the queue entry becomes `clickhouse_retrying`, and the subscription
-becomes `clickhouse_write_retrying`. The decoder retries on later worker ticks with
-no attempt limit for this storage failure. Once all ClickHouse-retrying entries for
-that subscription succeed, collection resumes automatically.
+`raw_logs` uses `ReplacingMergeTree(stored_at)` ordered by `(chain_id,
+block_number, transaction_hash, log_index)`. A retry can repeat an RPC response
+without producing another logical log. The collector clears a failed client so the
+next attempt health-checks ClickHouse and reapplies idempotent DDL.
 
-This means a ClickHouse outage pauses affected subscriptions rather than silently
-losing data or allowing PostgreSQL and ClickHouse to diverge. A failed client is
-discarded so the next retry establishes a fresh connection and reapplies the
-idempotent schema DDL.
+A failed raw write transitions the subscription through its normal `error` retry
+path. It is safe because the checkpoint remains before the failed interval. A
+ClickHouse outage therefore pauses progress rather than losing logs.
 
-For a chain reorganization, PostgreSQL first marks raw logs removed and rewinds the
-affected subscriptions. ClickHouse then writes `is_removed=true` tombstone versions.
-If that write fails, collection remains in `clickhouse_reorg_retrying` until it
-succeeds. Queries use `FINAL`, so tombstones are visible before background merges.
+## 4. Reorg Semantics
 
-## 4. Search Behaviour
+PostgreSQL is still responsible for block-hash observation and subscription rewind.
+When a hash changes, ClickHouse mode inserts a newer `is_removed=true` version for
+every `raw_logs` row at or above the reorg block. Canonical re-collection writes new
+`is_removed=false` rows. All raw-log queries use `FINAL` and filter out tombstones,
+so stale forks are not visible before ClickHouse background merges run.
 
-In PostgreSQL-only mode, `/api/search` and explorers use PostgreSQL's decoded-event,
-address, and field index tables. In ClickHouse mode they use ClickHouse tables:
+If the tombstone write fails, subscriptions enter `clickhouse_reorg_retrying` and do
+not collect the canonical fork until the tombstone succeeds.
 
-- `decoded_events FINAL`
-- `address_index FINAL`
-- `event_field_index FINAL`
+## 5. Full-Chain Collection
 
-This includes custom `field.<name>` filters, address filters, transaction hashes,
-block ranges, event names, contracts, topics, sorting, the address explorer, contract
-explorer, event explorer, and the dashboard's decoded-event total. Event definitions,
-ABI metadata, and contract existence are still read from PostgreSQL because they are
-small operational metadata.
-
-There is intentionally no PostgreSQL fallback while ClickHouse mode is selected. A
-fallback would either serve incomplete data or require retaining a duplicate derived
-dataset. A ClickHouse search outage returns a service error while the writer retries.
-
-## 5. ClickHouse Tables
-
-`clickhouse/schema.sql` creates these `ReplacingMergeTree(indexed_at)` tables:
-
-- `decoded_events`, ordered by `(chain_id, block_number, log_index)`.
-- `address_index`, ordered by address and event position.
-- `event_field_index`, ordered by chain, topic, field name/value, and event position.
-
-The two secondary tables make a query such as "a user's Transfer events with custom
-field filters" an indexed ClickHouse semi-join instead of a scan of decoded JSON.
-
-## 6. Existing Deployments
-
-This change prevents new duplicate derived writes. It does not automatically migrate
-or delete a pre-existing PostgreSQL `eventlake_decoded_events`,
-`eventlake_address_index`, or `eventlake_event_field_index` dataset.
-
-For an already-running PostgreSQL-only deployment, perform a controlled backfill from
-the retained raw logs, verify ClickHouse counts and representative searches, then
-remove the old PostgreSQL derived projection in a separately approved maintenance
-operation. Do not set `EVENTLAKE_CLICKHOUSE_ENABLED=true` on a live historical
-dataset until that backfill is complete: new decoded data will go only to ClickHouse.
-
-## 7. Operational Checks
+Create an all-events subscription without a contract address:
 
 ```bash
-curl -fsS http://127.0.0.1:8080/health/ready
-docker compose --env-file .env -f docker-compose.clickhouse.yml logs -f eventlake
-docker compose --env-file .env -f docker-compose.clickhouse.yml logs -f clickhouse
+curl -sS -X POST http://127.0.0.1:8080/api/subscriptions \
+  -H 'content-type: application/json' \
+  -d '{
+    "chain_id": 1,
+    "collection_scope": "all_events",
+    "start_block": 22000000,
+    "realtime_enabled": true,
+    "min_block_window": 1,
+    "max_block_window": 100
+  }'
 ```
 
-Useful PostgreSQL states during an outage:
+`all_events` requires ClickHouse and calls `eth_getLogs` with no `address` filter.
+RPC providers have different log-result limits, so begin with a conservative window.
+The collector shrinks the window for recognised range, response-size, and timeout
+errors. Contract subscriptions remain available with
+`collection_scope: "contract"` (or omitted, for compatibility).
+
+For multiple contract-scoped raw subscriptions without ABI decoding, use the subscription
+batch endpoint with contract_addresses and start_block. Input addresses are normalized and
+de-duplicated, and an existing active subscription is returned instead of creating duplicate work.
+
+## 6. Raw-Log Search
+
+Use `POST /api/raw-logs/search`. A positive `chain_id eq` filter is mandatory. The
+supported fields are `chain_id`, `block_number`, `contract_address`,
+`transaction_hash`, and positional `topic0`, `topic1`, `topic2`, `topic3`.
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/raw-logs/search \
+  -H 'content-type: application/json' \
+  -d '{
+    "page": 1,
+    "limit": 100,
+    "filters": [
+      {"field":"chain_id","operator":"eq","value":1},
+      {"field":"block_number","operator":"gte","value":22000000},
+      {"field":"block_number","operator":"lte","value":22000100},
+      {"field":"topic0","operator":"eq","value":"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"}
+    ],
+    "sort":{"field":"block_number","direction":"asc"}
+  }'
+```
+
+Topics must be exact normalized 32-byte hex strings. The response includes the
+complete `topics` array, `data`, block/transaction metadata, and ingestion time.
+
+## 7. Tables and Operations
+
+`clickhouse/schema.sql` creates `raw_logs` alongside legacy decoded-event tables.
+New collection uses only `raw_logs`; legacy tables are retained so an existing API
+consumer can still read previously decoded history.
+
+`raw_logs` includes bloom-filter skipping indexes for `topic0` to `topic3`, a block
+ordered primary key, and a persisted tombstone version. Query the table manually
+with `FINAL` when comparing operational counts:
 
 ```sql
-SELECT id, status, current_block, error_message
-FROM eventlake_subscriptions
-WHERE status LIKE 'clickhouse_%';
-
-SELECT status, COUNT(*)
-FROM eventlake_decode_queue
-GROUP BY status;
+SELECT count()
+FROM raw_logs FINAL
+WHERE chain_id = 1 AND is_removed = false;
 ```
 
-The migration `202608040001_clickhouse_retry_statuses.sql` adds the durable retry
-statuses to PostgreSQL constraints.
+Useful PostgreSQL state while ClickHouse is unavailable:
 
-## 8. Verification Commands
+```sql
+SELECT id, collection_scope, current_block, status, error_message
+FROM eventlake_subscriptions
+WHERE status IN ('error', 'clickhouse_reorg_retrying');
+```
+
+## 8. Existing Deployments
+
+The new migration `202608050001_raw_event_lake.sql` adds subscription scope and
+makes `contract_address` nullable for `all_events`. It does not move historical
+PostgreSQL raw logs into ClickHouse and it does not delete decoded history.
+
+To retain historical raw data in ClickHouse, backfill it in a separately controlled
+operation, verify per-chain/block/topic counts, then enable new collection. Do not
+enable a full-chain subscription until the chosen RPC provider and block windows are
+tested for its `eth_getLogs` limits.
+
+## 9. Verification
 
 ```bash
 cargo fmt --check

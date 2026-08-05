@@ -98,9 +98,9 @@ The default deployment uses:
 - `eventlake`
 
 The ClickHouse Compose variants add an optional `clickhouse` service and compile
-the feature-gated derived-event search store. PostgreSQL remains the source of truth
-for raw logs and operational state; the decoded event and search indexes are stored
-in exactly one selected search store.
+the feature-gated raw-event store. In ClickHouse mode, raw logs are written only to
+ClickHouse; PostgreSQL remains the source of truth for operational state and
+checkpoints. The background runtime does not decode ABI events.
 
 ## 5. Expected Development Commands
 
@@ -252,10 +252,11 @@ Test coverage should grow by risk:
 - Unit tests for Search DSL validation and SQL planning.
 - Unit tests for RPC selection policy.
 - Integration tests for subscription uniqueness.
-- Integration tests for raw log persistence before decode.
-- Integration tests for decoder and index builder.
+- Integration tests for raw log persistence and raw-log search.
+- Integration tests for ClickHouse raw writes, retries, and tombstones.
 - Integration tests for reorg repair.
-- Real PostgreSQL E2E for API, migrations, ABI, subscription, collector, decoder, indexes, search, explorers, dashboard, auth, and reorg.
+- Real PostgreSQL E2E for API, migrations, subscription, collector, raw search,
+  dashboard, auth, and reorg.
 
 Large-chain behavior should be tested with bounded fixtures first, then load tests after core behavior is stable.
 

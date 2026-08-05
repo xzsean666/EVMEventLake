@@ -56,7 +56,14 @@ pub async fn check_endpoint(
 ) -> Result<RpcHealthCheck, ApplicationError> {
     let started_at = Instant::now();
     let block_number = eth_block_number(client, rpc_url).await?;
-    let _logs = eth_get_logs(client, rpc_url, ZERO_ADDRESS, block_number, block_number).await?;
+    let _logs = eth_get_logs(
+        client,
+        rpc_url,
+        Some(ZERO_ADDRESS),
+        block_number,
+        block_number,
+    )
+    .await?;
     Ok(RpcHealthCheck {
         latency_ms: started_at.elapsed().as_millis() as i64,
     })
@@ -70,15 +77,17 @@ pub async fn eth_block_number(client: &Client, rpc_url: &str) -> Result<i64, App
 pub async fn eth_get_logs(
     client: &Client,
     rpc_url: &str,
-    contract_address: &str,
+    contract_address: Option<&str>,
     from_block: i64,
     to_block: i64,
 ) -> Result<Vec<RpcLog>, ApplicationError> {
-    let params = json!([{
-        "address": normalize_hex(contract_address),
-        "fromBlock": format!("0x{:x}", from_block),
-        "toBlock": format!("0x{:x}", to_block)
-    }]);
+    let mut filter = serde_json::Map::new();
+    if let Some(contract_address) = contract_address {
+        filter.insert("address".to_owned(), json!(normalize_hex(contract_address)));
+    }
+    filter.insert("fromBlock".to_owned(), json!(format!("0x{:x}", from_block)));
+    filter.insert("toBlock".to_owned(), json!(format!("0x{:x}", to_block)));
+    let params = json!([filter]);
 
     call(client, rpc_url, "eth_getLogs", params).await
 }

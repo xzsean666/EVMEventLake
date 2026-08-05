@@ -16,6 +16,7 @@ const DEFAULT_JWT_SECRET: &str = "change-me";
 
 pub async fn run(configuration: ApplicationConfiguration) -> anyhow::Result<()> {
     validate_security(&configuration)?;
+    validate_storage_mode(&configuration)?;
 
     let pool = database::connect(&configuration.database).await?;
     database::migrate(&pool).await?;
@@ -31,7 +32,7 @@ pub async fn run(configuration: ApplicationConfiguration) -> anyhow::Result<()> 
         Err(error) => {
             tracing::warn!(
                 error = %error,
-                "ClickHouse unavailable at startup; indexed-event writes will retry until it recovers"
+                "ClickHouse unavailable at startup; raw-log collection will retry until it recovers"
             );
             state
         }
@@ -49,6 +50,20 @@ pub async fn run(configuration: ApplicationConfiguration) -> anyhow::Result<()> 
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    Ok(())
+}
+
+fn validate_storage_mode(configuration: &ApplicationConfiguration) -> anyhow::Result<()> {
+    #[cfg(feature = "clickhouse")]
+    let _ = configuration;
+
+    #[cfg(not(feature = "clickhouse"))]
+    if configuration.clickhouse.enabled {
+        anyhow::bail!(
+            "EVENTLAKE_CLICKHOUSE_ENABLED=true requires a binary built with --features clickhouse"
+        );
+    }
 
     Ok(())
 }
