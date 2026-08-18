@@ -55,15 +55,17 @@ async fn collect_subscription(
     subscription: &SubscriptionRecord,
 ) -> Result<(), ApplicationError> {
     #[cfg(feature = "clickhouse")]
-    if state.configuration.clickhouse.enabled && subscription.status == "clickhouse_reorg_retrying" {
-        match crate::clickhouse::active_client(state).await.and_then(|client| {
-            client
-                .ok_or_else(|| {
+    if state.configuration.clickhouse.enabled && subscription.status == "clickhouse_reorg_retrying"
+    {
+        match crate::clickhouse::active_client(state)
+            .await
+            .and_then(|client| {
+                client.ok_or_else(|| {
                     ApplicationError::ExternalService(
                         "ClickHouse is enabled but no client is available".to_owned(),
                     )
                 })
-        }) {
+            }) {
             Ok(client) => match crate::clickhouse::invalidate_from_block(
                 &client,
                 subscription.chain_id,

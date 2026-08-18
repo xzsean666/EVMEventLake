@@ -7,7 +7,17 @@ pub struct ApplicationConfiguration {
     pub clickhouse: ClickHouseConfig,
     pub auth: AuthConfiguration,
     pub background: BackgroundConfiguration,
+    pub block_transaction: BlockTransactionConfiguration,
     pub telemetry: TelemetryConfiguration,
+}
+
+#[derive(Clone, Debug)]
+pub struct BlockTransactionConfiguration {
+    pub enabled: bool,
+    pub batch_size: i32,
+    pub max_concurrency: i32,
+    pub reorg_window: i32,
+    pub max_response_bytes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -111,6 +121,23 @@ impl ApplicationConfiguration {
             )?),
         };
 
+        let block_transaction = BlockTransactionConfiguration {
+            enabled: read_env("EVENTLAKE_BLOCK_TRANSACTION_ENABLED", "false").parse()?,
+            batch_size: read_positive_i32_env("EVENTLAKE_BLOCK_TRANSACTION_BATCH_SIZE", "10")?,
+            max_concurrency: read_positive_i32_env(
+                "EVENTLAKE_BLOCK_TRANSACTION_MAX_CONCURRENCY",
+                "2",
+            )?,
+            reorg_window: read_non_negative_i32_env(
+                "EVENTLAKE_BLOCK_TRANSACTION_REORG_WINDOW",
+                "32",
+            )?,
+            max_response_bytes: read_positive_usize_env(
+                "EVENTLAKE_BLOCK_TRANSACTION_MAX_RESPONSE_BYTES",
+                "67108864",
+            )?,
+        };
+
         let telemetry = TelemetryConfiguration {
             log_level: read_env("EVENTLAKE_LOG_LEVEL", "info"),
             json_logs: read_env("EVENTLAKE_JSON_LOGS", "false").parse()?,
@@ -122,9 +149,37 @@ impl ApplicationConfiguration {
             clickhouse,
             auth,
             background,
+            block_transaction,
             telemetry,
         })
     }
+}
+
+fn read_positive_i32_env(name: &str, default_value: &str) -> anyhow::Result<i32> {
+    let value = read_env(name, default_value).parse()?;
+    if value < 1 {
+        anyhow::bail!("{name} must be at least 1");
+    }
+
+    Ok(value)
+}
+
+fn read_non_negative_i32_env(name: &str, default_value: &str) -> anyhow::Result<i32> {
+    let value = read_env(name, default_value).parse()?;
+    if value < 0 {
+        anyhow::bail!("{name} must be non-negative");
+    }
+
+    Ok(value)
+}
+
+fn read_positive_usize_env(name: &str, default_value: &str) -> anyhow::Result<usize> {
+    let value = read_env(name, default_value).parse()?;
+    if value == 0 {
+        anyhow::bail!("{name} must be greater than 0");
+    }
+
+    Ok(value)
 }
 
 fn read_env(name: &str, default_value: &str) -> String {

@@ -3,6 +3,7 @@ pub mod api;
 pub mod app;
 pub mod auth;
 pub mod background;
+pub mod block_transaction;
 pub mod chains;
 #[cfg(feature = "clickhouse")]
 pub mod clickhouse;

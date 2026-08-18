@@ -222,7 +222,63 @@ ClickHouse 模式查询 `raw_logs FINAL`；PostgreSQL-only 模式查询
 `eventlake_raw_logs`。ClickHouse 不可用时不会回退 PostgreSQL，避免返回不完整数据。
 `/api/search` 和 explorer 接口保留为历史 decoded 数据兼容读取面，新采集不会填充它们。
 
-## 7. 配置和日志
+## 7. 区块与交易数据同步与查询 (Block & Transaction)
+
+当开启 `EVENTLAKE_BLOCK_TRANSACTION_ENABLED=true` 且启用了 ClickHouse 时，EventLake 支持整链的标准 EVM 区块和交易全量抓取与高性能查询。
+
+### 7.1 配置整链区块交易同步任务
+
+```bash
+curl -sS -X PUT http://127.0.0.1:8080/api/chains/31337/block-transaction-sync \
+  -H 'content-type: application/json' \
+  -d '{
+    "start_block": 0,
+    "end_block": null,
+    "batch_size": 10,
+    "reorg_window": 32,
+    "realtime_enabled": true,
+    "status": "pending"
+  }'
+```
+
+### 7.2 查看同步状态与控制
+
+查看同步状态：
+```bash
+curl -sS http://127.0.0.1:8080/api/chains/31337/sync-status
+```
+
+暂停与恢复同步：
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/chains/31337/block-transaction-sync/pause
+curl -sS -X POST http://127.0.0.1:8080/api/chains/31337/block-transaction-sync/resume
+```
+
+### 7.3 查询区块与交易 API
+
+1. **查询区块详情**（支持十进制高度、十六进制高度或 32 字节 Hash）：
+```bash
+curl -sS http://127.0.0.1:8080/api/chains/31337/blocks/123456
+curl -sS http://127.0.0.1:8080/api/chains/31337/blocks/0x1e240
+curl -sS http://127.0.0.1:8080/api/chains/31337/blocks/0x000000000000000000000000000000000000000000000000000000000001e240
+```
+
+2. **分页查询区块内的交易列表**：
+```bash
+curl -sS "http://127.0.0.1:8080/api/chains/31337/blocks/123456/transactions?limit=100"
+```
+
+3. **查询交易详情**：
+```bash
+curl -sS http://127.0.0.1:8080/api/chains/31337/transactions/0x00000000000000000000000000000000000000000000000000000000000000a1
+```
+
+4. **查询地址交易列表（支持 keyset cursor 分页与方向过滤）**：
+```bash
+curl -sS "http://127.0.0.1:8080/api/chains/31337/addresses/0x1111111111111111111111111111111111111111/transactions?direction=any&limit=50"
+```
+
+## 8. 配置和日志
 
 运行时配置集中在 `.env`。常用键：
 
@@ -233,8 +289,12 @@ ClickHouse 模式查询 `raw_logs FINAL`；PostgreSQL-only 模式查询
 | `EVENTLAKE_DATABASE_URL` | Compose 内部 PostgreSQL URL | PostgreSQL 连接 |
 | `EVENTLAKE_BACKGROUND_WORKERS_ENABLED` | `true` | 启用采集、RPC 检查和维护 worker |
 | `EVENTLAKE_WORKER_TICK_SECONDS` | `5` | worker 调度间隔 |
-| `EVENTLAKE_DECODE_BATCH_SIZE` | `100` | 已废弃的兼容配置，不启动 decoder |
 | `EVENTLAKE_CLICKHOUSE_ENABLED` | `false` | 启用 ClickHouse raw store（需 feature 构建） |
+| `EVENTLAKE_BLOCK_TRANSACTION_ENABLED` | `false` | 启用整链区块和交易后台同步 worker |
+| `EVENTLAKE_BLOCK_TRANSACTION_BATCH_SIZE` | `10` | 区块与交易批量拉取区块数量 |
+| `EVENTLAKE_BLOCK_TRANSACTION_MAX_CONCURRENCY` | `2` | 最大并发同步链数量 |
+| `EVENTLAKE_BLOCK_TRANSACTION_REORG_WINDOW` | `32` | 区块分叉检测回退窗口 |
+| `EVENTLAKE_BLOCK_TRANSACTION_MAX_RESPONSE_BYTES` | `67108864` | 单次 RPC 响应最大字节数上限 |
 | `EVENTLAKE_LOG_LEVEL` | `info` | tracing 过滤级别 |
 
 查看日志：
@@ -244,7 +304,7 @@ docker compose --env-file .env logs -f eventlake
 docker compose --env-file .env -f docker-compose.clickhouse.yml logs -f clickhouse
 ```
 
-## 8. 开发验证
+## 9. 开发验证
 
 ```bash
 cargo fmt --check
@@ -262,3 +322,4 @@ EVENTLAKE_RUN_CLICKHOUSE_INTEGRATION=true \
 ```
 
 完整部署矩阵和 Compose 配置检查见 [`DEPLOYMENT.md`](DEPLOYMENT.md)。
+

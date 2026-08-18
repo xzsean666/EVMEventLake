@@ -3,13 +3,13 @@ use std::str::FromStr;
 #[cfg(feature = "clickhouse")]
 use std::collections::HashSet;
 
+#[cfg(feature = "clickhouse")]
+use crate::subscriptions;
 use alloy_dyn_abi::{DynSolValue, EventExt};
 use alloy_json_abi::Event;
 use alloy_primitives::B256;
 #[cfg(feature = "clickhouse")]
 use chrono::Utc;
-#[cfg(feature = "clickhouse")]
-use crate::subscriptions;
 use serde_json::{Map, Value, json};
 use sqlx::FromRow;
 use tokio::time::{MissedTickBehavior, interval};
@@ -210,7 +210,9 @@ async fn decode_work_item(
         indexing::mirror_decoded_event(&client, event)
             .await
             .map_err(|error| {
-                ApplicationError::ExternalService(format!("ClickHouse indexed-event write failed: {error}"))
+                ApplicationError::ExternalService(format!(
+                    "ClickHouse indexed-event write failed: {error}"
+                ))
             })?;
         complete_clickhouse_decoding(state, item).await?;
         return Ok(());

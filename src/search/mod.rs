@@ -203,7 +203,9 @@ async fn search_raw_logs(
         crate::clickhouse::search_raw_logs(&client, &request, meta.limit, page.offset())
             .await
             .map_err(|error| {
-                ApplicationError::ExternalService(format!("ClickHouse raw-log search failed: {error}"))
+                ApplicationError::ExternalService(format!(
+                    "ClickHouse raw-log search failed: {error}"
+                ))
             })?
     } else {
         execute_postgres_raw_log_search(&state.pool, &request, meta.limit, page.offset()).await?
@@ -381,7 +383,8 @@ fn validate_raw_log_filter(filter: &SearchFilter) -> Result<(), ApplicationError
         "topic0" | "topic1" | "topic2" | "topic3" => {
             if !matches!(filter.operator, SearchOperator::Eq) {
                 return Err(ApplicationError::BadRequest(format!(
-                    "{} currently supports eq", filter.field
+                    "{} currently supports eq",
+                    filter.field
                 )));
             }
             normalize_topic(&string_value(&filter.value)?)?;
@@ -441,7 +444,12 @@ fn push_raw_log_filter(
         "block_number" => push_i64_filter(query_builder, "block_number", filter),
         "contract_address" => {
             let normalized = normalize_address(&string_value(&filter.value)?)?;
-            push_text_filter(query_builder, "contract_address", &filter.operator, normalized)
+            push_text_filter(
+                query_builder,
+                "contract_address",
+                &filter.operator,
+                normalized,
+            )
         }
         "transaction_hash" => {
             if !matches!(filter.operator, SearchOperator::Eq) {
@@ -468,7 +476,9 @@ fn push_raw_log_filter(
                 .push_bind(topic);
             Ok(())
         }
-        _ => Err(ApplicationError::BadRequest("invalid raw-log filter".to_owned())),
+        _ => Err(ApplicationError::BadRequest(
+            "invalid raw-log filter".to_owned(),
+        )),
     }
 }
 

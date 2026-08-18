@@ -8,8 +8,8 @@ use axum::{
 };
 use chrono::Utc;
 use eventlake::{
-    api, app::application_state::ApplicationState, auth, collector, configuration, database,
-    reorg, rpc_pool, shared::hex::parse_hex_u64,
+    api, app::application_state::ApplicationState, auth, collector, configuration, database, reorg,
+    rpc_pool, shared::hex::parse_hex_u64,
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde_json::{Value, json};
@@ -134,10 +134,16 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
         .as_array()
         .expect("batch response data is an array");
     assert_eq!(batch_records.len(), 2);
-    assert!(batch_records.iter().all(|record| record["abi_id"].is_null()));
-    assert!(batch_records
-        .iter()
-        .all(|record| record["start_block"] == 100 && record["current_block"] == 100));
+    assert!(
+        batch_records
+            .iter()
+            .all(|record| record["abi_id"].is_null())
+    );
+    assert!(
+        batch_records
+            .iter()
+            .all(|record| record["start_block"] == 100 && record["current_block"] == 100)
+    );
 
     let batch_retry = post_json(
         &router,
@@ -299,7 +305,10 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
     assert_ok(subscription_response.clone(), StatusCode::OK);
     let subscription_id = uuid_from_response(&subscription_response.1, "id");
     assert_eq!(response_data(&subscription_response.1)["start_block"], 100);
-    assert_eq!(response_data(&subscription_response.1)["current_block"], 100);
+    assert_eq!(
+        response_data(&subscription_response.1)["current_block"],
+        100
+    );
 
     let duplicate_subscription_response = post_json(
         &router,
@@ -364,7 +373,10 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
     .await?;
     assert_ok(raw_search.clone(), StatusCode::OK);
     assert_eq!(response_data(&raw_search.1).as_array().unwrap().len(), 1);
-    assert_eq!(response_data(&raw_search.1)[0]["data"], uint256_topic_data(1234));
+    assert_eq!(
+        response_data(&raw_search.1)[0]["data"],
+        uint256_topic_data(1234)
+    );
 
     let dashboard = get(&router, "/api/dashboard").await?;
     assert_ok(dashboard.clone(), StatusCode::OK);
@@ -769,6 +781,13 @@ fn build_test_state(
                 decode_batch_size: 100,
                 partition_tick: Duration::from_secs(300),
             },
+            block_transaction: configuration::BlockTransactionConfiguration {
+                enabled: false,
+                batch_size: 10,
+                max_concurrency: 2,
+                reorg_window: 32,
+                max_response_bytes: 67108864,
+            },
             telemetry: configuration::TelemetryConfiguration {
                 log_level: "debug".to_owned(),
                 json_logs: false,
@@ -1041,4 +1060,109 @@ async fn count_raw_logs_for_contract(
     .fetch_one(pool)
     .await?
     .0)
+}
+
+#[tokio::test]
+async fn block_transaction_sync_and_storage_guard_workflow() -> anyhow::Result<()> {
+    let Some(database_url) = test_database_url() else {
+        eprintln!("skipping real Postgres E2E: set DATABASE_URL or EVENTLAKE_DATABASE_URL");
+        return Ok(());
+    };
+
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await?;
+    database::migrate(&pool).await?;
+    reset_eventlake_tables(&pool).await?;
+
+    let state = build_test_state(database_url, pool.clone(), false);
+    let router = api::routes::build_router(state);
+
+    let chain_id = 8453;
+    let create_chain_response = request_json(
+        &router,
+        Method::POST,
+        "/api/chains",
+        Some(json!({
+            "chain_id": chain_id,
+            "name": "Base Mainnet",
+            "native_token_symbol": "ETH",
+            "safe_confirmation_depth": 32,
+            "default_min_block_window": 1,
+            "default_max_block_window": 100,
+            "rpc_notes": "test chain"
+        })),
+    )
+    .await?;
+    assert_ok(create_chain_response, StatusCode::CREATED);
+
+    // Initial sync status should be 404
+    let status_res = request_json(
+        &router,
+        Method::GET,
+        &format!("/api/chains/{chain_id}/sync-status"),
+        None,
+    )
+    .await?;
+    assert_error(status_res, StatusCode::NOT_FOUND);
+
+    // Configure sync state
+    let sync_config_res = request_json(
+        &router,
+        Method::PUT,
+        &format!("/api/chains/{chain_id}/block-transaction-sync"),
+        Some(json!({
+            "start_block": 1000,
+            "end_block": 2000,
+            "batch_size": 20,
+            "reorg_window": 16,
+            "realtime_enabled": true,
+            "status": "pending"
+        })),
+    )
+    .await?;
+    assert_ok(sync_config_res, StatusCode::OK);
+
+    // Get sync status
+    let status_res = request_json(
+        &router,
+        Method::GET,
+        &format!("/api/chains/{chain_id}/sync-status"),
+        None,
+    )
+    .await?;
+    assert_ok(status_res, StatusCode::OK);
+
+    // Pause sync
+    let pause_res = request_json(
+        &router,
+        Method::POST,
+        &format!("/api/chains/{chain_id}/block-transaction-sync/pause"),
+        None,
+    )
+    .await?;
+    assert_ok(pause_res, StatusCode::OK);
+
+    // Resume sync
+    let resume_res = request_json(
+        &router,
+        Method::POST,
+        &format!("/api/chains/{chain_id}/block-transaction-sync/resume"),
+        None,
+    )
+    .await?;
+    assert_ok(resume_res, StatusCode::OK);
+
+    // Block query when ClickHouse is disabled returns 503
+    let block_res = request_json(
+        &router,
+        Method::GET,
+        &format!("/api/chains/{chain_id}/blocks/1000"),
+        None,
+    )
+    .await?;
+    assert_error(block_res, StatusCode::SERVICE_UNAVAILABLE);
+
+    Ok(())
 }

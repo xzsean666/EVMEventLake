@@ -22,6 +22,13 @@ use crate::{
 
 const SCHEMA: &str = include_str!("../../clickhouse/schema.sql");
 
+pub mod block_transaction;
+pub use block_transaction::{
+    BlockRow, TransactionRow, get_address_transactions, get_block_by_hash, get_block_by_number,
+    get_block_transactions, get_transaction_by_hash, invalidate_blocks_and_transactions_from_block,
+    write_blocks_and_transactions,
+};
+
 #[derive(Clone, Debug)]
 pub struct IndexedEvent {
     pub id: Uuid,
@@ -186,9 +193,13 @@ pub async fn active_client(state: &ApplicationState) -> Result<Option<Client>, A
 
     let client = connect(&state.configuration.clickhouse)
         .await
-        .map_err(|error| ApplicationError::ExternalService(format!("ClickHouse unavailable: {error}")))?
+        .map_err(|error| {
+            ApplicationError::ExternalService(format!("ClickHouse unavailable: {error}"))
+        })?
         .ok_or_else(|| {
-            ApplicationError::ExternalService("ClickHouse is enabled but no client is available".to_owned())
+            ApplicationError::ExternalService(
+                "ClickHouse is enabled but no client is available".to_owned(),
+            )
         })?;
     state.set_clickhouse_client(client.clone());
     Ok(Some(client))
@@ -397,7 +408,7 @@ pub async fn invalidate_from_block(
     .await
 }
 
-async fn execute_reorg_tombstone(
+pub(crate) async fn execute_reorg_tombstone(
     client: &Client,
     statement: &str,
     chain_id: u64,
@@ -412,7 +423,7 @@ async fn execute_reorg_tombstone(
         .context("failed to write ClickHouse reorg tombstones")
 }
 
-async fn write_rows<T>(client: &Client, table: &str, rows: &[T]) -> anyhow::Result<()>
+pub(crate) async fn write_rows<T>(client: &Client, table: &str, rows: &[T]) -> anyhow::Result<()>
 where
     T: Row + Serialize,
 {
@@ -437,11 +448,11 @@ fn should_index_field_value(value: &Value) -> bool {
     matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_))
 }
 
-fn as_u64(value: i64, field: &str) -> anyhow::Result<u64> {
+pub(crate) fn as_u64(value: i64, field: &str) -> anyhow::Result<u64> {
     u64::try_from(value).with_context(|| format!("{field} cannot be negative"))
 }
 
-fn to_offset_datetime(value: DateTime<Utc>) -> anyhow::Result<OffsetDateTime> {
+pub(crate) fn to_offset_datetime(value: DateTime<Utc>) -> anyhow::Result<OffsetDateTime> {
     OffsetDateTime::from_unix_timestamp_nanos(
         value
             .timestamp_nanos_opt()
@@ -450,7 +461,7 @@ fn to_offset_datetime(value: DateTime<Utc>) -> anyhow::Result<OffsetDateTime> {
     .context("timestamp cannot be represented by ClickHouse time mapping")
 }
 
-fn as_u32(value: i64, field: &str) -> anyhow::Result<u32> {
+pub(crate) fn as_u32(value: i64, field: &str) -> anyhow::Result<u32> {
     u32::try_from(value).with_context(|| format!("{field} is outside ClickHouse UInt32 range"))
 }
 
@@ -853,7 +864,9 @@ fn push_raw_log_search_filter(
             query.arguments.push(QueryArgument::Text(topic));
             Ok(())
         }
-        _ => Err(ApplicationError::BadRequest("invalid raw-log filter".to_owned())),
+        _ => Err(ApplicationError::BadRequest(
+            "invalid raw-log filter".to_owned(),
+        )),
     }
 }
 
@@ -934,9 +947,13 @@ fn push_search_filter(
         ),
         "transaction_hash" => push_transaction_filter(query, filter),
         "address" => push_address_filter(query, filter, chain_id),
-        field if field.starts_with("field.") => {
-            push_event_field_filter(query, field.trim_start_matches("field."), filter, chain_id, topic0)
-        }
+        field if field.starts_with("field.") => push_event_field_filter(
+            query,
+            field.trim_start_matches("field."),
+            filter,
+            chain_id,
+            topic0,
+        ),
         _ => Err(ApplicationError::BadRequest("invalid filter".to_owned())),
     }
 }
@@ -1062,9 +1079,11 @@ fn push_address_filter(
             WHERE is_removed = false AND role = 'field' AND address = ?
         "#,
     );
-    query.arguments.push(QueryArgument::Text(normalize_address(
-        &string_value(&filter.value)?,
-    )?));
+    query
+        .arguments
+        .push(QueryArgument::Text(normalize_address(&string_value(
+            &filter.value,
+        )?)?));
     if let Some(chain_id) = chain_id {
         query.sql.push_str(" AND chain_id = ?");
         query.arguments.push(QueryArgument::Signed(chain_id));
@@ -1116,7 +1135,7 @@ fn push_event_field_filter(
         query.sql.push_str(" AND topic0 = ?");
         query.arguments.push(QueryArgument::Text(topic0.to_owned()));
     }
-    query.sql.push_str(")");
+    query.sql.push(')');
     Ok(())
 }
 
@@ -1152,13 +1171,13 @@ fn push_search_sort(
 }
 
 fn push_clickhouse_direction(query: &mut SearchQuery, direction: Option<&str>) {
-    query.sql.push_str(
-        if matches!(direction, Some("asc") | Some("ASC")) {
+    query
+        .sql
+        .push_str(if matches!(direction, Some("asc") | Some("ASC")) {
             "ASC"
         } else {
             "DESC"
-        },
-    );
+        });
 }
 
 fn string_value(value: &Value) -> Result<String, ApplicationError> {

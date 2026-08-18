@@ -127,7 +127,7 @@ or decode into them.
 
 ### search
 
-`POST /api/raw-logs/search` is the primary product API. It uses the raw encoded
+`POST /api/raw-logs/search` is the primary raw log search API. It uses the raw encoded
 values directly and supports `chain_id`, `block_number`, `contract_address`,
 `transaction_hash`, and `topic0` through `topic3`. A positive `chain_id eq` filter
 is mandatory to retain predictable ClickHouse partition pruning. Filters combine
@@ -139,6 +139,25 @@ but receives no new collector output in raw-event-lake mode.
 `POST /api/subscriptions/batch` creates multiple contract-scoped raw subscriptions
 without requiring ABI identifiers. Addresses are normalized and de-duplicated before
 creation, and an existing active subscription is returned on retry.
+
+### block_transaction
+
+Manages full-chain canonical EVM block and transaction data collection and query APIs:
+- Background worker `block_transaction::worker` operates independently from raw-log
+  workers and uses `eth_getBlockByNumber(blockNumber, true)`.
+- ClickHouse `blocks` table (ReplacingMergeTree on `stored_at`, partitioned by
+  `toYYYYMM(toDateTime(timestamp))`, primary key `(chain_id, block_number)`).
+- ClickHouse `transactions` table (ReplacingMergeTree on `stored_at`, partitioned by
+  `chain_id`, primary key `(chain_id, block_number, transaction_index, tx_hash)`).
+- PostgreSQL table `eventlake_block_transaction_sync_state` tracks chain sync bounds,
+  checkpoints (`next_block`, `safe_head`, `latest_seen_block`), and status.
+- Reorg recovery invalidates blocks and transactions `>= from_block` via tombstone rows
+  (`is_canonical = false`), while all queries enforce `FINAL` and `is_canonical = true`.
+- MVP read APIs provide `/api/chains/{chain_id}/blocks/{block_ref}`,
+  `/api/chains/{chain_id}/blocks/{block_ref}/transactions`,
+  `/api/chains/{chain_id}/transactions/{tx_hash}`, and keyset-paginated
+  `/api/chains/{chain_id}/addresses/{address}/transactions`.
+
 
 ## 5. Main Flows
 

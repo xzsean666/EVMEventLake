@@ -3,8 +3,8 @@ use serde_json::Value;
 use utoipa::OpenApi;
 
 use crate::{
-    abi_registry, api::response, app::application_state::ApplicationState, auth, chains, dashboard,
-    explorers, rpc_pool, search, subscriptions,
+    abi_registry, api::response, app::application_state::ApplicationState, auth, block_transaction,
+    chains, dashboard, explorers, rpc_pool, search, subscriptions,
 };
 
 #[derive(OpenApi)]
@@ -20,6 +20,7 @@ use crate::{
         (name = "subscriptions", description = "Contract subscription endpoints"),
         (name = "search", description = "Unified search endpoint"),
         (name = "explorers", description = "Address, contract, and event explorer endpoints"),
+        (name = "block_transaction", description = "Block and transaction data endpoints"),
         (name = "dashboard", description = "Operational dashboard endpoint")
     )
 )]
@@ -37,6 +38,7 @@ pub fn build_router(state: ApplicationState) -> Router {
         .merge(subscriptions::routes())
         .merge(search::routes())
         .merge(explorers::routes())
+        .merge(block_transaction::routes())
         .merge(dashboard::routes())
         .with_state(state)
 }
@@ -82,6 +84,7 @@ async fn openapi_document() -> Json<Value> {
     document.merge(subscriptions::openapi());
     document.merge(search::openapi());
     document.merge(explorers::openapi());
+    document.merge(block_transaction::openapi());
     document.merge(dashboard::openapi());
     Json(serde_json::to_value(document).expect("OpenAPI document serializes"))
 }

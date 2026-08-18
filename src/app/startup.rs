@@ -56,13 +56,24 @@ pub async fn run(configuration: ApplicationConfiguration) -> anyhow::Result<()> 
 
 fn validate_storage_mode(configuration: &ApplicationConfiguration) -> anyhow::Result<()> {
     #[cfg(feature = "clickhouse")]
-    let _ = configuration;
+    if configuration.block_transaction.enabled && !configuration.clickhouse.enabled {
+        anyhow::bail!(
+            "EVENTLAKE_BLOCK_TRANSACTION_ENABLED=true requires EVENTLAKE_CLICKHOUSE_ENABLED=true"
+        );
+    }
 
     #[cfg(not(feature = "clickhouse"))]
-    if configuration.clickhouse.enabled {
-        anyhow::bail!(
-            "EVENTLAKE_CLICKHOUSE_ENABLED=true requires a binary built with --features clickhouse"
-        );
+    {
+        if configuration.clickhouse.enabled {
+            anyhow::bail!(
+                "EVENTLAKE_CLICKHOUSE_ENABLED=true requires a binary built with --features clickhouse"
+            );
+        }
+        if configuration.block_transaction.enabled {
+            anyhow::bail!(
+                "EVENTLAKE_BLOCK_TRANSACTION_ENABLED=true requires a binary built with --features clickhouse"
+            );
+        }
     }
 
     Ok(())

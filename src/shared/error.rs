@@ -14,6 +14,8 @@ pub enum ApplicationError {
     Conflict(String),
     #[error("external service error: {0}")]
     ExternalService(String),
+    #[error("service unavailable: {0}")]
+    ServiceUnavailable(String),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
     #[error("internal error: {0}")]
@@ -29,6 +31,7 @@ impl ApplicationError {
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::ExternalService(_) => StatusCode::BAD_GATEWAY,
+            Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Database(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

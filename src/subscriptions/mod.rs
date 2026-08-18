@@ -221,8 +221,7 @@ async fn create_subscription(
             }
             if !state.configuration.clickhouse.enabled {
                 return Err(ApplicationError::BadRequest(
-                    "all_events collection requires EVENTLAKE_CLICKHOUSE_ENABLED=true"
-                        .to_owned(),
+                    "all_events collection requires EVENTLAKE_CLICKHOUSE_ENABLED=true".to_owned(),
                 ));
             }
             None
@@ -261,15 +260,14 @@ async fn create_subscription(
     }
 
     if collection_scope == "all_events" {
-        let existing_all_events = sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(
-            format!(
+        let existing_all_events =
+            sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(format!(
                 "SELECT {SUBSCRIPTION_COLUMNS} FROM eventlake_subscriptions \
                  WHERE chain_id = $1 AND collection_scope = 'all_events' AND active = true"
-            ),
-        ))
-        .bind(request.chain_id)
-        .fetch_optional(&mut *transaction)
-        .await?;
+            )))
+            .bind(request.chain_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
 
         if let Some(record) = existing_all_events {
             transaction.commit().await?;
@@ -316,24 +314,22 @@ async fn create_subscription(
 
     let record = match inserted {
         Some(record) => record,
-        None => {
-            sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(format!(
-                "SELECT {SUBSCRIPTION_COLUMNS} FROM eventlake_subscriptions \
+        None => sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(format!(
+            "SELECT {SUBSCRIPTION_COLUMNS} FROM eventlake_subscriptions \
                  WHERE chain_id = $1 AND collection_scope = $2 \
                    AND contract_address IS NOT DISTINCT FROM $3 AND active = true"
-            )))
-                .bind(request.chain_id)
-                .bind(collection_scope)
-                .bind(contract_address.as_deref())
-                .fetch_optional(&mut *transaction)
-                .await?
-                .ok_or_else(|| {
-                    ApplicationError::Conflict(
-                        "active subscription conflict was detected but existing row was not found"
-                            .to_owned(),
-                    )
-                })?
-        }
+        )))
+        .bind(request.chain_id)
+        .bind(collection_scope)
+        .bind(contract_address.as_deref())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| {
+            ApplicationError::Conflict(
+                "active subscription conflict was detected but existing row was not found"
+                    .to_owned(),
+            )
+        })?,
     };
 
     transaction.commit().await?;
