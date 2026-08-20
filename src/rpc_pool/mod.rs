@@ -26,7 +26,10 @@ pub fn routes() -> Router<ApplicationState> {
             "/api/rpc-endpoints",
             get(list_rpc_endpoints).post(create_rpc_endpoint),
         )
-        .route("/api/rpc-endpoints/{id}", get(get_rpc_endpoint))
+        .route(
+            "/api/rpc-endpoints/{id}",
+            get(get_rpc_endpoint).delete(delete_rpc_endpoint),
+        )
         .route("/api/rpc-endpoints/{id}/enable", post(enable_rpc_endpoint))
         .route(
             "/api/rpc-endpoints/{id}/disable",
@@ -41,11 +44,12 @@ pub fn routes() -> Router<ApplicationState> {
         list_rpc_endpoints,
         get_rpc_endpoint,
         create_rpc_endpoint,
+        delete_rpc_endpoint,
         enable_rpc_endpoint,
         disable_rpc_endpoint,
         check_rpc_endpoint
     ),
-    components(schemas(RpcEndpointRecord, CreateRpcEndpointRequest))
+    components(schemas(RpcEndpointRecord, CreateRpcEndpointRequest, RpcEndpointSeed))
 )]
 struct RpcApiDocumentation;
 
@@ -73,6 +77,25 @@ pub struct CreateRpcEndpointRequest {
     pub chain_id: i64,
     pub url: String,
     pub weight: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
+pub struct RpcEndpointSeed {
+    pub chain_id: i64,
+    pub url: String,
+    #[serde(default)]
+    pub weight: Option<i32>,
+    #[serde(default)]
+    pub chain_name: Option<String>,
+    #[serde(default)]
+    pub native_token_symbol: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RpcSeedsInput {
+    List(Vec<RpcEndpointSeed>),
+    Object { endpoints: Vec<RpcEndpointSeed> },
 }
 
 #[utoipa::path(
@@ -153,6 +176,40 @@ async fn create_rpc_endpoint(
     .bind(weight)
     .fetch_one(&state.pool)
     .await?;
+
+    Ok(response::success(endpoint))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/rpc-endpoints/{id}",
+    tag = "rpc",
+    params(("id" = uuid::Uuid, Path, description = "RPC endpoint id")),
+    responses(
+        (status = 200, description = "RPC endpoint deleted", body = ApiResponse<RpcEndpointRecord>),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "RPC endpoint not found")
+    )
+)]
+async fn delete_rpc_endpoint(
+    principal: AuthenticatedPrincipal,
+    State(state): State<ApplicationState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ApiResponse<RpcEndpointRecord>>, ApplicationError> {
+    principal.require_admin()?;
+    let endpoint = sqlx::query_as::<_, RpcEndpointRecord>(
+        r#"
+        DELETE FROM eventlake_rpc_endpoints
+        WHERE id = $1
+        RETURNING id, chain_id, url, status, weight, latency_ms, last_check_at,
+                  failure_count, last_error, created_at, updated_at
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| ApplicationError::NotFound(format!("rpc endpoint {id}")))?;
 
     Ok(response::success(endpoint))
 }
@@ -364,3 +421,180 @@ SELECT id, chain_id, url, status, weight, latency_ms, last_check_at,
 FROM eventlake_rpc_endpoints
 ORDER BY chain_id, status, weight DESC, created_at
 "#;
+
+pub async fn seed_rpc_endpoints_from_file(
+    pool: &sqlx::PgPool,
+    path: &str,
+) -> anyhow::Result<usize> {
+    let path_obj = std::path::Path::new(path);
+    if !path_obj.exists() {
+        tracing::warn!(path = %path, "RPC seeds file not found, skipping seeding");
+        return Ok(0);
+    }
+
+    let file_content = tokio::fs::read_to_string(path_obj)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to read RPC seeds file at {path}: {e}"))?;
+
+    seed_rpc_endpoints_from_json(pool, &file_content).await
+}
+
+pub async fn seed_rpc_endpoints_from_json(
+    pool: &sqlx::PgPool,
+    json_str: &str,
+) -> anyhow::Result<usize> {
+    let seeds: Vec<RpcEndpointSeed> = match serde_json::from_str::<RpcSeedsInput>(json_str) {
+        Ok(RpcSeedsInput::List(list)) => list,
+        Ok(RpcSeedsInput::Object { endpoints }) => endpoints,
+        Err(err) => {
+            anyhow::bail!("failed to parse RPC seeds JSON: {err}");
+        }
+    };
+
+    let mut seeded_count = 0;
+    for seed in seeds {
+        let url = seed.url.trim().to_owned();
+        let weight = seed.weight.unwrap_or(100);
+
+        if let Err(err) = validate_rpc_endpoint_request(seed.chain_id, &url, weight) {
+            tracing::warn!(
+                chain_id = seed.chain_id,
+                url = %url,
+                error = %err,
+                "skipping invalid RPC seed entry"
+            );
+            continue;
+        }
+
+        let chain_exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM eventlake_chains WHERE chain_id = $1)",
+        )
+        .bind(seed.chain_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
+
+        if !chain_exists {
+            let chain_name = seed
+                .chain_name
+                .unwrap_or_else(|| format!("Chain {}", seed.chain_id));
+            let symbol = seed.native_token_symbol.unwrap_or_else(|| "ETH".to_owned());
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO eventlake_chains (
+                    chain_id, name, native_token_symbol, safe_confirmation_depth,
+                    default_min_block_window, default_max_block_window
+                )
+                VALUES ($1, $2, $3, 12, 1, 1000)
+                ON CONFLICT (chain_id) DO NOTHING
+                "#,
+            )
+            .bind(seed.chain_id)
+            .bind(chain_name)
+            .bind(symbol)
+            .execute(pool)
+            .await;
+        }
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO eventlake_rpc_endpoints (id, chain_id, url, weight, status)
+            VALUES ($1, $2, $3, $4, 'enabled')
+            ON CONFLICT (chain_id, url) DO NOTHING
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(seed.chain_id)
+        .bind(url)
+        .bind(weight)
+        .execute(pool)
+        .await;
+
+        match result {
+            Ok(res) => {
+                if res.rows_affected() > 0 {
+                    seeded_count += 1;
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    chain_id = seed.chain_id,
+                    url = %seed.url,
+                    error = %err,
+                    "failed to insert RPC endpoint seed"
+                );
+            }
+        }
+    }
+
+    tracing::info!(seeded_count, "completed RPC endpoints seeding");
+    Ok(seeded_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_rpc_seeds_from_json_list() {
+        let json_data = r#"[
+            {
+                "chain_id": 1,
+                "url": "https://eth.llamarpc.com",
+                "weight": 100
+            },
+            {
+                "chain_id": 8453,
+                "url": "https://mainnet.base.org",
+                "chain_name": "Base",
+                "native_token_symbol": "ETH"
+            }
+        ]"#;
+
+        let parsed: RpcSeedsInput = serde_json::from_str(json_data).expect("parses list JSON");
+        match parsed {
+            RpcSeedsInput::List(seeds) => {
+                assert_eq!(seeds.len(), 2);
+                assert_eq!(seeds[0].chain_id, 1);
+                assert_eq!(seeds[0].weight, Some(100));
+                assert_eq!(seeds[1].chain_id, 8453);
+                assert_eq!(seeds[1].weight, None);
+                assert_eq!(seeds[1].chain_name.as_deref(), Some("Base"));
+            }
+            _ => panic!("expected List variant"),
+        }
+    }
+
+    #[test]
+    fn parses_rpc_seeds_from_json_object() {
+        let json_data = r#"{
+            "endpoints": [
+                {
+                    "chain_id": 56,
+                    "url": "https://bsc-dataseed.binance.org",
+                    "weight": 80
+                }
+            ]
+        }"#;
+
+        let parsed: RpcSeedsInput = serde_json::from_str(json_data).expect("parses object JSON");
+        match parsed {
+            RpcSeedsInput::Object { endpoints } => {
+                assert_eq!(endpoints.len(), 1);
+                assert_eq!(endpoints[0].chain_id, 56);
+                assert_eq!(endpoints[0].weight, Some(80));
+            }
+            _ => panic!("expected Object variant"),
+        }
+    }
+
+    #[test]
+    fn validates_rpc_endpoint_requests() {
+        assert!(validate_rpc_endpoint_request(1, "https://eth.llamarpc.com", 100).is_ok());
+        assert!(validate_rpc_endpoint_request(1, "http://127.0.0.1:8545", 50).is_ok());
+        assert!(validate_rpc_endpoint_request(0, "https://eth.llamarpc.com", 100).is_err());
+        assert!(validate_rpc_endpoint_request(1, "https://eth.llamarpc.com", 0).is_err());
+        assert!(validate_rpc_endpoint_request(1, "ftp://eth.llamarpc.com", 100).is_err());
+        assert!(validate_rpc_endpoint_request(1, "not-a-url", 100).is_err());
+    }
+}

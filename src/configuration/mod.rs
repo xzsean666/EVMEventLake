@@ -8,7 +8,13 @@ pub struct ApplicationConfiguration {
     pub auth: AuthConfiguration,
     pub background: BackgroundConfiguration,
     pub block_transaction: BlockTransactionConfiguration,
+    pub rpc_pool: RpcPoolConfiguration,
     pub telemetry: TelemetryConfiguration,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RpcPoolConfiguration {
+    pub seeds_path: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -138,6 +144,23 @@ impl ApplicationConfiguration {
             )?,
         };
 
+        let rpc_seeds_path = env::var("EVENTLAKE_RPC_SEEDS_PATH")
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                let default_path = "config/rpc_endpoints.json";
+                if std::path::Path::new(default_path).is_file() {
+                    Some(default_path.to_owned())
+                } else {
+                    None
+                }
+            });
+
+        let rpc_pool = RpcPoolConfiguration {
+            seeds_path: rpc_seeds_path,
+        };
+
         let telemetry = TelemetryConfiguration {
             log_level: read_env("EVENTLAKE_LOG_LEVEL", "info"),
             json_logs: read_env("EVENTLAKE_JSON_LOGS", "false").parse()?,
@@ -150,6 +173,7 @@ impl ApplicationConfiguration {
             auth,
             background,
             block_transaction,
+            rpc_pool,
             telemetry,
         })
     }

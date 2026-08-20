@@ -21,6 +21,12 @@ pub async fn run(configuration: ApplicationConfiguration) -> anyhow::Result<()> 
     let pool = database::connect(&configuration.database).await?;
     database::migrate(&pool).await?;
 
+    if let Some(ref seeds_path) = configuration.rpc_pool.seeds_path {
+        if let Err(error) = crate::rpc_pool::seed_rpc_endpoints_from_file(&pool, seeds_path).await {
+            tracing::warn!(error = %error, path = %seeds_path, "failed to seed rpc endpoints from file");
+        }
+    }
+
     let address = SocketAddr::new(configuration.http.host, configuration.http.port);
     let cors = build_cors_layer(&configuration.http.cors_allowed_origins);
     let state = ApplicationState::new(configuration, pool);

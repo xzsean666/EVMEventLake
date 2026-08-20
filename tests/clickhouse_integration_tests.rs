@@ -215,6 +215,7 @@ fn test_configuration(clickhouse: ClickHouseConfig) -> ApplicationConfiguration 
             reorg_window: 32,
             max_response_bytes: 67108864,
         },
+        rpc_pool: Default::default(),
         telemetry: TelemetryConfiguration {
             log_level: "warn".to_owned(),
             json_logs: false,

@@ -251,6 +251,39 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
     );
     assert_ok(get(&router, "/api/rpc-endpoints").await?, StatusCode::OK);
 
+    // Test deleting RPC endpoint
+    let rpc_to_delete = post_json(
+        &router,
+        "/api/rpc-endpoints",
+        json!({ "chain_id": 31337, "url": "https://temp-rpc.example.com", "weight": 50 }),
+    )
+    .await?;
+    assert_ok(rpc_to_delete.clone(), StatusCode::OK);
+    let temp_rpc_id = uuid_from_response(&rpc_to_delete.1, "id");
+    assert_ok(
+        delete(&router, &format!("/api/rpc-endpoints/{temp_rpc_id}")).await?,
+        StatusCode::OK,
+    );
+    assert_error(
+        get(&router, &format!("/api/rpc-endpoints/{temp_rpc_id}")).await?,
+        StatusCode::NOT_FOUND,
+    );
+
+    // Test seeding RPC endpoints from JSON
+    let seed_json = r#"[
+        {"chain_id": 31337, "url": "https://seeded-1.example.com", "weight": 120},
+        {"chain_id": 99999, "url": "https://custom-chain-rpc.example.com", "weight": 80, "chain_name": "Custom Testnet", "native_token_symbol": "TEST"}
+    ]"#;
+    let seeded = rpc_pool::seed_rpc_endpoints_from_json(&pool, seed_json).await?;
+    assert_eq!(seeded, 2);
+
+    // Idempotent seeding (no duplicate insertions)
+    let reseeded = rpc_pool::seed_rpc_endpoints_from_json(&pool, seed_json).await?;
+    assert_eq!(reseeded, 0);
+
+    // Verify custom chain was created
+    assert_ok(get(&router, "/api/chains/99999").await?, StatusCode::OK);
+
     let abi_response = post_json(
         &router,
         "/api/abis",
@@ -788,6 +821,7 @@ fn build_test_state(
                 reorg_window: 32,
                 max_response_bytes: 67108864,
             },
+            rpc_pool: configuration::RpcPoolConfiguration { seeds_path: None },
             telemetry: configuration::TelemetryConfiguration {
                 log_level: "debug".to_owned(),
                 json_logs: false,

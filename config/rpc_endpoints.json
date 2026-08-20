@@ -1,0 +1,763 @@
+{
+  "updated_at": "2026-08-20T11:30:00Z",
+  "mode": "direct_no_proxy_verified",
+  "total_endpoints": 84,
+  "endpoints": [
+    {
+      "chain_id": 1,
+      "url": "https://ethereum-rpc.publicnode.com",
+      "weight": 100,
+      "chain_name": "Ethereum",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 913.6
+    },
+    {
+      "chain_id": 1,
+      "url": "https://eth.drpc.org",
+      "weight": 95,
+      "chain_name": "Ethereum",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 574.1
+    },
+    {
+      "chain_id": 1,
+      "url": "https://eth.merkle.io",
+      "weight": 90,
+      "chain_name": "Ethereum",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 689.0
+    },
+    {
+      "chain_id": 1,
+      "url": "https://rpc.mevblocker.io",
+      "weight": 90,
+      "chain_name": "Ethereum",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 915.4
+    },
+    {
+      "chain_id": 1,
+      "url": "https://gateway.tenderly.co/public/mainnet",
+      "weight": 85,
+      "chain_name": "Ethereum",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 680.9
+    },
+    {
+      "chain_id": 1,
+      "url": "https://rpc.flashbots.net",
+      "weight": 85,
+      "chain_name": "Ethereum",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 941.6
+    },
+    {
+      "chain_id": 1,
+      "url": "https://eth-mainnet.public.blastapi.io",
+      "weight": 85,
+      "chain_name": "Ethereum",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 699.8
+    },
+    {
+      "chain_id": 1,
+      "url": "https://mainnet.gateway.tenderly.co",
+      "weight": 75,
+      "chain_name": "Ethereum",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 706.9
+    },
+    {
+      "chain_id": 1,
+      "url": "https://eth.rpc.blxrbdn.com",
+      "weight": 70,
+      "chain_name": "Ethereum",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 493.5
+    },
+    {
+      "chain_id": 10,
+      "url": "https://optimism-rpc.publicnode.com",
+      "weight": 100,
+      "chain_name": "Optimism",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 2344.5
+    },
+    {
+      "chain_id": 10,
+      "url": "https://optimism.drpc.org",
+      "weight": 95,
+      "chain_name": "Optimism",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 1920.5
+    },
+    {
+      "chain_id": 10,
+      "url": "https://op-pokt.nodies.app",
+      "weight": 80,
+      "chain_name": "Optimism",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 4368.4
+    },
+    {
+      "chain_id": 10,
+      "url": "https://gateway.tenderly.co/public/optimism",
+      "weight": 75,
+      "chain_name": "Optimism",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 2135.2
+    },
+    {
+      "chain_id": 25,
+      "url": "https://cronos.drpc.org",
+      "weight": 95,
+      "chain_name": "Cronos",
+      "native_token_symbol": "CRO",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 4167.9
+    },
+    {
+      "chain_id": 25,
+      "url": "https://cronos-evm-rpc.publicnode.com",
+      "weight": 90,
+      "chain_name": "Cronos",
+      "native_token_symbol": "CRO",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 4250.2
+    },
+    {
+      "chain_id": 56,
+      "url": "https://bsc-rpc.publicnode.com",
+      "weight": 100,
+      "chain_name": "BSC",
+      "native_token_symbol": "BNB",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 680.5
+    },
+    {
+      "chain_id": 56,
+      "url": "https://binance.nodereal.io",
+      "weight": 90,
+      "chain_name": "BSC",
+      "native_token_symbol": "BNB",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 648.3
+    },
+    {
+      "chain_id": 100,
+      "url": "https://rpc.gnosischain.com",
+      "weight": 100,
+      "chain_name": "Gnosis",
+      "native_token_symbol": "xDAI",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 2933.6
+    },
+    {
+      "chain_id": 100,
+      "url": "https://gnosis.drpc.org",
+      "weight": 95,
+      "chain_name": "Gnosis",
+      "native_token_symbol": "xDAI",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 2673.8
+    },
+    {
+      "chain_id": 137,
+      "url": "https://polygon-bor-rpc.publicnode.com",
+      "weight": 100,
+      "chain_name": "Polygon",
+      "native_token_symbol": "POL",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 1065.0
+    },
+    {
+      "chain_id": 137,
+      "url": "https://polygon.drpc.org",
+      "weight": 95,
+      "chain_name": "Polygon",
+      "native_token_symbol": "POL",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 988.5
+    },
+    {
+      "chain_id": 137,
+      "url": "https://gateway.tenderly.co/public/polygon",
+      "weight": 75,
+      "chain_name": "Polygon",
+      "native_token_symbol": "POL",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 1431.8
+    },
+    {
+      "chain_id": 146,
+      "url": "https://rpc.soniclabs.com",
+      "weight": 100,
+      "chain_name": "Sonic",
+      "native_token_symbol": "S",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 2651.6
+    },
+    {
+      "chain_id": 146,
+      "url": "https://sonic.drpc.org",
+      "weight": 95,
+      "chain_name": "Sonic",
+      "native_token_symbol": "S",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 2344.9
+    },
+    {
+      "chain_id": 146,
+      "url": "https://sonic-rpc.publicnode.com",
+      "weight": 90,
+      "chain_name": "Sonic",
+      "native_token_symbol": "S",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 2291.8
+    },
+    {
+      "chain_id": 250,
+      "url": "https://fantom.drpc.org",
+      "weight": 95,
+      "chain_name": "Fantom",
+      "native_token_symbol": "FTM",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 2503.2
+    },
+    {
+      "chain_id": 324,
+      "url": "https://mainnet.era.zksync.io",
+      "weight": 100,
+      "chain_name": "zkSync Era",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 4018.6
+    },
+    {
+      "chain_id": 324,
+      "url": "https://zksync.drpc.org",
+      "weight": 95,
+      "chain_name": "zkSync Era",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 3373.9
+    },
+    {
+      "chain_id": 480,
+      "url": "https://worldchain-mainnet.g.alchemy.com/public",
+      "weight": 100,
+      "chain_name": "World Chain",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 5161.3
+    },
+    {
+      "chain_id": 480,
+      "url": "https://worldchain.drpc.org",
+      "weight": 95,
+      "chain_name": "World Chain",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 5222.0
+    },
+    {
+      "chain_id": 1101,
+      "url": "https://zkevm-rpc.com",
+      "weight": 100,
+      "chain_name": "Polygon zkEVM",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 3686.8
+    },
+    {
+      "chain_id": 1101,
+      "url": "https://polygon-zkevm.drpc.org",
+      "weight": 95,
+      "chain_name": "Polygon zkEVM",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 3583.6
+    },
+    {
+      "chain_id": 1116,
+      "url": "https://core.drpc.org",
+      "weight": 95,
+      "chain_name": "Core DAO",
+      "native_token_symbol": "CORE",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 4803.5
+    },
+    {
+      "chain_id": 1284,
+      "url": "https://moonbeam.drpc.org",
+      "weight": 95,
+      "chain_name": "Moonbeam",
+      "native_token_symbol": "GLMR",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 4330.6
+    },
+    {
+      "chain_id": 2222,
+      "url": "https://evm.kava.io",
+      "weight": 100,
+      "chain_name": "Kava",
+      "native_token_symbol": "KAVA",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 5626.1
+    },
+    {
+      "chain_id": 2222,
+      "url": "https://kava.drpc.org",
+      "weight": 95,
+      "chain_name": "Kava",
+      "native_token_symbol": "KAVA",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 4777.7
+    },
+    {
+      "chain_id": 5000,
+      "url": "https://rpc.mantle.xyz",
+      "weight": 100,
+      "chain_name": "Mantle",
+      "native_token_symbol": "MNT",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 4458.6
+    },
+    {
+      "chain_id": 5000,
+      "url": "https://mantle.drpc.org",
+      "weight": 95,
+      "chain_name": "Mantle",
+      "native_token_symbol": "MNT",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 3791.7
+    },
+    {
+      "chain_id": 5000,
+      "url": "https://mantle-rpc.publicnode.com",
+      "weight": 90,
+      "chain_name": "Mantle",
+      "native_token_symbol": "MNT",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 3978.0
+    },
+    {
+      "chain_id": 8217,
+      "url": "https://public-en.node.kaia.io",
+      "weight": 100,
+      "chain_name": "Kaia",
+      "native_token_symbol": "KAIA",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 5176.2
+    },
+    {
+      "chain_id": 8217,
+      "url": "https://klaytn.drpc.org",
+      "weight": 95,
+      "chain_name": "Kaia",
+      "native_token_symbol": "KAIA",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 4946.4
+    },
+    {
+      "chain_id": 8453,
+      "url": "https://mainnet.base.org",
+      "weight": 100,
+      "chain_name": "Base",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 1267.2
+    },
+    {
+      "chain_id": 8453,
+      "url": "https://base-rpc.publicnode.com",
+      "weight": 95,
+      "chain_name": "Base",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 1338.4
+    },
+    {
+      "chain_id": 8453,
+      "url": "https://base.drpc.org",
+      "weight": 95,
+      "chain_name": "Base",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 1277.0
+    },
+    {
+      "chain_id": 8453,
+      "url": "https://base-mainnet.public.blastapi.io",
+      "weight": 90,
+      "chain_name": "Base",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 1414.1
+    },
+    {
+      "chain_id": 8453,
+      "url": "https://gateway.tenderly.co/public/base",
+      "weight": 85,
+      "chain_name": "Base",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 1449.8
+    },
+    {
+      "chain_id": 8453,
+      "url": "https://base-pokt.nodies.app",
+      "weight": 80,
+      "chain_name": "Base",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 3129.2
+    },
+    {
+      "chain_id": 8453,
+      "url": "https://developer-access-mainnet.base.org",
+      "weight": 80,
+      "chain_name": "Base",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 1342.5
+    },
+    {
+      "chain_id": 34443,
+      "url": "https://mainnet.mode.network",
+      "weight": 100,
+      "chain_name": "Mode",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 4677.7
+    },
+    {
+      "chain_id": 34443,
+      "url": "https://mode.drpc.org",
+      "weight": 95,
+      "chain_name": "Mode",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 4600.8
+    },
+    {
+      "chain_id": 42161,
+      "url": "https://arb1.arbitrum.io/rpc",
+      "weight": 100,
+      "chain_name": "Arbitrum One",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 1862.8
+    },
+    {
+      "chain_id": 42161,
+      "url": "https://arbitrum-one-rpc.publicnode.com",
+      "weight": 95,
+      "chain_name": "Arbitrum One",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 2230.8
+    },
+    {
+      "chain_id": 42161,
+      "url": "https://arbitrum.drpc.org",
+      "weight": 95,
+      "chain_name": "Arbitrum One",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 1512.9
+    },
+    {
+      "chain_id": 42161,
+      "url": "https://arbitrum-one.public.blastapi.io",
+      "weight": 90,
+      "chain_name": "Arbitrum One",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 1697.0
+    },
+    {
+      "chain_id": 42170,
+      "url": "https://nova.arbitrum.io/rpc",
+      "weight": 100,
+      "chain_name": "Arbitrum Nova",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 2074.0
+    },
+    {
+      "chain_id": 42170,
+      "url": "https://arbitrum-nova-rpc.publicnode.com",
+      "weight": 95,
+      "chain_name": "Arbitrum Nova",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 1715.5
+    },
+    {
+      "chain_id": 42170,
+      "url": "https://arbitrum-nova.drpc.org",
+      "weight": 90,
+      "chain_name": "Arbitrum Nova",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 1651.2
+    },
+    {
+      "chain_id": 42220,
+      "url": "https://celo.drpc.org",
+      "weight": 95,
+      "chain_name": "Celo",
+      "native_token_symbol": "CELO",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 4073.8
+    },
+    {
+      "chain_id": 42220,
+      "url": "https://celo-rpc.publicnode.com",
+      "weight": 90,
+      "chain_name": "Celo",
+      "native_token_symbol": "CELO",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 4218.0
+    },
+    {
+      "chain_id": 43114,
+      "url": "https://api.avax.network/ext/bc/C/rpc",
+      "weight": 100,
+      "chain_name": "Avalanche",
+      "native_token_symbol": "AVAX",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 2044.0
+    },
+    {
+      "chain_id": 43114,
+      "url": "https://avalanche-c-chain-rpc.publicnode.com",
+      "weight": 95,
+      "chain_name": "Avalanche",
+      "native_token_symbol": "AVAX",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 2996.7
+    },
+    {
+      "chain_id": 43114,
+      "url": "https://avalanche.drpc.org",
+      "weight": 95,
+      "chain_name": "Avalanche",
+      "native_token_symbol": "AVAX",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 2776.7
+    },
+    {
+      "chain_id": 43114,
+      "url": "https://gateway.tenderly.co/public/avalanche",
+      "weight": 75,
+      "chain_name": "Avalanche",
+      "native_token_symbol": "AVAX",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 2571.0
+    },
+    {
+      "chain_id": 59144,
+      "url": "https://rpc.linea.build",
+      "weight": 100,
+      "chain_name": "Linea",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 3023.4
+    },
+    {
+      "chain_id": 59144,
+      "url": "https://linea.drpc.org",
+      "weight": 95,
+      "chain_name": "Linea",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 2972.3
+    },
+    {
+      "chain_id": 59144,
+      "url": "https://linea-rpc.publicnode.com",
+      "weight": 90,
+      "chain_name": "Linea",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 6747.2
+    },
+    {
+      "chain_id": 81457,
+      "url": "https://rpc.blast.io",
+      "weight": 100,
+      "chain_name": "Blast",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 3914.0
+    },
+    {
+      "chain_id": 81457,
+      "url": "https://blast.drpc.org",
+      "weight": 95,
+      "chain_name": "Blast",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 3660.9
+    },
+    {
+      "chain_id": 81457,
+      "url": "https://blast-rpc.publicnode.com",
+      "weight": 90,
+      "chain_name": "Blast",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 3818.7
+    },
+    {
+      "chain_id": 84532,
+      "url": "https://sepolia.base.org",
+      "weight": 100,
+      "chain_name": "Base Sepolia",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 5411.0
+    },
+    {
+      "chain_id": 84532,
+      "url": "https://base-sepolia.drpc.org",
+      "weight": 95,
+      "chain_name": "Base Sepolia",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 5443.8
+    },
+    {
+      "chain_id": 84532,
+      "url": "https://base-sepolia-rpc.publicnode.com",
+      "weight": 90,
+      "chain_name": "Base Sepolia",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 6329.9
+    },
+    {
+      "chain_id": 167000,
+      "url": "https://rpc.mainnet.taiko.xyz",
+      "weight": 100,
+      "chain_name": "Taiko",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 4799.9
+    },
+    {
+      "chain_id": 167000,
+      "url": "https://taiko.drpc.org",
+      "weight": 95,
+      "chain_name": "Taiko",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 5521.3
+    },
+    {
+      "chain_id": 167000,
+      "url": "https://taiko-rpc.publicnode.com",
+      "weight": 90,
+      "chain_name": "Taiko",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 4582.8
+    },
+    {
+      "chain_id": 421614,
+      "url": "https://sepolia-rollup.arbitrum.io/rpc",
+      "weight": 100,
+      "chain_name": "Arbitrum Sepolia",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 5584.0
+    },
+    {
+      "chain_id": 421614,
+      "url": "https://arbitrum-sepolia.drpc.org",
+      "weight": 95,
+      "chain_name": "Arbitrum Sepolia",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 5544.1
+    },
+    {
+      "chain_id": 421614,
+      "url": "https://arbitrum-sepolia-rpc.publicnode.com",
+      "weight": 90,
+      "chain_name": "Arbitrum Sepolia",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 7557.4
+    },
+    {
+      "chain_id": 534352,
+      "url": "https://rpc.scroll.io",
+      "weight": 100,
+      "chain_name": "Scroll",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 3300.6
+    },
+    {
+      "chain_id": 534352,
+      "url": "https://scroll.drpc.org",
+      "weight": 95,
+      "chain_name": "Scroll",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 3187.5
+    },
+    {
+      "chain_id": 534352,
+      "url": "https://scroll-rpc.publicnode.com",
+      "weight": 90,
+      "chain_name": "Scroll",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 3123.8
+    },
+    {
+      "chain_id": 11155111,
+      "url": "https://ethereum-sepolia-rpc.publicnode.com",
+      "weight": 100,
+      "chain_name": "Ethereum Sepolia",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 5157.9
+    },
+    {
+      "chain_id": 11155420,
+      "url": "https://optimism-sepolia.drpc.org",
+      "weight": 100,
+      "chain_name": "OP Sepolia",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 5785.8
+    },
+    {
+      "chain_id": 11155420,
+      "url": "https://optimism-sepolia-rpc.publicnode.com",
+      "weight": 90,
+      "chain_name": "OP Sepolia",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-08-20T11:30:00Z",
+      "latency_ms": 7450.0
+    }
+  ]
+}

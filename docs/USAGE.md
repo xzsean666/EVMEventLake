@@ -123,12 +123,47 @@ curl -sS -X POST http://127.0.0.1:8080/api/chains \
   }'
 ```
 
-### 5.2 添加 JSON-RPC endpoint
+### 5.2 配置与管理 JSON-RPC endpoints
 
+#### 方式 A：通过种子 JSON 文件启动时自动导入（推荐）
+可以在 `config/rpc_endpoints.json` 中配置默认内置的 RPC 节点（参考 [`config/rpc_endpoints.json.example`](../config/rpc_endpoints.json.example)），服务启动时会自动读取并幂等写入数据库（已存在的节点不会重复插入或覆盖）：
+
+```json
+[
+  {
+    "chain_id": 1,
+    "url": "https://eth.llamarpc.com",
+    "weight": 100
+  },
+  {
+    "chain_id": 8453,
+    "url": "https://mainnet.base.org",
+    "weight": 100
+  }
+]
+```
+
+环境变量 `EVENTLAKE_RPC_SEEDS_PATH=config/rpc_endpoints.json` 可自定义种子文件路径。
+如果你需要借助 AI 快速生成涵盖所有主流公链的最新公开免费 RPC 列表，可直接使用提示词模板 [`docs/RPC_SEEDS_PROMPT.md`](RPC_SEEDS_PROMPT.md)。
+
+#### 方式 B：通过 API 动态添加、删除或停用
+
+- **添加新端点**：
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/api/rpc-endpoints \
   -H 'content-type: application/json' \
   -d '{"chain_id":31337,"url":"http://host.docker.internal:8545","weight":100}'
+```
+
+- **删除端点**：
+```bash
+curl -sS -X DELETE http://127.0.0.1:8080/api/rpc-endpoints/{id}
+```
+
+- **启用 / 禁用端点**：
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/rpc-endpoints/{id}/disable
+curl -sS -X POST http://127.0.0.1:8080/api/rpc-endpoints/{id}/enable
 ```
 
 可用 `POST /api/rpc-endpoints/{id}/check` 主动检查 endpoint；后台 worker 也会持续
@@ -295,6 +330,7 @@ curl -sS "http://127.0.0.1:8080/api/chains/31337/addresses/0x1111111111111111111
 | `EVENTLAKE_BLOCK_TRANSACTION_MAX_CONCURRENCY` | `2` | 最大并发同步链数量 |
 | `EVENTLAKE_BLOCK_TRANSACTION_REORG_WINDOW` | `32` | 区块分叉检测回退窗口 |
 | `EVENTLAKE_BLOCK_TRANSACTION_MAX_RESPONSE_BYTES` | `67108864` | 单次 RPC 响应最大字节数上限 |
+| `EVENTLAKE_RPC_SEEDS_PATH` | `config/rpc_endpoints.json` | 启动时自动导入 RPC 端点种子 JSON 文件路径 |
 | `EVENTLAKE_LOG_LEVEL` | `info` | tracing 过滤级别 |
 
 查看日志：
