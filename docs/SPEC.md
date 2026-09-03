@@ -362,6 +362,7 @@ Capabilities:
 
 - Historical sync.
 - Realtime sync.
+- Dynamic multi-address carpool batching.
 - Automatic retry.
 - Automatic recovery.
 - Dynamic block window sizing.
@@ -380,6 +381,8 @@ Realtime sync rules:
 - Continue running after historical sync catches up.
 - Use a chain-specific confirmation depth.
 - Avoid indexing blocks that are too new for the chain's reorg policy.
+- Dynamically bundle ready contract subscriptions at the same `(chain_id, current_block)` into a single multi-address `eth_getLogs` request (up to `max_batch_addresses`).
+- Demux returned logs by `log.address` back to their corresponding `subscription_id` before persistence.
 
 ## 12. Reorg Specification
 

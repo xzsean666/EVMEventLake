@@ -97,9 +97,12 @@ ClickHouse because their data volume is unbounded.
 
 ### collector
 
-Fetches `eth_getLogs` over an adaptive block window. A contract subscription sends
-the address filter; an all-events subscription sends only `fromBlock` and `toBlock`.
-It writes raw rows before advancing the subscription checkpoint.
+Fetches `eth_getLogs` over an adaptive block window. A single contract subscription
+sends the address filter; multiple contract subscriptions at the same `(chain_id, current_block)`
+height are dynamically bucketed and carpooled into a single `eth_getLogs` request with
+`address: [...]` (up to `max_batch_addresses`), demuxing returned logs back to their
+originating `subscription_id`s; an all-events subscription sends only `fromBlock` and
+`toBlock`. It writes raw rows before advancing the subscription checkpoints.
 
 In ClickHouse mode, an RPC response is batched into `raw_logs`. If that write fails,
 the client is discarded and the checkpoint is unchanged, so the next tick retries
@@ -203,6 +206,30 @@ query selected raw store, excluding tombstones
         |
         v
 return encoded topics and data with pagination metadata
+```
+
+### 5.4 Dynamic Multi-Address Carpool Collection
+
+```text
+runnable subscriptions
+        |
+        v
+bucket by (chain_id, current_block, status) & chunk by max_batch_addresses
+        |
+        v
+single eth_getLogs(address: [A, B, C...], from_block, to_block)
+        |
+        v
+observe block hashes for reorg detection
+        |
+        v
+demux logs by log.address -> assign subscription_id
+        |
+        v
+batch write raw logs (PostgreSQL or ClickHouse)
+        |
+        v
+advance checkpoints for all batched subscriptions
 ```
 
 ## 6. Design Constraints

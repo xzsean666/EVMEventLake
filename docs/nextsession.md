@@ -162,15 +162,20 @@ Documented:
 
 Recommended next hardening sequence:
 
-1. Exercise end-to-end flow with a real public or private EVM RPC endpoint:
+1. Dynamic Multi-Address Carpool Collection implementation (`docs/dynamic-address-aggregation-upgrade/01-upgrade-design.md`):
+   - Refactor `eth_get_logs` in `src/rpc_pool/evm_rpc_client.rs` to support multi-address array filter.
+   - Introduce `max_batch_addresses` in `src/configuration/mod.rs`.
+   - Update `src/collector/worker.rs` to bucket subscriptions by `(chain_id, current_block, status)` and perform batch collection with log demuxing.
+   - Add unit and integration tests.
+2. Exercise end-to-end flow with a real public or private EVM RPC endpoint:
    add RPC, upload ERC-20 ABI, create subscription, collect logs, decode, search.
-2. Expand Search DSL support for `in`, `not_in`, and more field comparison types.
-3. Add explicit Job Monitor routes separate from subscription routes if the UI needs different read models.
-4. Improve OpenAPI annotations with concrete path schemas for all handlers.
-5. Add JWT issuance or external identity provider integration if needed.
-6. Add per-chain/provider RPC range-limit metadata.
-7. Add stronger reorg repair tests.
-8. Add load tests for recent search and address index performance.
+3. Expand Search DSL support for `in`, `not_in`, and more field comparison types.
+4. Add explicit Job Monitor routes separate from subscription routes if the UI needs different read models.
+5. Improve OpenAPI annotations with concrete path schemas for all handlers.
+6. Add JWT issuance or external identity provider integration if needed.
+7. Add per-chain/provider RPC range-limit metadata.
+8. Add stronger reorg repair tests.
+9. Add load tests for recent search and address index performance.
 
 ## 6. Next Actions
 
