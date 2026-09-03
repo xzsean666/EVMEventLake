@@ -525,6 +525,48 @@ pub async fn update_checkpoint(
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+pub struct CheckpointBatchUpdate {
+    pub id: Uuid,
+    pub next_block: i64,
+    pub target_block: Option<i64>,
+    pub status: String,
+    pub current_block_window: i64,
+}
+
+pub async fn update_checkpoints_batch(
+    pool: &sqlx::PgPool,
+    updates: &[CheckpointBatchUpdate],
+) -> Result<(), ApplicationError> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    for update in updates {
+        sqlx::query(
+            r#"
+            UPDATE eventlake_subscriptions
+            SET current_block = $2,
+                target_block = $3,
+                status = $4,
+                current_block_window = $5,
+                error_message = NULL,
+                updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(update.id)
+        .bind(update.next_block)
+        .bind(update.target_block)
+        .bind(&update.status)
+        .bind(update.current_block_window)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn update_collection_window_after_retryable_error(
     pool: &sqlx::PgPool,
     id: Uuid,
@@ -547,6 +589,37 @@ pub async fn update_collection_window_after_retryable_error(
     .execute(pool)
     .await?;
 
+    Ok(())
+}
+
+pub async fn update_collection_windows_after_retryable_error(
+    pool: &sqlx::PgPool,
+    ids: &[Uuid],
+    current_block_window: i64,
+    error_message: &str,
+) -> Result<(), ApplicationError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    for id in ids {
+        sqlx::query(
+            r#"
+            UPDATE eventlake_subscriptions
+            SET current_block_window = $2,
+                status = CASE WHEN status = 'pending' THEN 'historical_syncing' ELSE status END,
+                error_message = $3,
+                updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(*id)
+        .bind(current_block_window)
+        .bind(error_message)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 

@@ -387,14 +387,7 @@ pub async fn check_endpoint(
 ) -> Result<RpcHealthCheck, ApplicationError> {
     let started_at = Instant::now();
     let block_number = eth_block_number(client, rpc_url).await?;
-    let _logs = eth_get_logs(
-        client,
-        rpc_url,
-        Some(ZERO_ADDRESS),
-        block_number,
-        block_number,
-    )
-    .await?;
+    let _logs = eth_get_logs(client, rpc_url, &[ZERO_ADDRESS], block_number, block_number).await?;
     Ok(RpcHealthCheck {
         latency_ms: started_at.elapsed().as_millis() as i64,
     })
@@ -548,21 +541,37 @@ pub fn parse_batch_block_response(
     }
 }
 
-pub async fn eth_get_logs(
-    client: &Client,
-    rpc_url: &str,
-    contract_address: Option<&str>,
+pub(crate) fn build_get_logs_filter<S: AsRef<str>>(
+    contract_addresses: &[S],
     from_block: i64,
     to_block: i64,
-) -> Result<Vec<RpcLog>, ApplicationError> {
+) -> Value {
     let mut filter = serde_json::Map::new();
-    if let Some(contract_address) = contract_address {
-        filter.insert("address".to_owned(), json!(normalize_hex(contract_address)));
+    if contract_addresses.len() == 1 {
+        filter.insert(
+            "address".to_owned(),
+            json!(normalize_hex(contract_addresses[0].as_ref())),
+        );
+    } else if contract_addresses.len() > 1 {
+        let addresses: Vec<String> = contract_addresses
+            .iter()
+            .map(|a| normalize_hex(a.as_ref()))
+            .collect();
+        filter.insert("address".to_owned(), json!(addresses));
     }
     filter.insert("fromBlock".to_owned(), json!(format!("0x{:x}", from_block)));
     filter.insert("toBlock".to_owned(), json!(format!("0x{:x}", to_block)));
-    let params = json!([filter]);
+    json!([filter])
+}
 
+pub async fn eth_get_logs<S: AsRef<str>>(
+    client: &Client,
+    rpc_url: &str,
+    contract_addresses: &[S],
+    from_block: i64,
+    to_block: i64,
+) -> Result<Vec<RpcLog>, ApplicationError> {
+    let params = build_get_logs_filter(contract_addresses, from_block, to_block);
     call(client, rpc_url, "eth_getLogs", params).await
 }
 
@@ -787,5 +796,51 @@ mod tests {
 
         let res = parse_batch_block_response(1, &[100, 101], raw_batch_error);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn build_get_logs_filter_handles_empty_single_and_multiple_addresses() {
+        // 1. Empty address filter (all_events)
+        let empty_filter = build_get_logs_filter(&[] as &[&str], 100, 200);
+        assert_eq!(
+            empty_filter,
+            json!([{
+                "fromBlock": "0x64",
+                "toBlock": "0xc8"
+            }])
+        );
+
+        // 2. Single address filter
+        let single_filter =
+            build_get_logs_filter(&["0x1111111111111111111111111111111111111111"], 100, 200);
+        assert_eq!(
+            single_filter,
+            json!([{
+                "address": "0x1111111111111111111111111111111111111111",
+                "fromBlock": "0x64",
+                "toBlock": "0xc8"
+            }])
+        );
+
+        // 3. Multi-address array filter
+        let multi_filter = build_get_logs_filter(
+            &[
+                "0x1111111111111111111111111111111111111111",
+                "0x2222222222222222222222222222222222222222",
+            ],
+            100,
+            200,
+        );
+        assert_eq!(
+            multi_filter,
+            json!([{
+                "address": [
+                    "0x1111111111111111111111111111111111111111",
+                    "0x2222222222222222222222222222222222222222"
+                ],
+                "fromBlock": "0x64",
+                "toBlock": "0xc8"
+            }])
+        );
     }
 }

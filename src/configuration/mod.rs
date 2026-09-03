@@ -71,6 +71,8 @@ pub struct BackgroundConfiguration {
     /// Partition maintenance issues DDL, so it runs on a slower cadence than the
     /// collect/decode workers instead of on every worker tick.
     pub partition_tick: Duration,
+    /// Maximum number of contract addresses bundled into a single eth_getLogs request.
+    pub max_batch_addresses: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -125,6 +127,10 @@ impl ApplicationConfiguration {
                 "EVENTLAKE_PARTITION_TICK_SECONDS",
                 "300",
             )?),
+            max_batch_addresses: read_positive_usize_env(
+                "EVENTLAKE_COLLECTOR_MAX_BATCH_ADDRESSES",
+                "50",
+            )?,
         };
 
         let block_transaction = BlockTransactionConfiguration {

@@ -207,6 +207,7 @@ fn test_configuration(clickhouse: ClickHouseConfig) -> ApplicationConfiguration 
             worker_tick: Duration::from_secs(1),
             decode_batch_size: 1,
             partition_tick: Duration::from_secs(1),
+            max_batch_addresses: 50,
         },
         block_transaction: BlockTransactionConfiguration {
             enabled: false,

@@ -22,7 +22,8 @@ pub async fn run(configuration: ApplicationConfiguration) -> anyhow::Result<()> 
     database::migrate(&pool).await?;
 
     if let Some(ref seeds_path) = configuration.rpc_pool.seeds_path {
-        if let Err(error) = crate::rpc_pool::seed_rpc_endpoints_from_file(&pool, seeds_path).await {
+        let seed_result = crate::rpc_pool::seed_rpc_endpoints_from_file(&pool, seeds_path).await;
+        if let Err(error) = seed_result {
             tracing::warn!(error = %error, path = %seeds_path, "failed to seed rpc endpoints from file");
         }
     }

@@ -725,7 +725,7 @@ async fn discover_live_base_usdc_sample(
         let logs = rpc_pool::evm_rpc_client::eth_get_logs(
             client,
             rpc_url,
-            Some(BASE_USDC_ADDRESS),
+            &[BASE_USDC_ADDRESS],
             from_block,
             to_block,
         )
@@ -813,6 +813,7 @@ fn build_test_state(
                 worker_tick: Duration::from_millis(50),
                 decode_batch_size: 100,
                 partition_tick: Duration::from_secs(300),
+                max_batch_addresses: 50,
             },
             block_transaction: configuration::BlockTransactionConfiguration {
                 enabled: false,
