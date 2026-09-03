@@ -323,8 +323,8 @@ curl -sS "http://127.0.0.1:8080/api/chains/31337/addresses/0x1111111111111111111
 | `EVENTLAKE_HTTP_PORT` | `8080` | HTTP 监听端口 |
 | `EVENTLAKE_DATABASE_URL` | Compose 内部 PostgreSQL URL | PostgreSQL 连接 |
 | `EVENTLAKE_BACKGROUND_WORKERS_ENABLED` | `true` | 启用采集、RPC 检查和维护 worker |
-| `EVENTLAKE_WORKER_TICK_SECONDS` | `5` | worker 调度间隔 |
-| `EVENTLAKE_CLICKHOUSE_ENABLED` | `false` | 启用 ClickHouse raw store（需 feature 构建） |
+| `EVENTLAKE_CLICKHOUSE_URL` | - | ClickHouse 连接 URL（如 `http://eventlake:eventlake@clickhouse:8123/eventlake`，推荐） |
+| `EVENTLAKE_CLICKHOUSE_ENABLED` | `false` | 启用 ClickHouse raw store（设置 URL 时默认启用） |
 | `EVENTLAKE_BLOCK_TRANSACTION_ENABLED` | `false` | 启用整链区块和交易后台同步 worker |
 | `EVENTLAKE_BLOCK_TRANSACTION_BATCH_SIZE` | `10` | 区块与交易批量拉取区块数量 |
 | `EVENTLAKE_BLOCK_TRANSACTION_MAX_CONCURRENCY` | `2` | 最大并发同步链数量 |

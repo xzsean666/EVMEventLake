@@ -56,6 +56,18 @@ fn lazy_pool() -> anyhow::Result<sqlx::PgPool> {
     Ok(PgPoolOptions::new().connect_lazy("postgres://eventlake:eventlake@localhost/eventlake")?)
 }
 
+fn test_clickhouse_config(enabled: bool) -> ClickHouseConfig {
+    ClickHouseConfig {
+        host: "127.0.0.1".to_owned(),
+        port: 8123,
+        user: "eventlake".to_owned(),
+        password: "eventlake".to_owned(),
+        database: "eventlake".to_owned(),
+        enabled,
+        secure: false,
+    }
+}
+
 fn test_configuration(clickhouse: ClickHouseConfig) -> ApplicationConfiguration {
     ApplicationConfiguration {
         http: HttpConfiguration {
@@ -106,14 +118,7 @@ async fn test_live_ethereum_blocks_and_transactions() -> anyhow::Result<()> {
         }
     };
 
-    let ch_config = ClickHouseConfig {
-        host: "127.0.0.1".to_owned(),
-        port: 8123,
-        user: "eventlake".to_owned(),
-        password: "eventlake".to_owned(),
-        database: "eventlake".to_owned(),
-        enabled: true,
-    };
+    let ch_config = test_clickhouse_config(true);
 
     let ch_client = match clickhouse::connect(&ch_config).await {
         Ok(Some(c)) => c,
@@ -259,14 +264,7 @@ async fn test_live_dencun_blob_and_contract_creation_blocks() -> anyhow::Result<
         None => return Ok(()),
     };
 
-    let ch_config = ClickHouseConfig {
-        host: "127.0.0.1".to_owned(),
-        port: 8123,
-        user: "eventlake".to_owned(),
-        password: "eventlake".to_owned(),
-        database: "eventlake".to_owned(),
-        enabled: true,
-    };
+    let ch_config = test_clickhouse_config(true);
 
     let ch_client = match clickhouse::connect(&ch_config).await {
         Ok(Some(c)) => c,
@@ -345,14 +343,7 @@ async fn test_live_base_l2_blocks() -> anyhow::Result<()> {
         }
     };
 
-    let ch_config = ClickHouseConfig {
-        host: "127.0.0.1".to_owned(),
-        port: 8123,
-        user: "eventlake".to_owned(),
-        password: "eventlake".to_owned(),
-        database: "eventlake".to_owned(),
-        enabled: true,
-    };
+    let ch_config = test_clickhouse_config(true);
 
     let ch_client = match clickhouse::connect(&ch_config).await {
         Ok(Some(c)) => c,
@@ -383,14 +374,7 @@ async fn test_live_base_l2_blocks() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_keyset_cursor_pagination_and_tamper_proofing() -> anyhow::Result<()> {
-    let ch_config = ClickHouseConfig {
-        host: "127.0.0.1".to_owned(),
-        port: 8123,
-        user: "eventlake".to_owned(),
-        password: "eventlake".to_owned(),
-        database: "eventlake".to_owned(),
-        enabled: true,
-    };
+    let ch_config = test_clickhouse_config(true);
 
     let ch_client = match clickhouse::connect(&ch_config).await {
         Ok(Some(c)) => c,
@@ -538,14 +522,7 @@ async fn test_keyset_cursor_pagination_and_tamper_proofing() -> anyhow::Result<(
 
 #[tokio::test]
 async fn test_reorg_tombstone_and_reingest_recovery() -> anyhow::Result<()> {
-    let ch_config = ClickHouseConfig {
-        host: "127.0.0.1".to_owned(),
-        port: 8123,
-        user: "eventlake".to_owned(),
-        password: "eventlake".to_owned(),
-        database: "eventlake".to_owned(),
-        enabled: true,
-    };
+    let ch_config = test_clickhouse_config(true);
 
     let ch_client = match clickhouse::connect(&ch_config).await {
         Ok(Some(c)) => c,
@@ -640,14 +617,7 @@ async fn test_reorg_tombstone_and_reingest_recovery() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_api_error_responses_400_404_503() -> anyhow::Result<()> {
-    let mut ch_disabled_config = test_configuration(ClickHouseConfig {
-        host: "127.0.0.1".to_owned(),
-        port: 8123,
-        user: "eventlake".to_owned(),
-        password: "eventlake".to_owned(),
-        database: "eventlake".to_owned(),
-        enabled: false,
-    });
+    let mut ch_disabled_config = test_configuration(test_clickhouse_config(false));
     ch_disabled_config.block_transaction.enabled = false;
 
     // Test with ClickHouse disabled -> 503
@@ -662,14 +632,7 @@ async fn test_api_error_responses_400_404_503() -> anyhow::Result<()> {
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     // Test with ClickHouse enabled
-    let ch_config = ClickHouseConfig {
-        host: "127.0.0.1".to_owned(),
-        port: 8123,
-        user: "eventlake".to_owned(),
-        password: "eventlake".to_owned(),
-        database: "eventlake".to_owned(),
-        enabled: true,
-    };
+    let ch_config = test_clickhouse_config(true);
     let ch_client = match clickhouse::connect(&ch_config).await {
         Ok(Some(c)) => c,
         _ => return Ok(()),

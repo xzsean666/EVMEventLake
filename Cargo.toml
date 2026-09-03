@@ -19,6 +19,7 @@ clickhouse = { version = "=0.13.3", optional = true, features = ["time", "uuid"]
 dotenvy = "0.15.7"
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["rust_crypto"] }
 hex = "0.4.3"
+percent-encoding = "2.3"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "socks"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
@@ -31,6 +32,7 @@ tower-http = { version = "0.6.11", features = ["cors", "trace"] }
 tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
 utoipa = { version = "5.5.0", features = ["axum_extras", "chrono", "uuid"] }
+url = "2.5"
 uuid = { version = "1.19.0", features = ["v4", "serde"] }
 
 [dev-dependencies]

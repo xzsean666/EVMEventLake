@@ -154,15 +154,20 @@ struct RawLogRow {
 
 pub async fn connect(configuration: &ClickHouseConfig) -> anyhow::Result<Option<Client>> {
     if !configuration.enabled {
-        tracing::info!("ClickHouse disabled by EVENTLAKE_CLICKHOUSE_ENABLED");
+        tracing::info!("ClickHouse disabled");
         return Ok(None);
     }
 
-    let client = Client::default()
-        .with_url(configuration.url())
-        .with_user(configuration.user.clone())
-        .with_password(configuration.password.clone())
-        .with_database(configuration.database.clone());
+    let mut client = Client::default().with_url(configuration.url());
+    if !configuration.user.is_empty() {
+        client = client.with_user(configuration.user.clone());
+    }
+    if !configuration.password.is_empty() {
+        client = client.with_password(configuration.password.clone());
+    }
+    if !configuration.database.is_empty() {
+        client = client.with_database(configuration.database.clone());
+    }
 
     client
         .query("SELECT 1")
@@ -172,6 +177,7 @@ pub async fn connect(configuration: &ClickHouseConfig) -> anyhow::Result<Option<
     initialize_schema(&client).await?;
 
     tracing::info!(
+        url = %configuration.url(),
         host = %configuration.host,
         port = configuration.port,
         database = %configuration.database,

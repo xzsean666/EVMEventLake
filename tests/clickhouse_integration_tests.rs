@@ -39,14 +39,20 @@ async fn mirrors_events_routes_search_and_hides_tombstones() -> anyhow::Result<(
         return Ok(());
     }
 
-    let clickhouse_configuration = ClickHouseConfig {
-        host: read_env("EVENTLAKE_CLICKHOUSE_HOST", "127.0.0.1"),
-        port: read_env("EVENTLAKE_CLICKHOUSE_PORT", "8123").parse()?,
-        user: read_env("EVENTLAKE_CLICKHOUSE_USER", "eventlake"),
-        password: read_env("EVENTLAKE_CLICKHOUSE_PASSWORD", "eventlake"),
-        database: read_env("EVENTLAKE_CLICKHOUSE_DB", "eventlake"),
-        enabled: true,
+    let mut clickhouse_configuration = if let Ok(url) = env::var("EVENTLAKE_CLICKHOUSE_URL") {
+        ClickHouseConfig::from_url(&url)?
+    } else {
+        ClickHouseConfig {
+            host: read_env("EVENTLAKE_CLICKHOUSE_HOST", "127.0.0.1"),
+            port: read_env("EVENTLAKE_CLICKHOUSE_PORT", "8123").parse()?,
+            user: read_env("EVENTLAKE_CLICKHOUSE_USER", "eventlake"),
+            password: read_env("EVENTLAKE_CLICKHOUSE_PASSWORD", "eventlake"),
+            database: read_env("EVENTLAKE_CLICKHOUSE_DB", "eventlake"),
+            enabled: true,
+            secure: false,
+        }
     };
+    clickhouse_configuration.enabled = true;
     let client = clickhouse::connect(&clickhouse_configuration)
         .await?
         .expect("enabled configuration returns a client");
@@ -262,14 +268,20 @@ async fn blocks_and_transactions_write_and_query_and_reorg() -> anyhow::Result<(
         return Ok(());
     }
 
-    let clickhouse_configuration = ClickHouseConfig {
-        host: read_env("EVENTLAKE_CLICKHOUSE_HOST", "127.0.0.1"),
-        port: read_env("EVENTLAKE_CLICKHOUSE_PORT", "8123").parse()?,
-        user: read_env("EVENTLAKE_CLICKHOUSE_USER", "eventlake"),
-        password: read_env("EVENTLAKE_CLICKHOUSE_PASSWORD", "eventlake"),
-        database: read_env("EVENTLAKE_CLICKHOUSE_DB", "eventlake"),
-        enabled: true,
+    let mut clickhouse_configuration = if let Ok(url) = env::var("EVENTLAKE_CLICKHOUSE_URL") {
+        ClickHouseConfig::from_url(&url)?
+    } else {
+        ClickHouseConfig {
+            host: read_env("EVENTLAKE_CLICKHOUSE_HOST", "127.0.0.1"),
+            port: read_env("EVENTLAKE_CLICKHOUSE_PORT", "8123").parse()?,
+            user: read_env("EVENTLAKE_CLICKHOUSE_USER", "eventlake"),
+            password: read_env("EVENTLAKE_CLICKHOUSE_PASSWORD", "eventlake"),
+            database: read_env("EVENTLAKE_CLICKHOUSE_DB", "eventlake"),
+            enabled: true,
+            secure: false,
+        }
     };
+    clickhouse_configuration.enabled = true;
     let client = clickhouse::connect(&clickhouse_configuration)
         .await?
         .expect("enabled configuration returns a client");

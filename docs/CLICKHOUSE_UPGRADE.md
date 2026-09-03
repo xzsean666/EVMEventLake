@@ -32,10 +32,17 @@ docker compose --env-file .env -f docker-compose.clickhouse.yml up -d --build
 ```
 
 ```env
+# Single connection URL (recommended):
+EVENTLAKE_CLICKHOUSE_URL=http://eventlake:eventlake@localhost:8123/eventlake
+
+# Or explicit enable flag:
 EVENTLAKE_CLICKHOUSE_ENABLED=true
 ```
 
-The flag is rejected if the binary was not compiled with `--features clickhouse`.
+ClickHouse can be configured using `EVENTLAKE_CLICKHOUSE_URL` (supporting `http://`,
+`https://`, `clickhouse://`, or `clickhouses://`) or the legacy individual variables
+(`EVENTLAKE_CLICKHOUSE_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_DB`).
+The mode is rejected if the binary was not compiled with `--features clickhouse`.
 There is deliberately no PostgreSQL raw-log fallback in this mode.
 
 ## 3. Write and Retry Semantics
