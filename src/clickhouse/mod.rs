@@ -227,76 +227,90 @@ pub async fn initialize_schema(client: &Client) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Writes one decoded-event search projection. The caller has already persisted the raw log
-/// and queue row in PostgreSQL, and marks that queue row complete only after this succeeds.
+/// Writes one decoded-event search projection.
 pub async fn write_indexed_event(client: &Client, event: IndexedEvent) -> anyhow::Result<()> {
-    let chain_id = as_u64(event.chain_id, "chain_id")?;
-    let block_number = as_u64(event.block_number, "block_number")?;
-    let log_index = as_u32(event.log_index, "log_index")?;
+    write_indexed_events(client, &[event]).await
+}
+
+/// Writes multiple decoded-event search projections in a single batch to ClickHouse.
+/// This prevents micro-parts generation that leads to 'Too many parts' errors.
+pub async fn write_indexed_events(client: &Client, events: &[IndexedEvent]) -> anyhow::Result<()> {
+    if events.is_empty() {
+        return Ok(());
+    }
+
     let indexed_at = Utc::now();
     let indexed_at_offset = to_offset_datetime(indexed_at)?;
-    let decoded_fields = json!({
-        "indexed": event.indexed_fields.clone(),
-        "non_indexed": event.non_indexed_fields.clone(),
-    })
-    .to_string();
 
-    let main_row = DecodedEventRow {
-        id: event.id,
-        raw_log_id: event.raw_log_id,
-        subscription_id: event.subscription_id,
-        chain_id,
-        block_number,
-        block_hash: event.block_hash,
-        transaction_hash: event.transaction_hash.clone(),
-        log_index,
-        contract_address: event.contract_address.clone(),
-        event_name: event.event_name.clone(),
-        topic0: event.topic0.clone(),
-        abi_id: event.abi_id,
-        indexed_fields: event.indexed_fields.to_string(),
-        non_indexed_fields: event.non_indexed_fields.to_string(),
-        decoded_fields,
-        is_removed: event.is_removed,
-        decoded_at: to_offset_datetime(event.decoded_at)?,
-        indexed_at: indexed_at_offset,
-    };
-    write_rows(client, "decoded_events", &[main_row]).await?;
-
+    let mut main_rows = Vec::with_capacity(events.len());
     let mut address_rows = Vec::new();
     let mut field_rows = Vec::new();
-    for field in event.fields {
-        if let Ok(address) = crate::shared::validation::normalize_address(&field.normalized_value) {
-            address_rows.push(AddressIndexRow {
-                chain_id,
-                address,
-                block_number,
-                transaction_hash: event.transaction_hash.clone(),
-                log_index,
-                event_name: event.event_name.clone(),
-                contract_address: event.contract_address.clone(),
-                role: "field".to_owned(),
-                field_name: field.field_name.clone(),
-                is_removed: event.is_removed,
-                indexed_at: indexed_at_offset,
-            });
-        }
 
-        if should_index_field_value(&field.json_value) {
-            field_rows.push(EventFieldIndexRow {
-                chain_id,
-                topic0: event.topic0.clone(),
-                field_name: field.field_name,
-                field_value: field.normalized_value,
-                block_number,
-                transaction_hash: event.transaction_hash.clone(),
-                log_index,
-                is_removed: event.is_removed,
-                indexed_at: indexed_at_offset,
-            });
+    for event in events {
+        let chain_id = as_u64(event.chain_id, "chain_id")?;
+        let block_number = as_u64(event.block_number, "block_number")?;
+        let log_index = as_u32(event.log_index, "log_index")?;
+        let decoded_fields = json!({
+            "indexed": event.indexed_fields.clone(),
+            "non_indexed": event.non_indexed_fields.clone(),
+        })
+        .to_string();
+
+        main_rows.push(DecodedEventRow {
+            id: event.id,
+            raw_log_id: event.raw_log_id,
+            subscription_id: event.subscription_id,
+            chain_id,
+            block_number,
+            block_hash: event.block_hash.clone(),
+            transaction_hash: event.transaction_hash.clone(),
+            log_index,
+            contract_address: event.contract_address.clone(),
+            event_name: event.event_name.clone(),
+            topic0: event.topic0.clone(),
+            abi_id: event.abi_id,
+            indexed_fields: event.indexed_fields.to_string(),
+            non_indexed_fields: event.non_indexed_fields.to_string(),
+            decoded_fields,
+            is_removed: event.is_removed,
+            decoded_at: to_offset_datetime(event.decoded_at)?,
+            indexed_at: indexed_at_offset,
+        });
+
+        for field in &event.fields {
+            if let Ok(address) = crate::shared::validation::normalize_address(&field.normalized_value) {
+                address_rows.push(AddressIndexRow {
+                    chain_id,
+                    address,
+                    block_number,
+                    transaction_hash: event.transaction_hash.clone(),
+                    log_index,
+                    event_name: event.event_name.clone(),
+                    contract_address: event.contract_address.clone(),
+                    role: "field".to_owned(),
+                    field_name: field.field_name.clone(),
+                    is_removed: event.is_removed,
+                    indexed_at: indexed_at_offset,
+                });
+            }
+
+            if should_index_field_value(&field.json_value) {
+                field_rows.push(EventFieldIndexRow {
+                    chain_id,
+                    topic0: event.topic0.clone(),
+                    field_name: field.field_name.clone(),
+                    field_value: field.normalized_value.clone(),
+                    block_number,
+                    transaction_hash: event.transaction_hash.clone(),
+                    log_index,
+                    is_removed: event.is_removed,
+                    indexed_at: indexed_at_offset,
+                });
+            }
         }
     }
 
+    write_rows(client, "decoded_events", &main_rows).await?;
     if !address_rows.is_empty() {
         write_rows(client, "address_index", &address_rows).await?;
     }

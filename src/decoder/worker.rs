@@ -57,54 +57,19 @@ pub async fn run(state: ApplicationState) {
 
 pub async fn decode_once(state: &ApplicationState) -> Result<(), ApplicationError> {
     let batch = fetch_decode_batch(state).await?;
+    if batch.is_empty() {
+        return Ok(());
+    }
+
     #[cfg(feature = "clickhouse")]
-    let mut clickhouse_blocked_subscriptions = HashSet::new();
+    if state.configuration.clickhouse.enabled {
+        return decode_clickhouse_batch(state, batch).await;
+    }
 
     for item in batch {
-        #[cfg(feature = "clickhouse")]
-        if state.configuration.clickhouse.enabled
-            && item
-                .subscription_id
-                .is_some_and(|id| clickhouse_blocked_subscriptions.contains(&id))
-        {
-            continue;
-        }
-
         // The success path marks the queue entry inside its own transaction, so here we
         // only need to record failures.
         if let Err(error) = decode_work_item(state, &item).await {
-            #[cfg(feature = "clickhouse")]
-            if state.configuration.clickhouse.enabled
-                && matches!(&error, ApplicationError::ExternalService(_))
-            {
-                // Force the next retry to perform a fresh health check and schema setup.
-                // The queue row remains durable, so no event is skipped while ClickHouse is down.
-                state.clear_clickhouse_client();
-                mark_queue_status(
-                    &state.pool,
-                    item.queue_id,
-                    "clickhouse_retrying",
-                    Some(&error.public_message()),
-                )
-                .await?;
-                if let Some(subscription_id) = item.subscription_id {
-                    clickhouse_blocked_subscriptions.insert(subscription_id);
-                    subscriptions::mark_clickhouse_write_retrying(
-                        &state.pool,
-                        subscription_id,
-                        &error.public_message(),
-                    )
-                    .await?;
-                }
-                tracing::error!(
-                    raw_log_id = %item.raw_log_id,
-                    block_number = item.block_number,
-                    error = %error,
-                    "ClickHouse write failed; keeping subscription queued for retry"
-                );
-                continue;
-            }
-
             mark_queue_status(
                 &state.pool,
                 item.queue_id,
@@ -116,6 +81,141 @@ pub async fn decode_once(state: &ApplicationState) -> Result<(), ApplicationErro
     }
 
     Ok(())
+}
+
+#[cfg(feature = "clickhouse")]
+async fn decode_clickhouse_batch(
+    state: &ApplicationState,
+    batch: Vec<DecodeWorkItem>,
+) -> Result<(), ApplicationError> {
+    let client = match crate::clickhouse::active_client(state).await? {
+        Some(c) => c,
+        None => {
+            return Err(ApplicationError::ExternalService(
+                "ClickHouse is enabled but no client is available".to_owned(),
+            ));
+        }
+    };
+
+    let mut decoded_events = Vec::with_capacity(batch.len());
+    let mut completed_queue_ids = Vec::with_capacity(batch.len());
+    let mut affected_subscriptions = HashSet::new();
+
+    for item in &batch {
+        match prepare_clickhouse_event(state, item).await {
+            Ok(event) => {
+                if let Some(sub_id) = item.subscription_id {
+                    affected_subscriptions.insert(sub_id);
+                }
+                completed_queue_ids.push(item.queue_id);
+                decoded_events.push(event);
+            }
+            Err(error) => {
+                mark_queue_status(
+                    &state.pool,
+                    item.queue_id,
+                    "error",
+                    Some(&error.public_message()),
+                )
+                .await?;
+            }
+        }
+    }
+
+    if !decoded_events.is_empty() {
+        if let Err(error) = crate::clickhouse::write_indexed_events(&client, &decoded_events).await {
+            state.clear_clickhouse_client();
+            let err_msg = error.to_string();
+            for id in &completed_queue_ids {
+                let _ = mark_queue_status(
+                    &state.pool,
+                    *id,
+                    "clickhouse_retrying",
+                    Some(&err_msg),
+                )
+                .await;
+            }
+            for sub_id in &affected_subscriptions {
+                let _ = subscriptions::mark_clickhouse_write_retrying(
+                    &state.pool,
+                    *sub_id,
+                    &err_msg,
+                )
+                .await;
+            }
+            tracing::error!(
+                event_count = decoded_events.len(),
+                error = %error,
+                "ClickHouse batch write failed; keeping queue items for retry"
+            );
+            return Err(ApplicationError::ExternalService(format!(
+                "ClickHouse batch write failed: {error}"
+            )));
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE eventlake_decode_queue
+            SET status = 'decoded',
+                updated_at = now()
+            WHERE id = ANY($1)
+            "#,
+        )
+        .bind(&completed_queue_ids)
+        .execute(&state.pool)
+        .await?;
+
+        for sub_id in affected_subscriptions {
+            let _ = subscriptions::resume_after_clickhouse_writes(&state.pool, sub_id).await;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "clickhouse")]
+async fn prepare_clickhouse_event(
+    state: &ApplicationState,
+    item: &DecodeWorkItem,
+) -> Result<crate::clickhouse::IndexedEvent, ApplicationError> {
+    let abi_id = item
+        .abi_id
+        .ok_or_else(|| ApplicationError::BadRequest("raw log has no ABI association".to_owned()))?;
+    let topic0 = topic0_from_value(&item.topics)?;
+
+    let cached_abi = abi_registry::load_cached_abi(state, abi_id).await?;
+    let event = cached_abi
+        .event_for_topic0(&topic0)
+        .ok_or_else(|| ApplicationError::BadRequest(format!("no ABI event for topic0 {topic0}")))?;
+    let event_name = event.name.clone();
+
+    let topics = parse_topics(&item.topics)?;
+    let data = parse_data(&item.data)?;
+    let decoded = event
+        .decode_log_parts(topics, &data)
+        .map_err(|error| ApplicationError::BadRequest(format!("decode failed: {error}")))?;
+
+    let decoded_fields = decoded_event_fields(event, decoded.indexed, decoded.body)?;
+
+    Ok(crate::clickhouse::IndexedEvent {
+        id: item.raw_log_id,
+        raw_log_id: item.raw_log_id,
+        subscription_id: item.subscription_id,
+        chain_id: item.chain_id,
+        block_number: item.block_number,
+        block_hash: item.block_hash.clone(),
+        transaction_hash: item.transaction_hash.clone(),
+        log_index: item.log_index,
+        contract_address: item.contract_address.clone(),
+        event_name,
+        topic0,
+        abi_id: Some(abi_id),
+        indexed_fields: decoded_fields.indexed_json,
+        non_indexed_fields: decoded_fields.non_indexed_json,
+        fields: decoded_fields.all_fields,
+        is_removed: false,
+        decoded_at: Utc::now(),
+    })
 }
 
 async fn fetch_decode_batch(
@@ -162,8 +262,6 @@ async fn decode_work_item(
         .ok_or_else(|| ApplicationError::BadRequest("raw log has no ABI association".to_owned()))?;
     let topic0 = topic0_from_value(&item.topics)?;
 
-    // Pull the parsed ABI from the in-memory cache instead of re-reading and re-parsing
-    // the ABI JSON from the database on every single log.
     let cached_abi = abi_registry::load_cached_abi(state, abi_id).await?;
     let event = cached_abi
         .event_for_topic0(&topic0)
@@ -188,7 +286,6 @@ async fn decode_work_item(
                 )
             })?;
         let event = crate::clickhouse::IndexedEvent {
-            // Reusing the raw-log id makes retries idempotent at the event boundary.
             id: item.raw_log_id,
             raw_log_id: item.raw_log_id,
             subscription_id: item.subscription_id,
@@ -219,16 +316,11 @@ async fn decode_work_item(
     }
 
     let decoded_event_id = Uuid::new_v4();
-    indexing::partition_manager::ensure_decoded_partitions_for_range(
-        &state.pool,
-        item.block_number,
-        item.block_number,
-    )
-    .await?;
 
     // The decoded event, its PostgreSQL-derived indexes, the contract activity bump, and the
     // queue status are one logical unit when the PostgreSQL-only mode is active.
     let mut transaction = state.pool.begin().await?;
+
 
     // Partitioned tables cannot return system columns (e.g. xmax), so we detect a fresh
     // insert with DO NOTHING + RETURNING. On a real insert the row is complete; on a

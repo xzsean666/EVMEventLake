@@ -1,8 +1,15 @@
+use std::{
+    collections::HashSet,
+    sync::{LazyLock, RwLock},
+};
 use tokio::time::{MissedTickBehavior, interval};
 
 use crate::{app::application_state::ApplicationState, shared::error::ApplicationError};
 
 const PARTITION_BLOCK_SIZE: i64 = 1_000_000;
+
+static CREATED_PARTITIONS: LazyLock<RwLock<HashSet<String>>> =
+    LazyLock::new(|| RwLock::new(HashSet::new()));
 
 pub async fn run(state: ApplicationState) {
     let mut ticker = interval(state.configuration.background.partition_tick);
@@ -31,6 +38,8 @@ pub async fn ensure_partitions(pool: &sqlx::PgPool) -> Result<(), ApplicationErr
         let start = floor_partition_start(block_number);
         create_raw_partition(pool, start).await?;
         create_raw_partition(pool, start + PARTITION_BLOCK_SIZE).await?;
+        create_decoded_partition(pool, start).await?;
+        create_decoded_partition(pool, start + PARTITION_BLOCK_SIZE).await?;
     }
 
     Ok(())
@@ -88,6 +97,15 @@ fn floor_partition_start(block_number: i64) -> i64 {
 async fn create_raw_partition(pool: &sqlx::PgPool, start: i64) -> Result<(), ApplicationError> {
     let end = start + PARTITION_BLOCK_SIZE;
     let raw_partition = format!("eventlake_raw_logs_{}_{}", start, end);
+    {
+        let cache = CREATED_PARTITIONS
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cache.contains(&raw_partition) {
+            return Ok(());
+        }
+    }
+
     let raw_sql = format!(
         "CREATE TABLE IF NOT EXISTS {raw_partition} PARTITION OF eventlake_raw_logs FOR VALUES FROM ({start}) TO ({end})"
     );
@@ -96,12 +114,26 @@ async fn create_raw_partition(pool: &sqlx::PgPool, start: i64) -> Result<(), App
         .execute(pool)
         .await?;
 
+    let mut cache = CREATED_PARTITIONS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.insert(raw_partition);
+
     Ok(())
 }
 
 async fn create_decoded_partition(pool: &sqlx::PgPool, start: i64) -> Result<(), ApplicationError> {
     let end = start + PARTITION_BLOCK_SIZE;
     let decoded_partition = format!("eventlake_decoded_events_{}_{}", start, end);
+    {
+        let cache = CREATED_PARTITIONS
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cache.contains(&decoded_partition) {
+            return Ok(());
+        }
+    }
+
     let decoded_sql = format!(
         "CREATE TABLE IF NOT EXISTS {decoded_partition} PARTITION OF eventlake_decoded_events FOR VALUES FROM ({start}) TO ({end})"
     );
@@ -109,6 +141,11 @@ async fn create_decoded_partition(pool: &sqlx::PgPool, start: i64) -> Result<(),
     sqlx::query(sqlx::AssertSqlSafe(decoded_sql))
         .execute(pool)
         .await?;
+
+    let mut cache = CREATED_PARTITIONS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.insert(decoded_partition);
 
     Ok(())
 }

@@ -3,9 +3,14 @@ use alloy_primitives::U256;
 use crate::shared::error::ApplicationError;
 
 pub fn parse_hex_u64(value: &str) -> Result<i64, ApplicationError> {
-    let trimmed = value.strip_prefix("0x").unwrap_or(value);
-    i64::from_str_radix(trimmed, 16)
-        .map_err(|_| ApplicationError::BadRequest(format!("invalid hex number: {value}")))
+    let trimmed = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    let parsed = u64::from_str_radix(trimmed, 16)
+        .map_err(|_| ApplicationError::BadRequest(format!("invalid hex number: {value}")))?;
+    i64::try_from(parsed)
+        .map_err(|_| ApplicationError::BadRequest(format!("hex number exceeds i64::MAX: {value}")))
 }
 
 pub fn parse_hex_u64_quantity(value: &str) -> Result<u64, ApplicationError> {

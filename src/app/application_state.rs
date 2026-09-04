@@ -20,6 +20,7 @@ pub struct ApplicationState {
     pub pool: PgPool,
     pub http_client: Client,
     pub abi_cache: AbiCache,
+    pub api_key_last_used: Arc<RwLock<HashMap<Uuid, std::time::Instant>>>,
     #[cfg(feature = "clickhouse")]
     clickhouse: Arc<RwLock<Option<clickhouse::Client>>>,
 }
@@ -34,6 +35,7 @@ impl ApplicationState {
                 .build()
                 .expect("HTTP client builds"),
             abi_cache: Arc::new(RwLock::new(HashMap::new())),
+            api_key_last_used: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "clickhouse")]
             clickhouse: Arc::new(RwLock::new(None)),
         }

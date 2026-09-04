@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use axum::{
     Json, Router,
@@ -7,7 +7,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
+use sqlx::{FromRow, QueryBuilder};
 use utoipa::{OpenApi, ToSchema};
 use uuid::Uuid;
 
@@ -365,6 +365,16 @@ async fn create_contract_subscriptions_batch(
 ) -> Result<Json<ApiResponse<Vec<SubscriptionRecord>>>, ApplicationError> {
     principal.require_admin()?;
 
+    if request.chain_id <= 0 {
+        return Err(ApplicationError::BadRequest(
+            "chain_id must be greater than 0".to_owned(),
+        ));
+    }
+    if request.start_block < 0 {
+        return Err(ApplicationError::BadRequest(
+            "start_block must be greater than or equal to 0".to_owned(),
+        ));
+    }
     if request.contract_addresses.is_empty() {
         return Err(ApplicationError::BadRequest(
             "contract_addresses must contain at least one address".to_owned(),
@@ -387,32 +397,109 @@ async fn create_contract_subscriptions_batch(
         }
     }
 
-    let mut records = Vec::with_capacity(addresses.len());
-    for contract_address in addresses {
-        let response = create_subscription(
-            principal.clone(),
-            State(state.clone()),
-            Json(CreateSubscriptionRequest {
-                chain_id: request.chain_id,
-                contract_address: Some(contract_address),
-                collection_scope: Some(CollectionScope::Contract),
-                abi_id: request.abi_id,
-                start_block: request.start_block,
-                realtime_enabled: request.realtime_enabled,
-                min_block_window: request.min_block_window,
-                max_block_window: request.max_block_window,
-            }),
-        )
+    let collection_policy = chains::get_collection_policy(&state.pool, request.chain_id).await?;
+    let min_block_window = request
+        .min_block_window
+        .unwrap_or(collection_policy.default_min_block_window);
+    let max_block_window = request
+        .max_block_window
+        .unwrap_or(collection_policy.default_max_block_window);
+    validate_block_windows(min_block_window, max_block_window)?;
+
+    // Single transaction with a single advisory lock per chain
+    let mut transaction = state.pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(request.chain_id)
+        .execute(&mut *transaction)
         .await?;
-        let record = response.0.data.ok_or_else(|| {
-            ApplicationError::Internal(
-                "subscription creation returned an empty success response".to_owned(),
-            )
-        })?;
-        records.push(record);
+
+    let all_events_active = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM eventlake_subscriptions WHERE chain_id = $1 AND collection_scope = 'all_events' AND active = true)",
+    )
+    .bind(request.chain_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+
+    if all_events_active {
+        return Err(ApplicationError::Conflict(
+            "an active all_events subscription already collects this chain".to_owned(),
+        ));
     }
 
-    Ok(response::success(records))
+    let realtime = request.realtime_enabled.unwrap_or(true);
+    for chunk in addresses.chunks(200) {
+        let mut builder = QueryBuilder::new(
+            r#"
+            INSERT INTO eventlake_subscriptions (
+                id, chain_id, contract_address, collection_scope, abi_id, start_block, current_block,
+                min_block_window, max_block_window, current_block_window, realtime_enabled
+            )
+            "#,
+        );
+        builder.push_values(chunk, |mut row, addr| {
+            row.push_bind(Uuid::new_v4())
+                .push_bind(request.chain_id)
+                .push_bind(addr)
+                .push_bind("contract")
+                .push_bind(request.abi_id)
+                .push_bind(request.start_block)
+                .push_bind(request.start_block)
+                .push_bind(min_block_window)
+                .push_bind(max_block_window)
+                .push_bind(max_block_window)
+                .push_bind(realtime);
+        });
+        builder.push(" ON CONFLICT DO NOTHING");
+        builder.build().execute(&mut *transaction).await?;
+    }
+
+    for chunk in addresses.chunks(200) {
+        let mut builder = QueryBuilder::new(
+            r#"
+            INSERT INTO eventlake_contract_registry (id, chain_id, contract_address, abi_id)
+            "#,
+        );
+        builder.push_values(chunk, |mut row, addr| {
+            row.push_bind(Uuid::new_v4())
+                .push_bind(request.chain_id)
+                .push_bind(addr)
+                .push_bind(request.abi_id);
+        });
+        builder.push(
+            r#"
+            ON CONFLICT (chain_id, contract_address) DO UPDATE
+            SET abi_id = EXCLUDED.abi_id,
+                updated_at = now()
+            "#,
+        );
+        builder.build().execute(&mut *transaction).await?;
+    }
+
+    let select_query = format!(
+        "SELECT {SUBSCRIPTION_COLUMNS} FROM eventlake_subscriptions \
+         WHERE chain_id = $1 AND collection_scope = 'contract' \
+           AND contract_address = ANY($2) AND active = true"
+    );
+    let records = sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(select_query))
+        .bind(request.chain_id)
+        .bind(&addresses)
+        .fetch_all(&mut *transaction)
+        .await?;
+
+    transaction.commit().await?;
+
+    let mut record_map: HashMap<String, SubscriptionRecord> = HashMap::new();
+    for r in records {
+        if let Some(ref ca) = r.contract_address {
+            record_map.insert(ca.clone(), r);
+        }
+    }
+    let ordered_records: Vec<SubscriptionRecord> = addresses
+        .into_iter()
+        .filter_map(|addr| record_map.remove(&addr))
+        .collect();
+
+    Ok(response::success(ordered_records))
 }
 
 #[utoipa::path(

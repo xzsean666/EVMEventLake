@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use sqlx::QueryBuilder;
 use tokio::time::{MissedTickBehavior, interval};
 use uuid::Uuid;
 
@@ -355,11 +356,15 @@ async fn collect_subscription_batch(
         }
 
         if postgres_raw_storage {
-            for log in &logs {
-                let addr = normalize_address(&log.address)?;
-                let sub_id = address_to_sub_id.get(&addr).copied();
-                store_raw_log(&state.pool, sub_id, chain_id, log).await?;
-            }
+            let items = logs
+                .iter()
+                .map(|log| {
+                    let addr = normalize_address(&log.address)?;
+                    let sub_id = address_to_sub_id.get(&addr).copied();
+                    prepare_raw_log_insert(sub_id, chain_id, log)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            store_raw_logs_batch(&state.pool, &items).await?;
         }
 
         let next_block = to_block + 1;
@@ -653,15 +658,13 @@ async fn collect_subscription(
         }
 
         if postgres_raw_storage {
-            for log in &logs {
-                store_raw_log(
-                    &state.pool,
-                    Some(subscription.id),
-                    subscription.chain_id,
-                    log,
-                )
-                .await?;
-            }
+            let items = logs
+                .iter()
+                .map(|log| {
+                    prepare_raw_log_insert(Some(subscription.id), subscription.chain_id, log)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            store_raw_logs_batch(&state.pool, &items).await?;
         }
 
         let next_block = to_block + 1;
@@ -690,12 +693,25 @@ async fn collect_subscription(
     }
 }
 
-async fn store_raw_log(
-    pool: &sqlx::PgPool,
+struct RawLogInsertItem {
+    subscription_id: Option<Uuid>,
+    chain_id: i64,
+    contract_address: String,
+    block_number: i64,
+    block_hash: String,
+    transaction_hash: String,
+    transaction_index: i64,
+    log_index: i64,
+    topics_value: serde_json::Value,
+    data: String,
+    removed: bool,
+}
+
+fn prepare_raw_log_insert(
     subscription_id: Option<Uuid>,
     chain_id: i64,
     log: &RpcLog,
-) -> Result<(), ApplicationError> {
+) -> Result<RawLogInsertItem, ApplicationError> {
     let block_number = parse_hex_u64(&log.block_number)?;
     let transaction_index = parse_hex_u64(&log.transaction_index)?;
     let log_index = parse_hex_u64(&log.log_index)?;
@@ -704,39 +720,78 @@ async fn store_raw_log(
     let topics_value = serde_json::to_value(&topics)
         .map_err(|error| ApplicationError::BadRequest(error.to_string()))?;
 
-    // PostgreSQL-only mode still retains raw logs, but raw-event-lake mode has no local
-    // decode queue. A ClickHouse deployment bypasses this function completely.
-    sqlx::query(
-        r#"
-        INSERT INTO eventlake_raw_logs (
-            id, subscription_id, chain_id, contract_address, block_number, block_hash,
-            transaction_hash, transaction_index, log_index, topics, data, removed
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-        ON CONFLICT (chain_id, transaction_hash, log_index, block_number) DO UPDATE
-        SET removed = false,
-            block_hash = EXCLUDED.block_hash,
-            data = EXCLUDED.data,
-            topics = EXCLUDED.topics,
-            ingested_at = now()
-        "#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(subscription_id)
-    .bind(chain_id)
-    .bind(contract_address)
-    .bind(block_number)
-    .bind(&log.block_hash)
-    .bind(&log.transaction_hash)
-    .bind(transaction_index)
-    .bind(log_index)
-    .bind(topics_value)
-    .bind(&log.data)
-    .bind(log.removed.unwrap_or(false))
-    .execute(pool)
-    .await?;
+    Ok(RawLogInsertItem {
+        subscription_id,
+        chain_id,
+        contract_address,
+        block_number,
+        block_hash: log.block_hash.clone(),
+        transaction_hash: log.transaction_hash.clone(),
+        transaction_index,
+        log_index,
+        topics_value,
+        data: log.data.clone(),
+        removed: log.removed.unwrap_or(false),
+    })
+}
+
+async fn store_raw_logs_batch(
+    pool: &sqlx::PgPool,
+    items: &[RawLogInsertItem],
+) -> Result<(), ApplicationError> {
+    if items.is_empty() {
+        return Ok(());
+    }
+
+    // Insert in chunks of 200 to stay well under PostgreSQL's 65,535 bind parameter limit
+    for chunk in items.chunks(200) {
+        let mut builder = QueryBuilder::new(
+            r#"
+            INSERT INTO eventlake_raw_logs (
+                id, subscription_id, chain_id, contract_address, block_number, block_hash,
+                transaction_hash, transaction_index, log_index, topics, data, removed
+            )
+            "#,
+        );
+        builder.push_values(chunk, |mut row, item| {
+            row.push_bind(Uuid::new_v4())
+                .push_bind(item.subscription_id)
+                .push_bind(item.chain_id)
+                .push_bind(&item.contract_address)
+                .push_bind(item.block_number)
+                .push_bind(&item.block_hash)
+                .push_bind(&item.transaction_hash)
+                .push_bind(item.transaction_index)
+                .push_bind(item.log_index)
+                .push_bind(&item.topics_value)
+                .push_bind(&item.data)
+                .push_bind(item.removed);
+        });
+        builder.push(
+            r#"
+            ON CONFLICT (chain_id, transaction_hash, log_index, block_number) DO UPDATE
+            SET removed = false,
+                block_hash = EXCLUDED.block_hash,
+                data = EXCLUDED.data,
+                topics = EXCLUDED.topics,
+                ingested_at = now()
+            "#,
+        );
+        builder.build().execute(pool).await?;
+    }
 
     Ok(())
+}
+
+#[allow(dead_code)]
+async fn store_raw_log(
+    pool: &sqlx::PgPool,
+    subscription_id: Option<Uuid>,
+    chain_id: i64,
+    log: &RpcLog,
+) -> Result<(), ApplicationError> {
+    let item = prepare_raw_log_insert(subscription_id, chain_id, log)?;
+    store_raw_logs_batch(pool, &[item]).await
 }
 
 #[cfg(feature = "clickhouse")]

@@ -115,6 +115,14 @@ pub async fn mirror_decoded_event(
     crate::clickhouse::write_indexed_event(client, input).await
 }
 
+#[cfg(feature = "clickhouse")]
+pub async fn mirror_decoded_events(
+    client: &clickhouse::Client,
+    inputs: &[crate::clickhouse::IndexedEvent],
+) -> anyhow::Result<()> {
+    crate::clickhouse::write_indexed_events(client, inputs).await
+}
+
 fn should_index_field_value(value: &Value) -> bool {
     matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_))
 }

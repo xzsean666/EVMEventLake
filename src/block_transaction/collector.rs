@@ -7,18 +7,43 @@ use crate::{
 use crate::{chains, rpc_pool};
 
 pub async fn collect_once(state: &ApplicationState) -> Result<(), ApplicationError> {
-    let sync_states = state::runnable_sync_states(&state.pool, 10).await?;
+    let limit = (state.configuration.block_transaction.max_concurrency.max(1) * 2) as i64;
+    let sync_states = state::runnable_sync_states(&state.pool, limit.max(10)).await?;
+    if sync_states.is_empty() {
+        return Ok(());
+    }
+
+    let concurrency = state.configuration.block_transaction.max_concurrency.max(1) as usize;
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let mut tasks = tokio::task::JoinSet::new();
 
     for sync_state in sync_states {
-        if let Err(error) = collect_chain(state, &sync_state).await {
-            tracing::warn!(
-                chain_id = sync_state.chain_id,
-                error = %error,
-                "block-transaction collection tick failed for chain"
-            );
-            let _ =
-                state::mark_sync_error(&state.pool, sync_state.chain_id, &error.public_message())
-                    .await;
+        let permit = semaphore.clone().acquire_owned().await.map_err(|_| {
+            ApplicationError::Internal("failed to acquire concurrency permit".to_owned())
+        })?;
+        let state = state.clone();
+
+        tasks.spawn(async move {
+            let _permit = permit;
+            if let Err(error) = collect_chain(&state, &sync_state).await {
+                tracing::warn!(
+                    chain_id = sync_state.chain_id,
+                    error = %error,
+                    "block-transaction collection tick failed for chain"
+                );
+                let _ = state::mark_sync_error(
+                    &state.pool,
+                    sync_state.chain_id,
+                    &error.public_message(),
+                )
+                .await;
+            }
+        });
+    }
+
+    while let Some(res) = tasks.join_next().await {
+        if let Err(join_err) = res {
+            tracing::error!(error = %join_err, "block-transaction collector task panicked");
         }
     }
 

@@ -45,7 +45,25 @@ async fn dashboard_summary(
     _principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
 ) -> Result<Json<ApiResponse<DashboardSummary>>, ApplicationError> {
-    let summary = sqlx::query_as::<_, DashboardSummary>(
+    #[cfg(feature = "clickhouse")]
+    let ch_enabled = state.configuration.clickhouse.enabled;
+    #[cfg(not(feature = "clickhouse"))]
+    let ch_enabled = false;
+
+    let query_str = if ch_enabled {
+        r#"
+        SELECT
+            (SELECT COUNT(*)::BIGINT FROM eventlake_subscriptions WHERE active = true) AS active_jobs,
+            (SELECT COUNT(*)::BIGINT FROM eventlake_subscriptions WHERE status = 'paused') AS paused_jobs,
+            (SELECT COUNT(*)::BIGINT FROM eventlake_subscriptions WHERE status = 'error') AS errored_jobs,
+            0::BIGINT AS total_raw_logs,
+            0::BIGINT AS total_decoded_events,
+            (SELECT COUNT(*)::BIGINT FROM eventlake_rpc_endpoints WHERE status = 'healthy') AS healthy_rpc_endpoints,
+            (SELECT COUNT(*)::BIGINT FROM eventlake_rpc_endpoints WHERE status = 'unhealthy') AS unhealthy_rpc_endpoints,
+            (SELECT COUNT(*)::BIGINT FROM eventlake_block_transaction_sync_state WHERE status IN ('syncing', 'caught_up', 'realtime_syncing')) AS active_block_sync_jobs,
+            (SELECT COUNT(*)::BIGINT FROM eventlake_block_transaction_sync_state WHERE status = 'error') AS errored_block_sync_jobs
+        "#
+    } else {
         r#"
         SELECT
             (SELECT COUNT(*)::BIGINT FROM eventlake_subscriptions WHERE active = true) AS active_jobs,
@@ -57,10 +75,12 @@ async fn dashboard_summary(
             (SELECT COUNT(*)::BIGINT FROM eventlake_rpc_endpoints WHERE status = 'unhealthy') AS unhealthy_rpc_endpoints,
             (SELECT COUNT(*)::BIGINT FROM eventlake_block_transaction_sync_state WHERE status IN ('syncing', 'caught_up', 'realtime_syncing')) AS active_block_sync_jobs,
             (SELECT COUNT(*)::BIGINT FROM eventlake_block_transaction_sync_state WHERE status = 'error') AS errored_block_sync_jobs
-        "#,
-    )
-    .fetch_one(&state.pool)
-    .await?;
+        "#
+    };
+
+    let summary = sqlx::query_as::<_, DashboardSummary>(query_str)
+        .fetch_one(&state.pool)
+        .await?;
 
     #[cfg(feature = "clickhouse")]
     let summary = if state.configuration.clickhouse.enabled {

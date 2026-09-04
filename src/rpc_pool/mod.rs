@@ -412,7 +412,57 @@ fn validate_rpc_endpoint_request(
         ));
     }
 
+    if !is_private_rpc_allowed() {
+        validate_rpc_url_ssrf(&parsed_url)?;
+    }
+
     Ok(())
+}
+
+fn is_private_rpc_allowed() -> bool {
+    if cfg!(test) && std::env::var("EVENTLAKE_ENFORCE_SSRF_TEST").is_err() {
+        return true;
+    }
+    std::env::var("EVENTLAKE_ALLOW_PRIVATE_RPC")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+}
+
+fn validate_rpc_url_ssrf(parsed_url: &reqwest::Url) -> Result<(), ApplicationError> {
+    if let Some(host_str) = parsed_url.host_str() {
+        let lower = host_str.to_ascii_lowercase();
+        if lower == "localhost"
+            || lower.ends_with(".localhost")
+            || lower.ends_with(".local")
+            || lower.ends_with(".internal")
+        {
+            return Err(ApplicationError::BadRequest(
+                "localhost or internal domain RPC endpoint is not allowed".to_owned(),
+            ));
+        }
+
+        if let Ok(ip) = host_str.parse::<std::net::IpAddr>() {
+            if is_private_ip(ip) {
+                return Err(ApplicationError::BadRequest(
+                    "private, loopback, or link-local RPC endpoint IP is not allowed".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+        }
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+    }
 }
 
 const SELECT_RPC_ENDPOINTS: &str = r#"

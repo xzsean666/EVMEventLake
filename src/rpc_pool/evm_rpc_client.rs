@@ -451,9 +451,8 @@ pub async fn eth_get_blocks_by_number_batch(
         .error_for_status()
         .map_err(|error| ApplicationError::ExternalService(error.to_string()))?;
 
-    let response_value = http_response
-        .json::<Value>()
-        .await
+    let raw_bytes = read_bounded_bytes(http_response, DEFAULT_MAX_RESPONSE_BYTES).await?;
+    let response_value: Value = serde_json::from_slice(&raw_bytes)
         .map_err(|error| ApplicationError::ExternalService(error.to_string()))?;
 
     parse_batch_block_response(chain_id, block_numbers, response_value)
@@ -598,9 +597,10 @@ where
         .await
         .map_err(|error| ApplicationError::ExternalService(error.to_string()))?
         .error_for_status()
-        .map_err(|error| ApplicationError::ExternalService(error.to_string()))?
-        .json::<JsonRpcResponse<T>>()
-        .await
+        .map_err(|error| ApplicationError::ExternalService(error.to_string()))?;
+
+    let raw_bytes = read_bounded_bytes(response, DEFAULT_MAX_RESPONSE_BYTES).await?;
+    let response: JsonRpcResponse<T> = serde_json::from_slice(&raw_bytes)
         .map_err(|error| ApplicationError::ExternalService(error.to_string()))?;
 
     if let Some(error) = response.error {
@@ -613,6 +613,42 @@ where
     response.result.ok_or_else(|| {
         ApplicationError::ExternalService("json-rpc response missing result".to_owned())
     })
+}
+
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 67_108_864; // 64 MB
+
+async fn read_bounded_bytes(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ApplicationError> {
+    if let Some(content_length) = response.content_length() {
+        if content_length as usize > max_bytes {
+            return Err(ApplicationError::ExternalService(format!(
+                "RPC response size {content_length} bytes exceeds maximum allowed limit of {max_bytes} bytes"
+            )));
+        }
+    }
+
+    let initial_cap = response
+        .content_length()
+        .unwrap_or(0)
+        .min(max_bytes as u64) as usize;
+    let mut buffer = Vec::with_capacity(initial_cap);
+
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| ApplicationError::ExternalService(e.to_string()))?
+    {
+        if buffer.len() + chunk.len() > max_bytes {
+            return Err(ApplicationError::ExternalService(format!(
+                "RPC response streamed size exceeded limit of {max_bytes} bytes"
+            )));
+        }
+        buffer.extend_from_slice(&chunk);
+    }
+
+    Ok(buffer)
 }
 
 #[cfg(test)]
