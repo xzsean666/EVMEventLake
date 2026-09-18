@@ -4,13 +4,11 @@ pub mod auth;
 pub mod background;
 pub mod block_transaction;
 pub mod chains;
-#[cfg(feature = "clickhouse")]
 pub mod clickhouse;
 pub mod collector;
 pub mod configuration;
 pub mod dashboard;
 pub mod database;
-pub mod indexing;
 pub mod reorg;
 pub mod rpc_pool;
 pub mod search;

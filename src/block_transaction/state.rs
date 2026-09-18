@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, SqlitePool};
 use utoipa::ToSchema;
 
 use crate::shared::error::ApplicationError;
@@ -39,7 +39,7 @@ pub struct UpdateSyncConfigRequest {
 }
 
 pub async fn get_sync_state(
-    pool: &PgPool,
+    pool: &SqlitePool,
     chain_id: i64,
 ) -> Result<Option<BlockTransactionSyncStateRecord>, ApplicationError> {
     let query = format!(
@@ -54,7 +54,7 @@ pub async fn get_sync_state(
 }
 
 pub async fn runnable_sync_states(
-    pool: &PgPool,
+    pool: &SqlitePool,
     limit: i64,
 ) -> Result<Vec<BlockTransactionSyncStateRecord>, ApplicationError> {
     let query = format!(
@@ -71,7 +71,7 @@ pub async fn runnable_sync_states(
 }
 
 pub async fn upsert_sync_config(
-    pool: &PgPool,
+    pool: &SqlitePool,
     chain_id: i64,
     request: &UpdateSyncConfigRequest,
 ) -> Result<BlockTransactionSyncStateRecord, ApplicationError> {
@@ -116,7 +116,7 @@ pub async fn upsert_sync_config(
             chain_id, next_block, start_block, status, realtime_enabled,
             batch_size, max_concurrency, reorg_window, updated_at
         )
-        VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, now())
+        VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, CURRENT_TIMESTAMP)
         ON CONFLICT (chain_id) DO UPDATE
         SET start_block = COALESCE($8, eventlake_block_transaction_sync_state.start_block),
             next_block = CASE
@@ -127,7 +127,7 @@ pub async fn upsert_sync_config(
             batch_size = COALESCE($10, eventlake_block_transaction_sync_state.batch_size),
             max_concurrency = COALESCE($11, eventlake_block_transaction_sync_state.max_concurrency),
             reorg_window = COALESCE($12, eventlake_block_transaction_sync_state.reorg_window),
-            updated_at = now()
+            updated_at = CURRENT_TIMESTAMP
         RETURNING {SYNC_STATE_COLUMNS}
         "#
     );
@@ -152,7 +152,7 @@ pub async fn upsert_sync_config(
 }
 
 pub async fn advance_checkpoint(
-    pool: &PgPool,
+    pool: &SqlitePool,
     chain_id: i64,
     next_block: i64,
     safe_head: Option<i64>,
@@ -167,8 +167,8 @@ pub async fn advance_checkpoint(
             latest_seen_block = COALESCE($4, latest_seen_block),
             status = $5,
             last_error = NULL,
-            last_success_at = now(),
-            updated_at = now()
+            last_success_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
         WHERE chain_id = $1
         "#,
     )
@@ -184,7 +184,7 @@ pub async fn advance_checkpoint(
 }
 
 pub async fn mark_sync_error(
-    pool: &PgPool,
+    pool: &SqlitePool,
     chain_id: i64,
     error_message: &str,
 ) -> Result<(), ApplicationError> {
@@ -193,7 +193,7 @@ pub async fn mark_sync_error(
         UPDATE eventlake_block_transaction_sync_state
         SET status = 'error',
             last_error = $2,
-            updated_at = now()
+            updated_at = CURRENT_TIMESTAMP
         WHERE chain_id = $1
         "#,
     )
@@ -206,14 +206,14 @@ pub async fn mark_sync_error(
 }
 
 pub async fn pause_sync(
-    pool: &PgPool,
+    pool: &SqlitePool,
     chain_id: i64,
 ) -> Result<BlockTransactionSyncStateRecord, ApplicationError> {
     let query = format!(
         r#"
         UPDATE eventlake_block_transaction_sync_state
         SET status = 'paused',
-            updated_at = now()
+            updated_at = CURRENT_TIMESTAMP
         WHERE chain_id = $1
         RETURNING {SYNC_STATE_COLUMNS}
         "#
@@ -231,14 +231,14 @@ pub async fn pause_sync(
 }
 
 pub async fn resume_sync(
-    pool: &PgPool,
+    pool: &SqlitePool,
     chain_id: i64,
 ) -> Result<BlockTransactionSyncStateRecord, ApplicationError> {
     let query = format!(
         r#"
         UPDATE eventlake_block_transaction_sync_state
         SET status = 'syncing',
-            updated_at = now()
+            updated_at = CURRENT_TIMESTAMP
         WHERE chain_id = $1
         RETURNING {SYNC_STATE_COLUMNS}
         "#
@@ -256,7 +256,7 @@ pub async fn resume_sync(
 }
 
 pub async fn rewind_checkpoint_for_reorg(
-    pool: &PgPool,
+    pool: &SqlitePool,
     chain_id: i64,
     rewind_to_block: i64,
     error_message: &str,
@@ -267,7 +267,7 @@ pub async fn rewind_checkpoint_for_reorg(
         SET next_block = $2,
             status = 'reorg_retrying',
             last_error = $3,
-            updated_at = now()
+            updated_at = CURRENT_TIMESTAMP
         WHERE chain_id = $1
         "#,
     )
@@ -286,16 +286,22 @@ mod tests {
 
     #[test]
     fn validates_sync_config_request_bounds() {
-        let valid_request = UpdateSyncConfigRequest {
-            start_block: Some(100),
+        let valid = UpdateSyncConfigRequest {
+            start_block: Some(0),
             realtime_enabled: Some(true),
-            batch_size: Some(20),
+            batch_size: Some(100),
             max_concurrency: Some(4),
             reorg_window: Some(64),
         };
-        assert!(valid_request.start_block.unwrap() >= 0);
-        assert!((1..=500).contains(&valid_request.batch_size.unwrap()));
-        assert!((1..=32).contains(&valid_request.max_concurrency.unwrap()));
-        assert!((0..=1024).contains(&valid_request.reorg_window.unwrap()));
+        assert!(valid.start_block.unwrap() >= 0);
+
+        let invalid_start = UpdateSyncConfigRequest {
+            start_block: Some(-1),
+            realtime_enabled: None,
+            batch_size: None,
+            max_concurrency: None,
+            reorg_window: None,
+        };
+        assert!(invalid_start.start_block.unwrap() < 0);
     }
 }

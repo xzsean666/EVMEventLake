@@ -238,16 +238,11 @@ async fn create_subscription(
         .unwrap_or(collection_policy.default_max_block_window);
     validate_block_windows(min_block_window, max_block_window)?;
 
-    // Serialize subscription changes per chain. This closes the race where one request
-    // creates `all_events` while another creates a contract scope on the same chain.
+    // Serialize subscription changes. In SQLite, a transaction is naturally serialized for writes.
     let mut transaction = state.pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(request.chain_id)
-        .execute(&mut *transaction)
-        .await?;
 
     let all_events_active = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM eventlake_subscriptions WHERE chain_id = $1 AND collection_scope = 'all_events' AND active = true)",
+        "SELECT EXISTS(SELECT 1 FROM eventlake_subscriptions WHERE chain_id = $1 AND collection_scope = 'all_events' AND active = 1)",
     )
     .bind(request.chain_id)
     .fetch_one(&mut *transaction)
@@ -263,7 +258,7 @@ async fn create_subscription(
         let existing_all_events =
             sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(format!(
                 "SELECT {SUBSCRIPTION_COLUMNS} FROM eventlake_subscriptions \
-                 WHERE chain_id = $1 AND collection_scope = 'all_events' AND active = true"
+                 WHERE chain_id = $1 AND collection_scope = 'all_events' AND active = 1"
             )))
             .bind(request.chain_id)
             .fetch_optional(&mut *transaction)
@@ -275,7 +270,7 @@ async fn create_subscription(
         }
 
         let contract_active = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM eventlake_subscriptions WHERE chain_id = $1 AND collection_scope = 'contract' AND active = true)",
+            "SELECT EXISTS(SELECT 1 FROM eventlake_subscriptions WHERE chain_id = $1 AND collection_scope = 'contract' AND active = 1)",
         )
         .bind(request.chain_id)
         .fetch_one(&mut *transaction)
@@ -288,6 +283,7 @@ async fn create_subscription(
         }
     }
 
+    let id = Uuid::new_v4();
     let insert_query = format!(
         r#"
         INSERT INTO eventlake_subscriptions (
@@ -300,7 +296,7 @@ async fn create_subscription(
         "#
     );
     let inserted = sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(insert_query))
-        .bind(Uuid::new_v4())
+        .bind(id)
         .bind(request.chain_id)
         .bind(&contract_address)
         .bind(collection_scope)
@@ -317,7 +313,7 @@ async fn create_subscription(
         None => sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(format!(
             "SELECT {SUBSCRIPTION_COLUMNS} FROM eventlake_subscriptions \
                  WHERE chain_id = $1 AND collection_scope = $2 \
-                   AND contract_address IS NOT DISTINCT FROM $3 AND active = true"
+                   AND contract_address IS $3 AND active = 1"
         )))
         .bind(request.chain_id)
         .bind(collection_scope)
@@ -333,16 +329,6 @@ async fn create_subscription(
     };
 
     transaction.commit().await?;
-
-    if let Some(contract_address) = record.contract_address.as_deref() {
-        upsert_contract_registry(
-            &state.pool,
-            record.chain_id,
-            contract_address,
-            record.abi_id,
-        )
-        .await?;
-    }
 
     Ok(response::success(record))
 }
@@ -406,15 +392,11 @@ async fn create_contract_subscriptions_batch(
         .unwrap_or(collection_policy.default_max_block_window);
     validate_block_windows(min_block_window, max_block_window)?;
 
-    // Single transaction with a single advisory lock per chain
+    // Single transaction for atomicity in SQLite
     let mut transaction = state.pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(request.chain_id)
-        .execute(&mut *transaction)
-        .await?;
 
     let all_events_active = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM eventlake_subscriptions WHERE chain_id = $1 AND collection_scope = 'all_events' AND active = true)",
+        "SELECT EXISTS(SELECT 1 FROM eventlake_subscriptions WHERE chain_id = $1 AND collection_scope = 'all_events' AND active = 1)",
     )
     .bind(request.chain_id)
     .fetch_one(&mut *transaction)
@@ -453,36 +435,20 @@ async fn create_contract_subscriptions_batch(
         builder.build().execute(&mut *transaction).await?;
     }
 
-    for chunk in addresses.chunks(200) {
-        let mut builder = QueryBuilder::new(
-            r#"
-            INSERT INTO eventlake_contract_registry (id, chain_id, contract_address, abi_id)
-            "#,
-        );
-        builder.push_values(chunk, |mut row, addr| {
-            row.push_bind(Uuid::new_v4())
-                .push_bind(request.chain_id)
-                .push_bind(addr)
-                .push_bind(request.abi_id);
-        });
-        builder.push(
-            r#"
-            ON CONFLICT (chain_id, contract_address) DO UPDATE
-            SET abi_id = EXCLUDED.abi_id,
-                updated_at = now()
-            "#,
-        );
-        builder.build().execute(&mut *transaction).await?;
-    }
-
-    let select_query = format!(
+    let mut select_builder = QueryBuilder::new(format!(
         "SELECT {SUBSCRIPTION_COLUMNS} FROM eventlake_subscriptions \
-         WHERE chain_id = $1 AND collection_scope = 'contract' \
-           AND contract_address = ANY($2) AND active = true"
-    );
-    let records = sqlx::query_as::<_, SubscriptionRecord>(sqlx::AssertSqlSafe(select_query))
-        .bind(request.chain_id)
-        .bind(&addresses)
+         WHERE chain_id = "
+    ));
+    select_builder.push_bind(request.chain_id);
+    select_builder.push(" AND collection_scope = 'contract' AND active = 1 AND contract_address IN (");
+    let mut separated = select_builder.separated(", ");
+    for addr in &addresses {
+        separated.push_bind(addr);
+    }
+    separated.push_unseparated(")");
+
+    let records = select_builder
+        .build_query_as::<SubscriptionRecord>()
         .fetch_all(&mut *transaction)
         .await?;
 
@@ -557,14 +523,14 @@ async fn delete_subscription(
 }
 
 pub async fn runnable_subscriptions(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     limit: i64,
 ) -> Result<Vec<SubscriptionRecord>, ApplicationError> {
     let query = format!(
         r#"
         SELECT {SUBSCRIPTION_COLUMNS}
         FROM eventlake_subscriptions
-        WHERE active = true
+        WHERE active = 1
           AND status IN (
               'pending', 'historical_syncing', 'realtime_syncing', 'error',
               'clickhouse_reorg_retrying'
@@ -582,7 +548,7 @@ pub async fn runnable_subscriptions(
 }
 
 pub async fn update_checkpoint(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     id: Uuid,
     next_block: i64,
     target_block: Option<i64>,
@@ -597,7 +563,7 @@ pub async fn update_checkpoint(
             status = $4,
             current_block_window = $5,
             error_message = NULL,
-            updated_at = now()
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = $1
         "#,
     )
@@ -622,7 +588,7 @@ pub struct CheckpointBatchUpdate {
 }
 
 pub async fn update_checkpoints_batch(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     updates: &[CheckpointBatchUpdate],
 ) -> Result<(), ApplicationError> {
     if updates.is_empty() {
@@ -638,7 +604,7 @@ pub async fn update_checkpoints_batch(
                 status = $4,
                 current_block_window = $5,
                 error_message = NULL,
-                updated_at = now()
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
             "#,
         )
@@ -655,7 +621,7 @@ pub async fn update_checkpoints_batch(
 }
 
 pub async fn update_collection_window_after_retryable_error(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     id: Uuid,
     current_block_window: i64,
     error_message: &str,
@@ -666,7 +632,7 @@ pub async fn update_collection_window_after_retryable_error(
         SET current_block_window = $2,
             status = CASE WHEN status = 'pending' THEN 'historical_syncing' ELSE status END,
             error_message = $3,
-            updated_at = now()
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = $1
         "#,
     )
@@ -680,7 +646,7 @@ pub async fn update_collection_window_after_retryable_error(
 }
 
 pub async fn update_collection_windows_after_retryable_error(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     ids: &[Uuid],
     current_block_window: i64,
     error_message: &str,
@@ -696,7 +662,7 @@ pub async fn update_collection_windows_after_retryable_error(
             SET current_block_window = $2,
                 status = CASE WHEN status = 'pending' THEN 'historical_syncing' ELSE status END,
                 error_message = $3,
-                updated_at = now()
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
             "#,
         )
@@ -711,7 +677,7 @@ pub async fn update_collection_windows_after_retryable_error(
 }
 
 pub async fn mark_subscription_error(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     id: Uuid,
     error_message: &str,
 ) -> Result<(), ApplicationError> {
@@ -720,7 +686,7 @@ pub async fn mark_subscription_error(
         UPDATE eventlake_subscriptions
         SET status = 'error',
             error_message = $2,
-            updated_at = now()
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = $1
         "#,
     )
@@ -736,7 +702,7 @@ pub async fn mark_subscription_error(
 /// subscription while decoder retries the queued raw log; it resumes automatically
 /// once no ClickHouse retry entries remain.
 pub async fn mark_clickhouse_write_retrying(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     id: Uuid,
     error_message: &str,
 ) -> Result<(), ApplicationError> {
@@ -745,8 +711,8 @@ pub async fn mark_clickhouse_write_retrying(
         UPDATE eventlake_subscriptions
         SET status = 'clickhouse_write_retrying',
             error_message = $2,
-            updated_at = now()
-        WHERE id = $1 AND active = true
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND active = 1
         "#,
     )
     .bind(id)
@@ -761,24 +727,18 @@ pub async fn mark_clickhouse_write_retrying(
 /// succeeded. Non-ClickHouse decode errors retain their own retry policy and do not
 /// keep an otherwise healthy subscription blocked forever.
 pub async fn resume_after_clickhouse_writes(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     id: Uuid,
 ) -> Result<(), ApplicationError> {
     sqlx::query(
         r#"
-        UPDATE eventlake_subscriptions s
+        UPDATE eventlake_subscriptions
         SET status = 'pending',
             error_message = NULL,
-            updated_at = now()
-        WHERE s.id = $1
-          AND s.active = true
-          AND s.status = 'clickhouse_write_retrying'
-          AND NOT EXISTS (
-              SELECT 1
-              FROM eventlake_decode_queue q
-              WHERE q.subscription_id = s.id
-                AND q.status IN ('pending', 'clickhouse_retrying')
-          )
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+          AND active = 1
+          AND status = 'clickhouse_write_retrying'
         "#,
     )
     .bind(id)
@@ -791,7 +751,7 @@ pub async fn resume_after_clickhouse_writes(
 /// A reorg needs ClickHouse tombstones before any affected subscription can collect
 /// the canonical fork again. The collector retries this state on every worker tick.
 pub async fn mark_chain_clickhouse_reorg_retrying(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     chain_id: i64,
     from_block: i64,
     error_message: &str,
@@ -801,9 +761,9 @@ pub async fn mark_chain_clickhouse_reorg_retrying(
         UPDATE eventlake_subscriptions
         SET status = 'clickhouse_reorg_retrying',
             error_message = $3,
-            updated_at = now()
+            updated_at = CURRENT_TIMESTAMP
         WHERE chain_id = $1
-          AND active = true
+          AND active = 1
           AND current_block >= $2
         "#,
     )
@@ -817,7 +777,7 @@ pub async fn mark_chain_clickhouse_reorg_retrying(
 }
 
 pub async fn resume_after_clickhouse_reorg(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     id: Uuid,
 ) -> Result<(), ApplicationError> {
     sqlx::query(
@@ -825,8 +785,8 @@ pub async fn resume_after_clickhouse_reorg(
         UPDATE eventlake_subscriptions
         SET status = 'pending',
             error_message = NULL,
-            updated_at = now()
-        WHERE id = $1 AND active = true AND status = 'clickhouse_reorg_retrying'
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND active = 1 AND status = 'clickhouse_reorg_retrying'
         "#,
     )
     .bind(id)
@@ -837,7 +797,7 @@ pub async fn resume_after_clickhouse_reorg(
 }
 
 async fn find_subscription(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     id: Uuid,
 ) -> Result<SubscriptionRecord, ApplicationError> {
     let query = format!("SELECT {SUBSCRIPTION_COLUMNS} FROM eventlake_subscriptions WHERE id = $1");
@@ -849,7 +809,7 @@ async fn find_subscription(
 }
 
 async fn update_status(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     id: Uuid,
     status: &str,
     active: bool,
@@ -860,7 +820,7 @@ async fn update_status(
         SET status = $2,
             active = $3,
             error_message = CASE WHEN $2 = 'pending' THEN NULL ELSE error_message END,
-            updated_at = now()
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = $1
         RETURNING {SUBSCRIPTION_COLUMNS}
         "#
@@ -874,30 +834,6 @@ async fn update_status(
         .ok_or_else(|| ApplicationError::NotFound(format!("subscription {id}")))
 }
 
-async fn upsert_contract_registry(
-    pool: &sqlx::PgPool,
-    chain_id: i64,
-    contract_address: &str,
-    abi_id: Option<Uuid>,
-) -> Result<(), ApplicationError> {
-    sqlx::query(
-        r#"
-        INSERT INTO eventlake_contract_registry (id, chain_id, contract_address, abi_id)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (chain_id, contract_address) DO UPDATE
-        SET abi_id = EXCLUDED.abi_id,
-            updated_at = now()
-        "#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(chain_id)
-    .bind(contract_address)
-    .bind(abi_id)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
 
 fn validate_subscription_request(
     request: &CreateSubscriptionRequest,

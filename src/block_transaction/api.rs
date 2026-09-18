@@ -4,7 +4,6 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "clickhouse")]
 use serde_json::json;
 use utoipa::{OpenApi, ToSchema};
 
@@ -115,9 +114,12 @@ pub struct TransactionDetailResponse {
     pub max_priority_fee_per_gas: Option<String>,
     pub tx_type: Option<i64>,
     pub method_id: Option<String>,
+    pub status: Option<u8>,
+    pub gas_used: Option<String>,
+    pub effective_gas_price: Option<String>,
+    pub l1_fee: Option<String>,
 }
 
-#[cfg(feature = "clickhouse")]
 impl From<crate::clickhouse::BlockRow> for BlockDetailResponse {
     fn from(row: crate::clickhouse::BlockRow) -> Self {
         Self {
@@ -143,7 +145,6 @@ impl From<crate::clickhouse::BlockRow> for BlockDetailResponse {
     }
 }
 
-#[cfg(feature = "clickhouse")]
 impl From<crate::clickhouse::TransactionRow> for TransactionDetailResponse {
     fn from(row: crate::clickhouse::TransactionRow) -> Self {
         Self {
@@ -161,6 +162,10 @@ impl From<crate::clickhouse::TransactionRow> for TransactionDetailResponse {
             max_priority_fee_per_gas: row.max_priority_fee_per_gas,
             tx_type: row.tx_type.map(|t| t as i64),
             method_id: row.method_id,
+            status: row.status,
+            gas_used: row.gas_used,
+            effective_gas_price: row.effective_gas_price,
+            l1_fee: row.l1_fee,
         }
     }
 }
@@ -263,7 +268,6 @@ fn decode_cursor<T: for<'de> Deserialize<'de>>(cursor_str: &str) -> Result<T, Ap
         .map_err(|_| ApplicationError::BadRequest("invalid cursor payload".to_owned()))
 }
 
-#[cfg(feature = "clickhouse")]
 fn require_clickhouse_client(
     state: &ApplicationState,
 ) -> Result<clickhouse::Client, ApplicationError> {
@@ -278,14 +282,6 @@ fn require_clickhouse_client(
             "block transaction storage unavailable: ClickHouse client is not connected".to_owned(),
         )
     })
-}
-
-#[cfg(not(feature = "clickhouse"))]
-fn require_clickhouse_client(_state: &ApplicationState) -> Result<(), ApplicationError> {
-    Err(ApplicationError::ServiceUnavailable(
-        "block transaction storage unavailable: binary compiled without clickhouse feature"
-            .to_owned(),
-    ))
 }
 
 #[utoipa::path(
@@ -315,31 +311,21 @@ pub async fn get_block(
     }
     let parsed_ref = parse_block_ref(&block_ref)?;
 
-    #[cfg(not(feature = "clickhouse"))]
-    {
-        let _ = (chain_id, block_ref, parsed_ref);
-        require_clickhouse_client(&state)?;
-        unreachable!();
-    }
+    let client = require_clickhouse_client(&state)?;
+    let block_opt = match parsed_ref {
+        BlockRef::Number(num) => {
+            crate::clickhouse::get_block_by_number(&client, chain_id, num).await?
+        }
+        BlockRef::Hash(ref hash) => {
+            crate::clickhouse::get_block_by_hash(&client, chain_id, hash).await?
+        }
+    };
 
-    #[cfg(feature = "clickhouse")]
-    {
-        let client = require_clickhouse_client(&state)?;
-        let block_opt = match parsed_ref {
-            BlockRef::Number(num) => {
-                crate::clickhouse::get_block_by_number(&client, chain_id, num).await?
-            }
-            BlockRef::Hash(ref hash) => {
-                crate::clickhouse::get_block_by_hash(&client, chain_id, hash).await?
-            }
-        };
+    let block = block_opt.ok_or_else(|| {
+        ApplicationError::NotFound(format!("block {block_ref} on chain {chain_id} not found"))
+    })?;
 
-        let block = block_opt.ok_or_else(|| {
-            ApplicationError::NotFound(format!("block {block_ref} on chain {chain_id} not found"))
-        })?;
-
-        Ok(response::success(BlockDetailResponse::from(block)))
-    }
+    Ok(response::success(BlockDetailResponse::from(block)))
 }
 
 #[utoipa::path(
@@ -373,16 +359,7 @@ pub async fn get_block_transactions(
     let parsed_ref = parse_block_ref(&block_ref)?;
     let limit = query.limit.unwrap_or(100).clamp(1, 1000);
 
-    #[cfg(not(feature = "clickhouse"))]
-    {
-        let _ = (chain_id, block_ref, parsed_ref, limit, query);
-        require_clickhouse_client(&state)?;
-        unreachable!();
-    }
-
-    #[cfg(feature = "clickhouse")]
-    {
-        let client = require_clickhouse_client(&state)?;
+    let client = require_clickhouse_client(&state)?;
         let block_number = match parsed_ref {
             BlockRef::Number(num) => num,
             BlockRef::Hash(ref hash) => {
@@ -450,7 +427,6 @@ pub async fn get_block_transactions(
                 "next_cursor": next_cursor
             }),
         ))
-    }
 }
 
 #[utoipa::path(
@@ -480,26 +456,16 @@ pub async fn get_transaction(
     }
     let normalized_hash = normalize_hash(&tx_hash)?;
 
-    #[cfg(not(feature = "clickhouse"))]
-    {
-        let _ = (chain_id, tx_hash, normalized_hash);
-        require_clickhouse_client(&state)?;
-        unreachable!();
-    }
+    let client = require_clickhouse_client(&state)?;
+    let row = crate::clickhouse::get_transaction_by_hash(&client, chain_id, &normalized_hash)
+        .await?
+        .ok_or_else(|| {
+            ApplicationError::NotFound(format!(
+                "transaction {tx_hash} on chain {chain_id} not found"
+            ))
+        })?;
 
-    #[cfg(feature = "clickhouse")]
-    {
-        let client = require_clickhouse_client(&state)?;
-        let row = crate::clickhouse::get_transaction_by_hash(&client, chain_id, &normalized_hash)
-            .await?
-            .ok_or_else(|| {
-                ApplicationError::NotFound(format!(
-                    "transaction {tx_hash} on chain {chain_id} not found"
-                ))
-            })?;
-
-        Ok(response::success(TransactionDetailResponse::from(row)))
-    }
+    Ok(response::success(TransactionDetailResponse::from(row)))
 }
 
 #[utoipa::path(
@@ -569,23 +535,7 @@ pub async fn get_address_transactions(
 
     let limit = query.limit.unwrap_or(100).clamp(1, 1000);
 
-    #[cfg(not(feature = "clickhouse"))]
-    {
-        let _ = (
-            chain_id,
-            address,
-            normalized_address,
-            direction,
-            limit,
-            query,
-        );
-        require_clickhouse_client(&state)?;
-        unreachable!();
-    }
-
-    #[cfg(feature = "clickhouse")]
-    {
-        let client = require_clickhouse_client(&state)?;
+    let client = require_clickhouse_client(&state)?;
 
         let cursor_tuple = if let Some(ref token) = query.cursor {
             let cursor: AddressTransactionsCursor = decode_cursor(token)?;
@@ -653,7 +603,6 @@ pub async fn get_address_transactions(
                 "next_cursor": next_cursor
             }),
         ))
-    }
 }
 
 #[utoipa::path(

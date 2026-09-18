@@ -1,21 +1,24 @@
 # EventLake Build and Usage Guide
 
-Version: 1.1
+Version: 2.0
 
 Status: Current implementation
 
 ## 1. Current Stage
 
-The repository contains the Step 4 Rust monolith implementation.
+The repository contains the EVMEventLake Rust monolith implementation with a single unified storage architecture:
+- **SQLite**: Embedded metadata and control plane store (subscriptions, checkpoints, RPC pool, chains, auth).
+- **ClickHouse**: Analytical raw event lake and block/transaction store.
 
 For an end-user quick start and API workflow, see [`USAGE.md`](USAGE.md).
+For deployment specifications, see [`DEPLOYMENT.md`](DEPLOYMENT.md).
+For backup and disaster recovery, see [`BACKUP_AND_RESTORE.md`](BACKUP_AND_RESTORE.md).
 
-The first Rust monolith implementation has been created.
+Core files include:
 
-Created implementation files include:
-
-- `Cargo.toml`
+- `Cargo.toml` & `Cargo.lock`
 - `src/`
+- `clickhouse/`
 - `migrations/`
 - `Dockerfile`
 - `Dockerfile.prebuilt`
@@ -24,54 +27,57 @@ Created implementation files include:
 - `docker-compose.prebuilt.yml`
 - `docker-compose.prebuilt.cn.yml`
 - `scripts/build-prebuilt-binary.sh`
+- `scripts/backup.sh`
+- `scripts/restore.sh`
+- `scripts/verify-backup.sh`
+- `scripts/s3-helper.py`
 - `deploy/prebuilt/README.md`
-- `docs/DEPLOYMENT.md`
 
 Current verified commands:
 
-- `cargo check`
+- `cargo check --ignore-rust-version --all-targets`
 - `cargo build --release --locked`
-- `cargo test`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test --test e2e_real_database_tests -- --nocapture`
+- `cargo test --ignore-rust-version`
+- `cargo test --ignore-rust-version --test e2e_real_database_tests -- --nocapture`
 - `scripts/build-prebuilt-binary.sh`
+- `tests/test_backup_restore_e2e.sh`
 - `docker compose --env-file .env.example config`
 - `docker compose --env-file .env.example -f docker-compose.prebuilt.yml config`
 - `docker compose --env-file .env.example -f docker-compose.prebuilt.cn.yml config`
 
-## 2. Expected Local Requirements
+## 2. Local Development Requirements
 
 Local development assumes:
 
-- Rust stable toolchain.
+- Rust stable toolchain (1.94+).
 - Cargo.
-- Docker.
-- Docker Compose.
-- PostgreSQL through Docker Compose for local development.
+- Docker & Docker Compose (for ClickHouse and container deployment).
+- Python 3 and curl (for backup and S3 helper tools).
 
 Current Rust stack:
 
 - `tokio 1.52.3` for async runtime.
 - `axum 0.8.9` for HTTP API.
-- `sqlx 0.9.0` for PostgreSQL access and migrations.
+- `sqlx 0.9.0` with `sqlite` engine for embedded transactional metadata.
+- `clickhouse 0.13.3` for high-throughput raw event, block, and transaction data lake.
 - `alloy-primitives 1.6.0` for EVM primitive types.
-- `alloy-json-abi 1.6.0` for ABI parsing and Event Registry generation.
-- `alloy-dyn-abi 1.6.0` for runtime event decoding.
 - `reqwest 0.13.4` for JSON-RPC HTTP transport.
 - `serde 1.0.228` for serialization.
 - `utoipa 5.5.0` for OpenAPI scaffolding.
 - `tracing 0.1.43` for structured telemetry.
 
-## 3. Expected Environment Variables
+## 3. Environment Variables
 
-All configuration is centralized in the `configuration` module.
+All configuration is centralized in the `configuration` module (`src/configuration/mod.rs`).
 
-Implemented variables include:
+Standard variables:
 
 ```text
 EVENTLAKE_HTTP_HOST=0.0.0.0
 EVENTLAKE_HTTP_PORT=8080
-EVENTLAKE_DATABASE_URL=postgres://eventlake:eventlake@postgres:5432/eventlake
+EVENTLAKE_DATABASE_URL=sqlite:///data/eventlake.db?mode=rwc
+EVENTLAKE_CLICKHOUSE_URL=http://eventlake:eventlake@clickhouse:8123/eventlake
+EVENTLAKE_CLICKHOUSE_ENABLED=true
 EVENTLAKE_JWT_SECRET=change-me
 EVENTLAKE_LOG_LEVEL=info
 EVENTLAKE_DEFAULT_PAGE_LIMIT=50
@@ -79,247 +85,68 @@ EVENTLAKE_MAX_PAGE_LIMIT=500
 EVENTLAKE_REQUIRE_AUTHENTICATION=false
 EVENTLAKE_BACKGROUND_WORKERS_ENABLED=true
 EVENTLAKE_WORKER_TICK_SECONDS=5
-EVENTLAKE_DECODE_BATCH_SIZE=100
-EVENTLAKE_CLICKHOUSE_URL=http://eventlake:eventlake@clickhouse:8123/eventlake
-EVENTLAKE_CLICKHOUSE_ENABLED=false
+EVENTLAKE_BLOCK_TRANSACTION_ENABLED=false
+EVENTLAKE_RPC_SEEDS_PATH=config/rpc_endpoints.json
 ```
 
-RPC endpoints should be stored and managed through the database, not hard-coded environment variables.
+## 4. Docker Deployment Services
 
-## 4. Expected Docker Services
+The standard deployment consists of:
 
-The default deployment uses:
+- `clickhouse`: Official `clickhouse/clickhouse-server:24.8` for analytical raw event storage.
+- `eventlake`: Core ingestion and search daemon with embedded SQLite volume mount (`./data/sqlite:/data`).
 
-- `postgres`
-- `eventlake`
+## 5. Development Workflow
 
-The ClickHouse Compose variants add an optional `clickhouse` service and compile
-the feature-gated raw-event store. In ClickHouse mode, raw logs are written only to
-ClickHouse; PostgreSQL remains the source of truth for operational state and
-checkpoints. The background runtime does not decode ABI events.
+Run all tests:
 
-## 5. Expected Development Commands
-
-Run tests:
-
-```text
-cargo test
+```bash
+cargo test --ignore-rust-version
 ```
 
-Run only the real PostgreSQL E2E test:
+Run SQLite E2E integration test:
 
-```text
-cargo test --test e2e_real_database_tests -- --nocapture
+```bash
+cargo test --ignore-rust-version --test e2e_real_database_tests -- --nocapture
 ```
 
-The E2E test reads `.env.test` and expects:
+Run formatting and clippy:
 
-```text
-DATABASE_URL=postgres://...
-```
-
-Important:
-
-- `.env.test` is intentionally ignored by Git.
-- The E2E test resets only EventLake-owned database objects.
-- EventLake-owned business tables use the `eventlake_` prefix.
-- EventLake uses `eventlake_sqlx_migrations` instead of the default `_sqlx_migrations` table.
-- Use a dedicated disposable test database only.
-
-Run formatting:
-
-```text
-cargo fmt
-```
-
-Run linting:
-
-```text
-cargo clippy --all-targets --all-features -- -D warnings
+```bash
+cargo fmt --check
+cargo clippy --ignore-rust-version --all-targets -- -D warnings
 ```
 
 Run local service:
 
-```text
+```bash
 cargo run
 ```
 
 Run with Docker Compose:
 
-```text
+```bash
 docker compose up --build
 ```
 
-Run with Docker Compose and an explicit env file:
+Build the prebuilt binary:
 
-```text
-EVENTLAKE_ENV_FILE=.env docker compose --env-file .env up -d --build eventlake
-```
-
-Build the prebuilt deployment binary:
-
-```text
+```bash
 scripts/build-prebuilt-binary.sh
 ```
 
-Run the prebuilt binary image:
+Run the prebuilt binary container:
 
-```text
-EVENTLAKE_ENV_FILE=.env docker compose --env-file .env -f docker-compose.prebuilt.yml up -d --build eventlake
+```bash
+docker compose -f docker-compose.prebuilt.yml up -d --build
 ```
 
-Run the China-optimized prebuilt image:
+## 6. Database Migrations
 
-```text
-EVENTLAKE_ENV_FILE=.env docker compose --env-file .env -f docker-compose.prebuilt.cn.yml up -d --build eventlake
-```
+The implementation uses embedded SQLx migrations for SQLite schema setup.
+Migrations are compiled into the binary via `sqlx::migrate!("./migrations")` and executed automatically at startup.
 
-Stop local Docker services:
+## 7. Health Checks
 
-```text
-docker compose down
-```
-
-See `docs/DEPLOYMENT.md` for the deployment matrix, environment-file rules, and verification commands.
-
-## 6. Expected Database Workflow
-
-The implementation uses migrations for all PostgreSQL schema changes.
-
-Expected workflow:
-
-1. Add migration.
-2. Run migration locally.
-3. Run tests.
-4. Commit migration with related code.
-
-Migration rules:
-
-- All EventLake-owned tables must use the `eventlake_` prefix.
-- SQLx migration state must use `eventlake_sqlx_migrations`.
-- Raw log tables must support partitioning.
-- Decoded event tables must support partitioning.
-- Index tables must be query-optimized from the start.
-- Destructive migrations require explicit user approval.
-
-## 7. Expected Runtime Workflow
-
-After implementation, a normal local run should support:
-
-1. Start PostgreSQL and EventLake.
-2. Run database migrations.
-3. Create or bootstrap admin credentials.
-4. Add chain metadata if not seeded.
-5. Add RPC endpoints.
-6. Upload ABI.
-7. Create contract subscription.
-8. Observe sync progress.
-9. Search events.
-
-## 8. Expected Health Checks
-
-The service exposes:
-
-- Liveness check.
-- Readiness check with PostgreSQL connectivity.
-
-The routes are `/health/live` and `/health/ready`.
-
-## 9. Expected OpenAPI Output
-
-The implementation generates OpenAPI documentation from route and schema definitions.
-
-OpenAPI must describe:
-
-- Auth endpoints.
-- Chain management endpoints.
-- RPC pool endpoints.
-- ABI endpoints.
-- Subscription endpoints.
-- Search endpoint.
-- Explorer endpoints.
-- Dashboard endpoints.
-
-## 10. Testing Strategy
-
-Test coverage should grow by risk:
-
-- Unit tests for ABI parsing.
-- Unit tests for Search DSL validation and SQL planning.
-- Unit tests for RPC selection policy.
-- Integration tests for subscription uniqueness.
-- Integration tests for raw log persistence and raw-log search.
-- Integration tests for ClickHouse raw writes, retries, and tombstones.
-- Integration tests for reorg repair.
-- Real PostgreSQL E2E for API, migrations, subscription, collector, raw search,
-  dashboard, auth, and reorg.
-
-Large-chain behavior should be tested with bounded fixtures first, then load tests after core behavior is stable.
-
-## 11. Local Usage Examples
-
-These examples describe the current API.
-
-Upload ABI:
-
-```text
-POST /api/abis
-```
-
-Create subscription:
-
-```text
-POST /api/subscriptions
-```
-
-Search:
-
-```text
-POST /api/search
-```
-
-View address:
-
-```text
-GET /api/explorer/address/{address}
-```
-
-View the operational dashboard:
-
-```text
-GET /api/dashboard
-```
-
-The API remains REST-based and is described at `GET /api/openapi.json`.
-
-## 12. Current Verification Notes
-
-Verified locally:
-
-```text
-cargo check
-cargo build --release --locked
-cargo test
-cargo test --test e2e_real_database_tests -- --nocapture
-cargo clippy --all-targets --all-features -- -D warnings
-scripts/build-prebuilt-binary.sh
-docker compose --env-file .env.example config
-docker compose --env-file .env.example -f docker-compose.prebuilt.yml config
-docker compose --env-file .env.example -f docker-compose.prebuilt.cn.yml config
-```
-
-Not verified in this environment:
-
-- `docker build -f Dockerfile -t eventlake:local .`
-- `docker build -f Dockerfile.prebuilt -t eventlake:prebuilt .`
-- `docker build -f Dockerfile.prebuilt.cn -t eventlake:prebuilt-cn .`
-- `docker compose up`
-- End-to-end RPC collection against a real EVM chain
-
-Reason:
-
-- The current user cannot access `/var/run/docker.sock`.
-- `.env.test` PostgreSQL migration and E2E execution are verified.
-- E2E currently uses a deterministic local JSON-RPC HTTP fixture instead of a public chain RPC endpoint.
-
-The migration is still compiled into the binary through `sqlx::migrate!("./migrations")`.
+- `/health/live`: Basic liveness check.
+- `/health/ready`: Readiness check verifying SQLite connectivity.

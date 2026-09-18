@@ -190,7 +190,7 @@ impl ClickHouseConfig {
                 user: read_env("EVENTLAKE_CLICKHOUSE_USER", "eventlake"),
                 password: read_env("EVENTLAKE_CLICKHOUSE_PASSWORD", "eventlake"),
                 database: read_env("EVENTLAKE_CLICKHOUSE_DB", "eventlake"),
-                enabled: false,
+                enabled: true,
                 secure: false,
             }
         };
@@ -199,8 +199,6 @@ impl ClickHouseConfig {
             config.enabled = enabled_str.trim().parse().with_context(|| {
                 format!("invalid boolean value for EVENTLAKE_CLICKHOUSE_ENABLED: {enabled_str}")
             })?;
-        } else if url_val.is_none() {
-            config.enabled = false;
         } else {
             config.enabled = true;
         }
@@ -249,7 +247,6 @@ pub struct AuthConfiguration {
 pub struct BackgroundConfiguration {
     pub workers_enabled: bool,
     pub worker_tick: Duration,
-    pub decode_batch_size: i64,
     /// Partition maintenance issues DDL, so it runs on a slower cadence than the
     /// collect/decode workers instead of on every worker tick.
     pub partition_tick: Duration,
@@ -279,9 +276,9 @@ impl ApplicationConfiguration {
         let database = DatabaseConfiguration {
             database_url: read_env(
                 "EVENTLAKE_DATABASE_URL",
-                "postgres://eventlake:eventlake@localhost:5432/eventlake",
+                "sqlite://data/eventlake.db?mode=rwc",
             ),
-            max_connections: read_positive_u32_env("EVENTLAKE_DATABASE_MAX_CONNECTIONS", "10")?,
+            max_connections: read_positive_u32_env("EVENTLAKE_DATABASE_MAX_CONNECTIONS", "5")?,
         };
 
         let clickhouse = ClickHouseConfig::from_environment()?;
@@ -298,7 +295,6 @@ impl ApplicationConfiguration {
                 "EVENTLAKE_WORKER_TICK_SECONDS",
                 "5",
             )?),
-            decode_batch_size: read_positive_i64_env("EVENTLAKE_DECODE_BATCH_SIZE", "100")?,
             partition_tick: Duration::from_secs(read_positive_u64_env(
                 "EVENTLAKE_PARTITION_TICK_SECONDS",
                 "300",
@@ -418,15 +414,6 @@ fn read_positive_u64_env(name: &str, default_value: &str) -> anyhow::Result<u64>
     let value = read_env(name, default_value).parse()?;
     if value == 0 {
         anyhow::bail!("{name} must be greater than 0");
-    }
-
-    Ok(value)
-}
-
-fn read_positive_i64_env(name: &str, default_value: &str) -> anyhow::Result<i64> {
-    let value = read_env(name, default_value).parse()?;
-    if value < 1 {
-        anyhow::bail!("{name} must be at least 1");
     }
 
     Ok(value)

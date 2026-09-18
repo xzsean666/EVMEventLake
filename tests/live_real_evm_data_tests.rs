@@ -1,5 +1,3 @@
-#![cfg(feature = "clickhouse")]
-
 use std::time::Duration;
 
 use axum::{
@@ -19,7 +17,7 @@ use eventlake::{
 };
 use reqwest::Client;
 use serde_json::Value;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::sqlite::SqlitePoolOptions;
 use tower::ServiceExt;
 
 const ETH_RPC_URLS: &[&str] = &[
@@ -52,8 +50,8 @@ async fn find_working_rpc(urls: &[&str], http_client: &Client) -> Option<String>
     None
 }
 
-fn lazy_pool() -> anyhow::Result<sqlx::PgPool> {
-    Ok(PgPoolOptions::new().connect_lazy("postgres://eventlake:eventlake@localhost/eventlake")?)
+fn lazy_pool() -> anyhow::Result<sqlx::SqlitePool> {
+    Ok(SqlitePoolOptions::new().connect_lazy("sqlite::memory:")?)
 }
 
 fn test_clickhouse_config(enabled: bool) -> ClickHouseConfig {
@@ -76,7 +74,7 @@ fn test_configuration(clickhouse: ClickHouseConfig) -> ApplicationConfiguration 
             cors_allowed_origins: Vec::new(),
         },
         database: DatabaseConfiguration {
-            database_url: "postgres://eventlake:eventlake@localhost/eventlake".to_owned(),
+            database_url: "sqlite::memory:".to_owned(),
             max_connections: 1,
         },
         clickhouse,
@@ -87,7 +85,6 @@ fn test_configuration(clickhouse: ClickHouseConfig) -> ApplicationConfiguration 
         background: BackgroundConfiguration {
             workers_enabled: false,
             worker_tick: Duration::from_secs(1),
-            decode_batch_size: 1,
             partition_tick: Duration::from_secs(1),
             max_batch_addresses: 50,
             collector_concurrency: 4,

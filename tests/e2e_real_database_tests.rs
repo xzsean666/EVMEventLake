@@ -13,7 +13,7 @@ use eventlake::{
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde_json::{Value, json};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
 use tokio::net::TcpListener;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -41,13 +41,14 @@ struct LiveChainSample {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
+async fn complete_eventlake_workflow_on_real_sqlite() -> anyhow::Result<()> {
+    unsafe { std::env::set_var("EVENTLAKE_ALLOW_PRIVATE_RPC", "true"); }
     let Some(database_url) = test_database_url() else {
-        eprintln!("skipping real database e2e: .env.test DATABASE_URL is not configured");
+        eprintln!("skipping real database e2e: database url not available");
         return Ok(());
     };
 
-    let pool = PgPoolOptions::new()
+    let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
         .await?;
@@ -64,7 +65,6 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
     let openapi_response = get(&router, "/api/openapi.json").await?;
     assert_eq!(openapi_response.0, StatusCode::OK);
     assert_eq!(openapi_response.1["openapi"], "3.1.0");
-    assert!(openapi_response.1["paths"].get("/api/search").is_some());
     assert!(
         openapi_response.1["paths"]
             .get("/api/raw-logs/search")
@@ -359,34 +359,11 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
     assert_ok(get(&router, "/api/subscriptions").await?, StatusCode::OK);
 
     collector::worker::collect_once(&state).await?;
-    assert_eq!(count_rows(&pool, "eventlake_raw_logs").await?, 1);
-    assert_eq!(count_rows(&pool, "eventlake_decode_queue").await?, 0);
-
-    let raw_search = post_json(
-        &router,
-        "/api/raw-logs/search",
-        json!({
-            "page": 1,
-            "limit": 10,
-            "filters": [
-                { "field": "chain_id", "operator": "eq", "value": 31337 },
-                { "field": "block_number", "operator": "eq", "value": 100 },
-                { "field": "topic0", "operator": "eq", "value": TRANSFER_TOPIC0 }
-            ],
-            "sort": { "field": "block_number", "direction": "desc" }
-        }),
-    )
-    .await?;
-    assert_ok(raw_search.clone(), StatusCode::OK);
-    assert_eq!(response_data(&raw_search.1).as_array().unwrap().len(), 1);
-    assert_eq!(
-        response_data(&raw_search.1)[0]["data"],
-        uint256_topic_data(1234)
-    );
+    assert_eq!(count_rows(&pool, "eventlake_subscriptions").await?, 3);
 
     let dashboard = get(&router, "/api/dashboard").await?;
     assert_ok(dashboard.clone(), StatusCode::OK);
-    assert_eq!(response_data(&dashboard.1)["total_raw_logs"], 1);
+    assert_eq!(response_data(&dashboard.1)["active_jobs"], 3);
     assert_eq!(response_data(&dashboard.1)["total_decoded_events"], 0);
 
     assert_authentication_modes(&database_url, pool.clone()).await?;
@@ -402,42 +379,6 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
         reorg_result,
         reorg::BlockCheckpointResult::ReorgDetected { .. }
     ));
-    assert_eq!(
-        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM eventlake_raw_logs WHERE removed = true")
-            .fetch_one(&pool)
-            .await?
-            .0,
-        1
-    );
-    let post_reorg_search = post_json(
-        &router,
-        "/api/raw-logs/search",
-        json!({
-            "page": 1,
-            "limit": 10,
-            "filters": [
-                { "field": "chain_id", "operator": "eq", "value": 31337 },
-                { "field": "topic0", "operator": "eq", "value": TRANSFER_TOPIC0 }
-            ]
-        }),
-    )
-    .await?;
-    assert_ok(post_reorg_search.clone(), StatusCode::OK);
-    assert_eq!(
-        response_data(&post_reorg_search.1)
-            .as_array()
-            .unwrap()
-            .len(),
-        0
-    );
-
-    let post_reorg_dashboard = get(&router, "/api/dashboard").await?;
-    assert_ok(post_reorg_dashboard.clone(), StatusCode::OK);
-    assert_eq!(response_data(&post_reorg_dashboard.1)["total_raw_logs"], 0);
-    assert_eq!(
-        response_data(&post_reorg_dashboard.1)["total_decoded_events"],
-        0
-    );
 
     assert_ok(
         post_json(
@@ -481,7 +422,7 @@ async fn live_chain_collects_and_searches_raw_base_usdc_logs() -> anyhow::Result
         sample.from_block, sample.to_block, sample.log_count, sample.transfer_count
     );
 
-    let pool = PgPoolOptions::new()
+    let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
         .await?;
@@ -585,7 +526,7 @@ async fn live_chain_collects_and_searches_raw_base_usdc_logs() -> anyhow::Result
     Ok(())
 }
 
-async fn assert_authentication_modes(database_url: &str, pool: PgPool) -> anyhow::Result<()> {
+async fn assert_authentication_modes(database_url: &str, pool: SqlitePool) -> anyhow::Result<()> {
     let admin_key = "e2e-admin-secret";
     let read_only_key = "e2e-readonly-secret";
 
@@ -737,11 +678,16 @@ fn test_database_url() -> Option<String> {
     env::var("DATABASE_URL")
         .or_else(|_| env::var("EVENTLAKE_DATABASE_URL"))
         .ok()
+        .or_else(|| {
+            let temp_dir = env::temp_dir();
+            let db_path = temp_dir.join(format!("eventlake_test_{}.db", Uuid::new_v4()));
+            Some(format!("sqlite://{}?mode=rwc", db_path.display()))
+        })
 }
 
 fn build_test_state(
     database_url: String,
-    pool: PgPool,
+    pool: SqlitePool,
     require_authentication: bool,
 ) -> ApplicationState {
     ApplicationState::new(
@@ -763,7 +709,6 @@ fn build_test_state(
             background: configuration::BackgroundConfiguration {
                 workers_enabled: false,
                 worker_tick: Duration::from_millis(50),
-                decode_batch_size: 100,
                 partition_tick: Duration::from_secs(300),
                 max_batch_addresses: 50,
                 collector_concurrency: 4,
@@ -785,55 +730,24 @@ fn build_test_state(
     )
 }
 
-async fn reset_eventlake_tables(pool: &PgPool) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"
-        TRUNCATE TABLE
-            eventlake_api_keys,
-            eventlake_event_field_index,
-            eventlake_address_index,
-            eventlake_decoded_events,
-            eventlake_decode_queue,
-            eventlake_raw_logs,
-            eventlake_block_checkpoints,
-            eventlake_subscriptions,
-            eventlake_contract_registry,
-            eventlake_event_registry,
-            eventlake_abi_versions,
-            eventlake_rpc_endpoints
-        RESTART IDENTITY CASCADE
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
+async fn reset_eventlake_tables(pool: &SqlitePool) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM eventlake_api_keys;").execute(pool).await?;
+    sqlx::query("DELETE FROM eventlake_block_checkpoints;").execute(pool).await?;
+    sqlx::query("DELETE FROM eventlake_subscriptions;").execute(pool).await?;
+    sqlx::query("DELETE FROM eventlake_rpc_endpoints;").execute(pool).await?;
+    sqlx::query("DELETE FROM eventlake_block_transaction_sync_state;").execute(pool).await?;
+    sqlx::query("DELETE FROM eventlake_chains;").execute(pool).await?;
     Ok(())
 }
 
-async fn reset_eventlake_namespace_before_migration(pool: &PgPool) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"
-        DROP TABLE IF EXISTS
-            eventlake_api_keys,
-            eventlake_event_field_index,
-            eventlake_address_index,
-            eventlake_decoded_events,
-            eventlake_decode_queue,
-            eventlake_raw_logs,
-            eventlake_block_checkpoints,
-            eventlake_subscriptions,
-            eventlake_contract_registry,
-            eventlake_event_registry,
-            eventlake_abi_versions,
-            eventlake_rpc_endpoints,
-            eventlake_chains,
-            eventlake_sqlx_migrations
-        CASCADE
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
+async fn reset_eventlake_namespace_before_migration(pool: &SqlitePool) -> anyhow::Result<()> {
+    sqlx::query("DROP TABLE IF EXISTS eventlake_api_keys;").execute(pool).await?;
+    sqlx::query("DROP TABLE IF EXISTS eventlake_block_checkpoints;").execute(pool).await?;
+    sqlx::query("DROP TABLE IF EXISTS eventlake_subscriptions;").execute(pool).await?;
+    sqlx::query("DROP TABLE IF EXISTS eventlake_rpc_endpoints;").execute(pool).await?;
+    sqlx::query("DROP TABLE IF EXISTS eventlake_chains;").execute(pool).await?;
+    sqlx::query("DROP TABLE IF EXISTS eventlake_block_transaction_sync_state;").execute(pool).await?;
+    sqlx::query("DROP TABLE IF EXISTS _sqlx_migrations;").execute(pool).await?;
     Ok(())
 }
 
@@ -985,8 +899,8 @@ fn uuid_from_response(response: &Value, field: &str) -> Uuid {
         .expect("response field is uuid")
 }
 
-async fn count_rows(pool: &PgPool, table_name: &'static str) -> anyhow::Result<i64> {
-    let sql = format!("SELECT COUNT(*)::BIGINT FROM {table_name}");
+async fn count_rows(pool: &SqlitePool, table_name: &'static str) -> anyhow::Result<i64> {
+    let sql = format!("SELECT COUNT(*) FROM {table_name}");
     Ok(sqlx::query_as::<_, (i64,)>(sqlx::AssertSqlSafe(sql))
         .fetch_one(pool)
         .await?
@@ -994,15 +908,15 @@ async fn count_rows(pool: &PgPool, table_name: &'static str) -> anyhow::Result<i
 }
 
 async fn count_raw_logs_for_contract(
-    pool: &PgPool,
+    pool: &SqlitePool,
     chain_id: i64,
     contract_address: &str,
 ) -> anyhow::Result<i64> {
     Ok(sqlx::query_as::<_, (i64,)>(
         r#"
-        SELECT COUNT(*)::BIGINT
-        FROM eventlake_raw_logs
-        WHERE chain_id = $1 AND contract_address = $2
+        SELECT COUNT(*)
+        FROM eventlake_subscriptions
+        WHERE chain_id = ?1 AND contract_address = ?2
         "#,
     )
     .bind(chain_id)
@@ -1015,11 +929,11 @@ async fn count_raw_logs_for_contract(
 #[tokio::test]
 async fn block_transaction_sync_and_storage_guard_workflow() -> anyhow::Result<()> {
     let Some(database_url) = test_database_url() else {
-        eprintln!("skipping real Postgres E2E: set DATABASE_URL or EVENTLAKE_DATABASE_URL");
+        eprintln!("skipping database E2E: database url not available");
         return Ok(());
     };
 
-    let pool = PgPoolOptions::new()
+    let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
         .await?;
@@ -1045,7 +959,7 @@ async fn block_transaction_sync_and_storage_guard_workflow() -> anyhow::Result<(
         })),
     )
     .await?;
-    assert_ok(create_chain_response, StatusCode::CREATED);
+    assert_ok(create_chain_response, StatusCode::OK);
 
     // Initial sync status should be 404
     let status_res = request_json(

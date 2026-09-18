@@ -24,12 +24,18 @@ TODO -> IN_PROGRESS -> REVIEW -> DONE
 ## 2. 当前任务看板
 
 ### 活跃任务 (In Progress)
-- 暂无
+- （暂无活跃任务）
 
 ### 待规划 / 待执行 (TODO)
-- 暂无
+- （暂无待规划任务）
 
 ### 已完成任务 (DONE)
+- **TASK-011**: [清理冗余 Dockerfile 与 Compose 配置，统一构建与部署流水线至纯净 SQLite + ClickHouse](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-011.md)
+- **TASK-010**: [构建 SQLite + ClickHouse 统一备份恢复体系与 S3 增量运维脚本](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-010.md)
+- **TASK-009**: [存储层全面迁移至 SQLite 元数据引擎 + ClickHouse 唯一数据湖](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-009.md)
+- **TASK-008**: [压平重构 PostgreSQL 数据库迁移 (Squash Migrations) 并清理废弃表残留](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-008.md)
+- **TASK-007**: [移除 SSH_TUNNEL 隧道及容器代理相关实现与配置](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-007.md)
+- **TASK-006**: [审计优化实施（清理残留废弃表查询、轻量化Reorg流程、补齐交易收据API与收敛输入校验）](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-006.md)
 - **TASK-005**: [核心日志采集流水线并发化改造与多链/多订阅异步隔离](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-005.md)
 - **TASK-004**: [实现 RPC 节点池阶梯式退避冷却 (1m->5m->24h) 与内存化路由缓存](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-004.md)
 - **TASK-003**: [精简 ClickHouse 存储与 Reorg 流程（清理废表定义、消除 Reorg 4倍写入放大与空表 DDL 调度）](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-003.md)

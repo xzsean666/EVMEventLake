@@ -22,9 +22,9 @@ fn test_calculate_cooldown_seconds_progression() {
 async fn test_in_memory_cooldown_lifecycle_with_recovery() {
     reset_endpoint_cooldown_for_test();
     let endpoint_id = Uuid::new_v4();
-    let pool = sqlx::postgres::PgPoolOptions::new()
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .acquire_timeout(std::time::Duration::from_millis(50))
-        .connect_lazy("postgres://eventlake:eventlake@localhost/eventlake")
+        .connect_lazy("sqlite::memory:")
         .expect("lazy connect");
 
     // Initially clean

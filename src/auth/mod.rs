@@ -158,7 +158,7 @@ async fn authenticate_api_key(
         r#"
         SELECT id, role
         FROM eventlake_api_keys
-        WHERE key_hash = $1 AND revoked = false
+        WHERE key_hash = $1 AND revoked = 0
         "#,
     )
     .bind(key_hash)
@@ -168,7 +168,7 @@ async fn authenticate_api_key(
     let record = record.ok_or(ApplicationError::Unauthorized)?;
 
     // Debounce last_used_at updates so high-throughput requests using the same key
-    // don't serialize on a single PostgreSQL row lock.
+    // don't serialize on a single database row lock.
     let should_update = {
         let now = std::time::Instant::now();
         let cache = state
@@ -192,7 +192,7 @@ async fn authenticate_api_key(
         let pool = state.pool.clone();
         let key_id = record.id;
         tokio::spawn(async move {
-            let _ = sqlx::query("UPDATE eventlake_api_keys SET last_used_at = now() WHERE id = $1")
+            let _ = sqlx::query("UPDATE eventlake_api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = $1")
                 .bind(key_id)
                 .execute(&pool)
                 .await;
@@ -341,7 +341,7 @@ async fn revoke_api_key(
     let record = sqlx::query_as::<_, ApiKeySummary>(
         r#"
         UPDATE eventlake_api_keys
-        SET revoked = true
+        SET revoked = 1
         WHERE id = $1
         RETURNING id, name, role, revoked, created_at, last_used_at
         "#,

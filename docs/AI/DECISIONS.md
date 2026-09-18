@@ -80,3 +80,22 @@
   3. 严格践行：“一次一个 Task、单 Session 最多完成一个 Task、必须实际执行测试验证、每次结束更新 SESSION_STATE”。
 - **影响**:
   - 确保跨 Session 开发具备高度确定性、可维护性与可复现性。
+
+---
+
+## ADR-007: 存储层全面收敛至 SQLite + ClickHouse 唯一数据湖并支持 S3 增量备份恢复
+
+- **状态**: Accepted
+- **背景**: 原有架构使用 PostgreSQL 管理控制面元数据并在未开启 ClickHouse 时存储原始日志。这导致部署必须依赖外部 PostgreSQL 容器与数据库运维，且代码中存在双存储分支。随着系统定位为高性能 Raw Event Lake，海量数据全量依托 ClickHouse，PostgreSQL 仅用于几十条元数据，属于重型过度设计。
+- **决策**:
+  1. **彻底移除 PostgreSQL 依赖**：元数据与控制面（链配置、RPC 节点池、订阅、Checkpoints、鉴权、区块同步状态共 6 张核心表）全面平移至嵌入式 **SQLite**（WAL 模式 + 强一致事务），以单文件形式嵌入 Rust 单体进程，实现零外部 RDBMS 依赖。
+  2. **ClickHouse 作为唯一海量数据湖引擎**：移除 `eventlake_raw_logs` 在关系数据库中的存储与分区管理器，所有原始事件、区块与交易数据统一由 ClickHouse 承接。
+  3. **统一 S3 增量备份与恢复体系**：
+     - SQLite 在线生成极小单文件快照（`VACUUM INTO`，压缩后几百 KB），随每次备份完整保存。
+     - ClickHouse 利用不可变分片（Immutable Parts）特性，通过原生 SQL `BACKUP ... TO S3(...) SETTINGS base_backup = ...` 或专用工具执行极速增量推送。
+     - 提供开箱即用的一键运维备份与恢复 Shell 脚本，支持本地与云端 S3（含 Cloudflare R2 / MinIO）增量与全量备份及灾难恢复。
+- **影响**:
+  - 架构极度精简，部署形态从“双外部数据库依赖”降维为“单内置 SQLite + 唯一 ClickHouse 数据湖”。
+  - 彻底消除 PostgreSQL 分区表维护开销与双存储适配分支。
+  - 实现了分钟级甚至秒级的云端增量备份与无缝断点恢复。
+

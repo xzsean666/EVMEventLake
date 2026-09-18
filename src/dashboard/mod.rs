@@ -45,66 +45,34 @@ async fn dashboard_summary(
     _principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
 ) -> Result<Json<ApiResponse<DashboardSummary>>, ApplicationError> {
-    #[cfg(feature = "clickhouse")]
-    let ch_enabled = state.configuration.clickhouse.enabled;
-    #[cfg(not(feature = "clickhouse"))]
-    let ch_enabled = false;
+    let summary = sqlx::query_as::<_, DashboardSummary>(
+        r#"
+        SELECT
+            (SELECT COUNT(*) FROM eventlake_subscriptions WHERE active = 1) AS active_jobs,
+            (SELECT COUNT(*) FROM eventlake_subscriptions WHERE status = 'paused') AS paused_jobs,
+            (SELECT COUNT(*) FROM eventlake_subscriptions WHERE status = 'error') AS errored_jobs,
+            0 AS total_raw_logs,
+            0 AS total_decoded_events,
+            (SELECT COUNT(*) FROM eventlake_rpc_endpoints WHERE status = 'healthy') AS healthy_rpc_endpoints,
+            (SELECT COUNT(*) FROM eventlake_rpc_endpoints WHERE status = 'unhealthy') AS unhealthy_rpc_endpoints,
+            (SELECT COUNT(*) FROM eventlake_block_transaction_sync_state WHERE status IN ('syncing', 'caught_up', 'realtime_syncing')) AS active_block_sync_jobs,
+            (SELECT COUNT(*) FROM eventlake_block_transaction_sync_state WHERE status = 'error') AS errored_block_sync_jobs
+        "#,
+    )
+    .fetch_one(&state.pool)
+    .await?;
 
-    let query_str = if ch_enabled {
-        r#"
-        SELECT
-            (SELECT COUNT(*)::BIGINT FROM eventlake_subscriptions WHERE active = true) AS active_jobs,
-            (SELECT COUNT(*)::BIGINT FROM eventlake_subscriptions WHERE status = 'paused') AS paused_jobs,
-            (SELECT COUNT(*)::BIGINT FROM eventlake_subscriptions WHERE status = 'error') AS errored_jobs,
-            0::BIGINT AS total_raw_logs,
-            0::BIGINT AS total_decoded_events,
-            (SELECT COUNT(*)::BIGINT FROM eventlake_rpc_endpoints WHERE status = 'healthy') AS healthy_rpc_endpoints,
-            (SELECT COUNT(*)::BIGINT FROM eventlake_rpc_endpoints WHERE status = 'unhealthy') AS unhealthy_rpc_endpoints,
-            (SELECT COUNT(*)::BIGINT FROM eventlake_block_transaction_sync_state WHERE status IN ('syncing', 'caught_up', 'realtime_syncing')) AS active_block_sync_jobs,
-            (SELECT COUNT(*)::BIGINT FROM eventlake_block_transaction_sync_state WHERE status = 'error') AS errored_block_sync_jobs
-        "#
+    let total_raw_logs = if let Some(client) = crate::clickhouse::active_client(&state).await? {
+        crate::clickhouse::raw_log_count(&client)
+            .await
+            .unwrap_or(0)
     } else {
-        r#"
-        SELECT
-            (SELECT COUNT(*)::BIGINT FROM eventlake_subscriptions WHERE active = true) AS active_jobs,
-            (SELECT COUNT(*)::BIGINT FROM eventlake_subscriptions WHERE status = 'paused') AS paused_jobs,
-            (SELECT COUNT(*)::BIGINT FROM eventlake_subscriptions WHERE status = 'error') AS errored_jobs,
-            (SELECT COUNT(*)::BIGINT FROM eventlake_raw_logs WHERE removed = false) AS total_raw_logs,
-            0::BIGINT AS total_decoded_events,
-            (SELECT COUNT(*)::BIGINT FROM eventlake_rpc_endpoints WHERE status = 'healthy') AS healthy_rpc_endpoints,
-            (SELECT COUNT(*)::BIGINT FROM eventlake_rpc_endpoints WHERE status = 'unhealthy') AS unhealthy_rpc_endpoints,
-            (SELECT COUNT(*)::BIGINT FROM eventlake_block_transaction_sync_state WHERE status IN ('syncing', 'caught_up', 'realtime_syncing')) AS active_block_sync_jobs,
-            (SELECT COUNT(*)::BIGINT FROM eventlake_block_transaction_sync_state WHERE status = 'error') AS errored_block_sync_jobs
-        "#
+        0
     };
 
-    let summary = sqlx::query_as::<_, DashboardSummary>(query_str)
-        .fetch_one(&state.pool)
-        .await?;
-
-    #[cfg(feature = "clickhouse")]
-    let summary = if state.configuration.clickhouse.enabled {
-        let client = crate::clickhouse::active_client(&state)
-            .await?
-            .ok_or_else(|| {
-                ApplicationError::ExternalService(
-                    "ClickHouse is enabled but no client is available".to_owned(),
-                )
-            })?;
-        let total_raw_logs = crate::clickhouse::raw_log_count(&client)
-            .await
-            .map_err(|error| {
-                ApplicationError::ExternalService(format!(
-                    "ClickHouse dashboard query failed: {error}"
-                ))
-            })?;
-        DashboardSummary {
-            total_raw_logs,
-            total_decoded_events: 0,
-            ..summary
-        }
-    } else {
-        summary
+    let summary = DashboardSummary {
+        total_raw_logs,
+        ..summary
     };
 
     Ok(response::success(summary))

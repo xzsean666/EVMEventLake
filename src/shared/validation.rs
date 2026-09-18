@@ -1,8 +1,10 @@
-use crate::shared::{error::ApplicationError, hex::normalize_hex};
+use crate::shared::error::ApplicationError;
 
 pub fn normalize_address(value: &str) -> Result<String, ApplicationError> {
-    let normalized = normalize_hex(value);
-    let body = normalized.trim_start_matches("0x");
+    let body = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
 
     if body.len() != 40 || !body.chars().all(|character| character.is_ascii_hexdigit()) {
         return Err(ApplicationError::BadRequest(format!(
@@ -10,12 +12,14 @@ pub fn normalize_address(value: &str) -> Result<String, ApplicationError> {
         )));
     }
 
-    Ok(normalized)
+    Ok(format!("0x{}", body.to_ascii_lowercase()))
 }
 
 pub fn normalize_topic(value: &str) -> Result<String, ApplicationError> {
-    let normalized = normalize_hex(value);
-    let body = normalized.trim_start_matches("0x");
+    let body = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
 
     if body.len() != 64 || !body.chars().all(|character| character.is_ascii_hexdigit()) {
         return Err(ApplicationError::BadRequest(format!(
@@ -23,12 +27,14 @@ pub fn normalize_topic(value: &str) -> Result<String, ApplicationError> {
         )));
     }
 
-    Ok(normalized)
+    Ok(format!("0x{}", body.to_ascii_lowercase()))
 }
 
 pub fn normalize_hash(value: &str) -> Result<String, ApplicationError> {
-    let normalized = normalize_hex(value);
-    let body = normalized.trim_start_matches("0x");
+    let body = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
 
     if body.len() != 64 || !body.chars().all(|character| character.is_ascii_hexdigit()) {
         return Err(ApplicationError::BadRequest(format!(
@@ -36,5 +42,5 @@ pub fn normalize_hash(value: &str) -> Result<String, ApplicationError> {
         )));
     }
 
-    Ok(normalized)
+    Ok(format!("0x{}", body.to_ascii_lowercase()))
 }

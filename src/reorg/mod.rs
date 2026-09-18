@@ -11,24 +11,10 @@ pub enum BlockCheckpointResult {
 }
 
 pub async fn observe_block(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     chain_id: i64,
     block_number: i64,
     block_hash: &str,
-) -> Result<BlockCheckpointResult, ApplicationError> {
-    observe_block_with_postgres_storage(pool, chain_id, block_number, block_hash, true, true).await
-}
-
-/// Observes one canonical block. PostgreSQL-only deployments invalidate raw logs and
-/// legacy decoded projections locally. ClickHouse deployments keep both raw logs and
-/// their reorg tombstones in ClickHouse, while PostgreSQL only rewinds checkpoints.
-pub async fn observe_block_with_postgres_storage(
-    pool: &sqlx::PgPool,
-    chain_id: i64,
-    block_number: i64,
-    block_hash: &str,
-    postgres_raw_storage: bool,
-    postgres_search_storage: bool,
 ) -> Result<BlockCheckpointResult, ApplicationError> {
     let previous = sqlx::query_as::<_, (String,)>(
         "SELECT block_hash FROM eventlake_block_checkpoints WHERE chain_id = $1 AND block_number = $2",
@@ -59,23 +45,16 @@ pub async fn observe_block_with_postgres_storage(
         }
         Some((previous_hash,)) => {
             // The block hash changed: everything from this block onward on this chain is
-            // suspect. Invalidate it and rewind affected subscriptions atomically so the
-            // collector re-fetches the canonical fork. Either it all happens or none of it.
+            // suspect. Rewind affected subscriptions atomically so the collector re-fetches
+            // the canonical fork.
             let mut transaction = pool.begin().await?;
-            invalidate_from_block(
-                &mut transaction,
-                chain_id,
-                block_number,
-                postgres_raw_storage,
-                postgres_search_storage,
-            )
-            .await?;
+            invalidate_from_block(&mut transaction, chain_id, block_number).await?;
 
             sqlx::query(
                 r#"
                 UPDATE eventlake_block_checkpoints
                 SET block_hash = $3,
-                    observed_at = now()
+                    observed_at = CURRENT_TIMESTAMP
                 WHERE chain_id = $1 AND block_number = $2
                 "#,
             )
@@ -96,71 +75,10 @@ pub async fn observe_block_with_postgres_storage(
 }
 
 async fn invalidate_from_block(
-    connection: &mut sqlx::PgConnection,
+    connection: &mut sqlx::SqliteConnection,
     chain_id: i64,
     from_block: i64,
-    postgres_raw_storage: bool,
-    postgres_search_storage: bool,
 ) -> Result<(), ApplicationError> {
-    if postgres_raw_storage {
-        // Raw logs are preserved but flagged so collection can re-ingest the canonical
-        // fork without violating the unique index.
-        sqlx::query(
-            r#"
-            UPDATE eventlake_raw_logs
-            SET removed = true
-            WHERE chain_id = $1 AND block_number >= $2
-            "#,
-        )
-        .bind(chain_id)
-        .bind(from_block)
-        .execute(&mut *connection)
-        .await?;
-    }
-
-    if postgres_search_storage {
-        // Decoded events are kept for audit but flipped out of the 'decoded' status so the
-        // PostgreSQL search path stops returning reorged data immediately.
-        sqlx::query(
-            r#"
-            UPDATE eventlake_decoded_events
-            SET decode_status = 'reorged',
-                decode_error = 'invalidated by reorg',
-                decoded_at = now()
-            WHERE chain_id = $1 AND block_number >= $2 AND decode_status = 'decoded'
-            "#,
-        )
-        .bind(chain_id)
-        .bind(from_block)
-        .execute(&mut *connection)
-        .await?;
-
-        // The derived indexes are rebuilt from scratch on re-decode, so they are deleted.
-        sqlx::query(
-            r#"
-            DELETE FROM eventlake_address_index
-            WHERE chain_id = $1 AND block_number >= $2
-            "#,
-        )
-        .bind(chain_id)
-        .bind(from_block)
-        .execute(&mut *connection)
-        .await?;
-
-        sqlx::query(
-            r#"
-            DELETE FROM eventlake_event_field_index
-            WHERE chain_id = $1 AND block_number >= $2
-            "#,
-        )
-        .bind(chain_id)
-        .bind(from_block)
-        .execute(&mut *connection)
-        .await?;
-
-        refresh_contract_registry(connection, chain_id).await?;
-    }
-
     // Rewind subscriptions that had advanced past the reorg point so the collector
     // re-fetches the affected range on its next tick.
     sqlx::query(
@@ -169,57 +87,12 @@ async fn invalidate_from_block(
         SET current_block = $2,
             status = 'pending',
             error_message = 'rewound after chain reorg',
-            updated_at = now()
-        WHERE chain_id = $1 AND active = true AND current_block > $2
+            updated_at = CURRENT_TIMESTAMP
+        WHERE chain_id = $1 AND active = 1 AND current_block > $2
         "#,
     )
     .bind(chain_id)
     .bind(from_block)
-    .execute(&mut *connection)
-    .await?;
-
-    Ok(())
-}
-
-async fn refresh_contract_registry(
-    connection: &mut sqlx::PgConnection,
-    chain_id: i64,
-) -> Result<(), ApplicationError> {
-    sqlx::query(
-        r#"
-        WITH stats AS (
-            SELECT chain_id,
-                   contract_address,
-                   COUNT(*)::BIGINT AS event_count,
-                   MIN(block_number) AS first_seen_block,
-                   MAX(block_number) AS last_seen_block,
-                   MIN(decoded_at) AS first_seen_at,
-                   MAX(decoded_at) AS last_seen_at
-            FROM eventlake_decoded_events
-            WHERE chain_id = $1 AND decode_status = 'decoded'
-            GROUP BY chain_id, contract_address
-        ),
-        contracts AS (
-            SELECT chain_id, contract_address
-            FROM eventlake_contract_registry
-            WHERE chain_id = $1
-        )
-        UPDATE eventlake_contract_registry cr
-        SET event_count = COALESCE(stats.event_count, 0),
-            first_seen_block = stats.first_seen_block,
-            last_seen_block = stats.last_seen_block,
-            first_seen_at = stats.first_seen_at,
-            last_seen_at = stats.last_seen_at,
-            updated_at = now()
-        FROM contracts
-        LEFT JOIN stats
-          ON stats.chain_id = contracts.chain_id
-         AND stats.contract_address = contracts.contract_address
-        WHERE cr.chain_id = contracts.chain_id
-          AND cr.contract_address = contracts.contract_address
-        "#,
-    )
-    .bind(chain_id)
     .execute(&mut *connection)
     .await?;
 

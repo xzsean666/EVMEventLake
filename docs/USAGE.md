@@ -7,16 +7,13 @@
 
 | 目的 | Compose 文件 |
 | --- | --- |
-| PostgreSQL-only，本地开发或小规模部署 | `docker-compose.yml` |
-| ClickHouse 分析查询，源码构建 | `docker-compose.clickhouse.yml` |
-| 已构建二进制 | `docker-compose.prebuilt.yml` |
-| 已构建 ClickHouse 二进制 | `docker-compose.prebuilt.clickhouse.yml` |
-| 中国大陆网络环境 | 对应的 `.cn.yml` 文件 |
+| 源码构建 (本地完整开发、CI 流水线) | `docker-compose.yml` |
+| 预编译二进制 (生产部署、快速启动) | `docker-compose.prebuilt.yml` |
+| 中国大陆网络环境加速预编译 | `docker-compose.prebuilt.cn.yml` |
 
-默认部署只启动 PostgreSQL 和 EventLake。PostgreSQL-only 模式把 raw log 存在
-PostgreSQL；ClickHouse 模式把 raw log 只存到 ClickHouse，PostgreSQL 只保留订阅、
-checkpoint、认证和 reorg 状态。这个项目不再启动 ABI decoder，所有订阅的 `topics` 和
-`data` 都由下游项目解码。
+系统采用 **SQLite (控制面元数据) + ClickHouse (唯一原始事件湖)** 的纯净单一架构，彻底剥离了外部 PostgreSQL 依赖。ClickHouse 存储原始日志、区块和交易；嵌入式 SQLite 负责订阅、checkpoint、节点池与认证状态。
+
+备份与恢复运维手册见 [`BACKUP_AND_RESTORE.md`](file:///ssd0/git/EVMEventLake/docs/BACKUP_AND_RESTORE.md)。
 
 ## 2. 启动本地服务
 
@@ -29,41 +26,25 @@ docker compose --env-file .env ps
 curl -fsS http://127.0.0.1:8080/health/ready
 ```
 
-首次启动会自动执行 `migrations/` 中的 PostgreSQL migration。停止服务：
+首次启动会自动执行 `migrations/` 中的 SQLite migration。停止服务：
 
 ```bash
 docker compose --env-file .env down
 ```
 
-只在可丢弃的本地环境中删除 PostgreSQL 数据卷：
+### 预编译二进制部署
 
+先在本地或 CI 构建 Linux 二进制：
 ```bash
-docker compose --env-file .env down -v
+scripts/build-prebuilt-binary.sh
 ```
 
-### 启用 ClickHouse
-
-源码构建和运行：
-
+使用预编译镜像快速启动：
 ```bash
-docker compose --env-file .env -f docker-compose.clickhouse.yml up -d --build
-curl -fsS http://127.0.0.1:8080/health/ready
+docker compose --env-file .env -f docker-compose.prebuilt.yml up -d --build
 ```
 
-该 Compose 文件使用 `clickhouse/clickhouse-server:24.8`，通过 HTTP `8123` 连接，
-并把数据和日志分别保存到 `data/clickhouse`、`logs/clickhouse`。应用镜像使用
-`--features clickhouse` 构建；ClickHouse 连接失败时服务仍会启动，但 raw-log 写入和
-查询会等待 ClickHouse 恢复，不会回退 PostgreSQL，也不会推进失败区间的 checkpoint。
-
-预编译部署：
-
-```bash
-EVENTLAKE_PREBUILT_BINARY=deploy/prebuilt/eventlake-clickhouse \
-  scripts/build-prebuilt-binary.sh
-docker compose --env-file .env -f docker-compose.prebuilt.clickhouse.yml up -d --build
-```
-
-更多镜像、国内镜像和 SSH 隧道选项见 [`DEPLOYMENT.md`](DEPLOYMENT.md)。
+更多镜像和国内镜像选项见 [`DEPLOYMENT.md`](DEPLOYMENT.md)。
 
 ## 3. 检查服务和查看 API
 
@@ -184,7 +165,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/subscriptions \
 
 省略 `collection_scope` 时默认为 `contract`。同一
 `chain_id + collection_scope + contract_address` 只能有一个 active subscription。启动
-后台 worker 后，流程为：RPC 拉取 raw logs -> 写入当前 raw store -> 推进 PostgreSQL
+后台 worker 后，流程为：RPC 拉取 raw logs -> 写入 ClickHouse -> 推进 SQLite
 checkpoint。`start_block` 是必填的起始区块，第一次请求范围从该区块开始（包含该区块），
 完成后 checkpoint 推进到下一块；项目不会解码 topics 或 data。
 为避免全量和按合约重复拉取，同一链不能同时存在 active 的 `all_events` 与
@@ -211,10 +192,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/subscriptions/batch \
 
 ### 5.4 创建全量事件订阅
 
-`EVENTLAKE_CLICKHOUSE_ENABLED=true` 只是启用 ClickHouse raw store，并不会自动创建全量
-订阅。全量模式需要该开关且二进制必须以 `clickhouse` feature 构建；创建订阅时设置
-`collection_scope: "all_events"`，不传 `contract_address`，RPC `eth_getLogs` 才会不带
-地址过滤：
+在单一数据湖架构下，创建订阅时设置 `collection_scope: "all_events"`，不传 `contract_address`，RPC `eth_getLogs` 才会不带地址过滤，采集该链的所有事件日志：
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/api/subscriptions \
@@ -253,9 +231,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/raw-logs/search \
   }'
 ```
 
-ClickHouse 模式查询 `raw_logs FINAL`；PostgreSQL-only 模式查询
-`eventlake_raw_logs`。ClickHouse 不可用时不会回退 PostgreSQL，避免返回不完整数据。
-`/api/search` 和 explorer 接口保留为历史 decoded 数据兼容读取面，新采集不会填充它们。
+搜索接口直接查询 ClickHouse `raw_logs FINAL`，底层 ReplacingMergeTree 会基于最新版本状态和 `is_removed = false` 自动屏蔽链上 Reorg 孤儿日志，保证瞬时读取一致性。
 
 ## 7. 区块与交易数据同步与查询 (Block & Transaction)
 
@@ -321,10 +297,10 @@ curl -sS "http://127.0.0.1:8080/api/chains/31337/addresses/0x1111111111111111111
 | --- | --- | --- |
 | `EVENTLAKE_HTTP_HOST` | `0.0.0.0`（Compose） | HTTP 监听地址 |
 | `EVENTLAKE_HTTP_PORT` | `8080` | HTTP 监听端口 |
-| `EVENTLAKE_DATABASE_URL` | Compose 内部 PostgreSQL URL | PostgreSQL 连接 |
+| `EVENTLAKE_DATABASE_URL` | `sqlite:///data/eventlake.db?mode=rwc` | 控制面 SQLite 嵌入式数据库连接 |
 | `EVENTLAKE_BACKGROUND_WORKERS_ENABLED` | `true` | 启用采集、RPC 检查和维护 worker |
-| `EVENTLAKE_CLICKHOUSE_URL` | - | ClickHouse 连接 URL（如 `http://eventlake:eventlake@clickhouse:8123/eventlake`，推荐） |
-| `EVENTLAKE_CLICKHOUSE_ENABLED` | `false` | 启用 ClickHouse raw store（设置 URL 时默认启用） |
+| `EVENTLAKE_CLICKHOUSE_URL` | `http://eventlake:eventlake@clickhouse:8123/eventlake` | ClickHouse 连接 URL |
+| `EVENTLAKE_CLICKHOUSE_ENABLED` | `true` | 启用 ClickHouse raw store |
 | `EVENTLAKE_BLOCK_TRANSACTION_ENABLED` | `false` | 启用整链区块和交易后台同步 worker |
 | `EVENTLAKE_BLOCK_TRANSACTION_BATCH_SIZE` | `10` | 区块与交易批量拉取区块数量 |
 | `EVENTLAKE_BLOCK_TRANSACTION_MAX_CONCURRENCY` | `2` | 最大并发同步链数量 |
@@ -337,7 +313,7 @@ curl -sS "http://127.0.0.1:8080/api/chains/31337/addresses/0x1111111111111111111
 
 ```bash
 docker compose --env-file .env logs -f eventlake
-docker compose --env-file .env -f docker-compose.clickhouse.yml logs -f clickhouse
+docker compose --env-file .env logs -f clickhouse
 ```
 
 ## 9. 开发验证
@@ -346,15 +322,13 @@ docker compose --env-file .env -f docker-compose.clickhouse.yml logs -f clickhou
 cargo fmt --check
 cargo check --locked
 cargo test --locked
-cargo check --locked --features clickhouse
-cargo test --locked --features clickhouse
 ```
 
 ClickHouse 集成测试默认跳过真实服务；已启动 ClickHouse 后可显式运行：
 
 ```bash
 EVENTLAKE_RUN_CLICKHOUSE_INTEGRATION=true \
-  cargo test --locked --features clickhouse --test clickhouse_integration_tests -- --nocapture
+  cargo test --locked --test clickhouse_integration_tests -- --nocapture
 ```
 
 完整部署矩阵和 Compose 配置检查见 [`DEPLOYMENT.md`](DEPLOYMENT.md)。

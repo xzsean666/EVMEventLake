@@ -297,7 +297,6 @@ fn test_attach_receipts_to_blocks_matching() {
     assert_eq!(tx1.l1_fee, Some("1500".to_owned()));
 }
 
-#[cfg(feature = "clickhouse")]
 #[test]
 fn test_transaction_row_receipt_fields() {
     use eventlake::clickhouse::TransactionRow;

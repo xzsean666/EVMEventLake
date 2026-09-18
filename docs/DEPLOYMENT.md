@@ -1,229 +1,168 @@
 # EventLake Docker Deployment
 
-Version: 1.0
+Version: 2.0
 
 Status: Current implementation
 
 ## 1. Deployment Modes
 
-EventLake supports three Docker deployment entrypoints:
+EventLake 收敛为极简统一架构：**SQLite**（轻量嵌入式控制面）+ **ClickHouse**（唯一原始事件与区块交易数据湖）。
+
+系统提供三套标准 Docker 部署方式：
 
 | Mode | Files | When to use |
 | --- | --- | --- |
-| Source build | `Dockerfile`, `docker-compose.yml` | CI or hosts that can download Rust crates and Debian packages. |
-| Prebuilt binary | `scripts/build-prebuilt-binary.sh`, `Dockerfile.prebuilt`, `docker-compose.prebuilt.yml` | Hosts that should only package and run an already-built Linux binary. |
-| China prebuilt binary | `Dockerfile.prebuilt.cn`, `docker-compose.prebuilt.cn.yml` | China mainland hosts where Docker Hub, Debian apt, or Cargo access is unstable. |
-| ClickHouse source build | `Dockerfile.clickhouse`, `docker-compose.clickhouse.yml` | Build EventLake with analytical search enabled. |
-| ClickHouse prebuilt binary | `Dockerfile.prebuilt.clickhouse`, `docker-compose.prebuilt.clickhouse.yml` | Run the ClickHouse-enabled prebuilt binary. |
-| ClickHouse China prebuilt | `Dockerfile.prebuilt.clickhouse.cn`, `docker-compose.prebuilt.clickhouse.cn.yml` | China-optimized ClickHouse prebuilt deployment. |
+| **源码构建 (Source build)** | `Dockerfile`, `docker-compose.yml` | 本地完整开发、CI 流水线或具备 Rust 编译环境的主机。 |
+| **预编译二进制部署 (Prebuilt binary)** | `scripts/build-prebuilt-binary.sh`, `Dockerfile.prebuilt`, `docker-compose.prebuilt.yml` | 生产服务器或只需要打包并运行 Linux release 二进制的环境。 |
+| **中国大陆镜像预编译 (China prebuilt)** | `Dockerfile.prebuilt.cn`, `docker-compose.prebuilt.cn.yml` | 中国大陆网络环境（自动配置 DaoCloud Docker 镜像加速与 Aliyun apt 镜像源）。 |
 
-The original modes use:
+每套部署统一启动两个服务：
+- `clickhouse`: 高性能列式数据湖引擎（`clickhouse/clickhouse-server:24.8`），对外提供 HTTP（8123）与 Native（9000）接口，数据持久化于 `./data/clickhouse`。
+- `eventlake`: Rust 单体核心进程，内嵌 SQLite 作为元数据事实源（持久化于 `./data/sqlite`）。
 
-- `postgres`
-- `eventlake`
+---
 
-The ClickHouse variants add a `clickhouse` service for large raw-event datasets.
-In this mode raw logs are written only to ClickHouse; PostgreSQL remains the
-operational source of truth for subscriptions, checkpoints, RPC, and auth.
-
-## 2. Runtime Facts
+## 2. 运行时配置与目录约定
 
 - Rust package: `eventlake`
-- Deployed binary: `eventlake`
-- Container user: `eventlake`
-- HTTP host env: `EVENTLAKE_HTTP_HOST`
-- HTTP port env: `EVENTLAKE_HTTP_PORT`
-- Default container port: `8080`
-- Default host port: `EVENTLAKE_HTTP_PORT`, default `8080`
-- Health endpoint: `/health/ready`
-- Persistent state: PostgreSQL operational state; ClickHouse variants also persist the raw-event store
+- 二进制产物: `eventlake`（位于 `/usr/local/bin/eventlake` 或 `deploy/prebuilt/eventlake`）
+- 容器用户: `eventlake` (uid 10001)
+- 监听端口: `8080`（容器内），可通过环境变量 `EVENTLAKE_HTTP_PORT` 映射到宿主机
+- 健康检查: `/health/ready`（检查 HTTP 服务及底层存储连通性）
+- 持久化目录结构：
+  - `./data/sqlite`: SQLite 数据库文件（`eventlake.db`）
+  - `./data/clickhouse`: ClickHouse 数据分片与元数据
+  - `./logs/clickhouse`: ClickHouse 服务日志
+  - `./backups`: 本地备份归档目录
+- 统一备份与灾难恢复：详见 [`docs/BACKUP_AND_RESTORE.md`](BACKUP_AND_RESTORE.md)。
 
-The application compiles migrations into the binary with `sqlx::migrate!("./migrations")`.
-The source-build Dockerfile copies `migrations/` into the builder stage so the release
-binary includes the migration set.
+---
 
-## 3. Environment File
+## 3. 环境配置文件 (.env)
 
-Use `.env.example` as the template for local Docker deployment. For a real deployment,
-create an environment file with the same keys and change at least:
-
-- `EVENTLAKE_JWT_SECRET`
-- `EVENTLAKE_DATABASE_URL`
-
-When using a non-default env file, pass it in both places:
+从模版复制配置文件：
 
 ```bash
-EVENTLAKE_ENV_FILE=.env docker compose --env-file .env up -d --build eventlake
+cp .env.example .env
 ```
 
-`--env-file` feeds Compose interpolation. `EVENTLAKE_ENV_FILE` selects the env file
-mounted into the `eventlake` container.
+在生产环境中，请至少修改：
+- `EVENTLAKE_JWT_SECRET`：强随机密钥
+- `EVENTLAKE_DATABASE_URL`：SQLite 连接串（Compose 默认为 `sqlite:///data/eventlake.db?mode=rwc`）
+- `EVENTLAKE_CLICKHOUSE_URL`：ClickHouse 连接串（Compose 默认为 `http://eventlake:eventlake@clickhouse:8123/eventlake`）
 
-## 4. Source Build Deployment
+如果使用自定义环境变量文件，同时传递给 Compose 与容器：
 
 ```bash
-docker compose --env-file .env.example up -d --build eventlake
-docker compose --env-file .env.example ps
+EVENTLAKE_ENV_FILE=.env.prod docker compose --env-file .env.prod up -d --build
+```
+
+---
+
+## 4. 模式一：源码构建部署 (Source Build)
+
+适用于具备外网或本地包含 Rust 依赖缓存的环境：
+
+```bash
+# 启动 ClickHouse 与 EventLake
+docker compose --env-file .env up -d --build
+
+# 检查服务运行状态
+docker compose --env-file .env ps
+
+# 验证就绪状态
 curl -fsS http://127.0.0.1:8080/health/ready
 ```
 
-Stop services:
+停止服务：
 
 ```bash
-docker compose down
+docker compose --env-file .env down
 ```
 
-Remove the local PostgreSQL volume only for disposable local environments:
+---
 
-```bash
-docker compose down -v
-```
+## 5. 模式二：预编译二进制部署 (Prebuilt Binary)
 
-## 5. Prebuilt Binary Deployment
-
-Build the Linux binary first:
+1. 先在构建机或宿主机编译 Linux release 二进制：
 
 ```bash
 scripts/build-prebuilt-binary.sh
 ```
 
-Then build and run the lightweight runtime image:
+生成的二进制保存在 `deploy/prebuilt/eventlake`。
+
+2. 在目标主机启动精简运行时镜像（Debian slim）：
 
 ```bash
-docker compose --env-file .env.example -f docker-compose.prebuilt.yml up -d --build eventlake
-docker compose --env-file .env.example -f docker-compose.prebuilt.yml ps
+docker compose --env-file .env -f docker-compose.prebuilt.yml up -d --build
+docker compose --env-file .env -f docker-compose.prebuilt.yml ps
 curl -fsS http://127.0.0.1:8080/health/ready
 ```
 
-Optional variables:
+可选参数：
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `EVENTLAKE_PREBUILT_BINARY` | `deploy/prebuilt/eventlake` | 指定预编译二进制路径 |
+| `EVENTLAKE_CARGO_TARGET` | 宿主机架构 | 交叉编译 target triple（例如 `x86_64-unknown-linux-gnu`） |
+| `CARGO_TARGET_DIR` | `target` | Cargo 构建目录 |
 
-| Variable | Purpose |
-| --- | --- |
-| `EVENTLAKE_PREBUILT_BINARY` | Override the generated binary path. Default: `deploy/prebuilt/eventlake`. |
-| `EVENTLAKE_CARGO_TARGET` | Pass a target triple to `cargo build --target`. |
-| `CARGO_TARGET_DIR` | Override Cargo's target directory. |
+---
 
-The prebuilt binary must match the runtime container OS, CPU architecture, and libc.
-For the default Debian slim runtime, build a Linux glibc binary.
+## 6. 模式三：中国大陆加速预编译部署 (China Prebuilt)
 
-## 6. China Prebuilt Deployment
-
-Build the binary before running Docker on the target host:
+1. 编译 Linux 二进制：
 
 ```bash
 scripts/build-prebuilt-binary.sh
 ```
 
-Run the China-optimized compose file:
+2. 使用配置了国内镜像源的 Compose 启动：
 
 ```bash
-docker compose --env-file .env.example -f docker-compose.prebuilt.cn.yml up -d --build eventlake
-docker compose --env-file .env.example -f docker-compose.prebuilt.cn.yml ps
+docker compose --env-file .env -f docker-compose.prebuilt.cn.yml up -d --build
+docker compose --env-file .env -f docker-compose.prebuilt.cn.yml ps
 curl -fsS http://127.0.0.1:8080/health/ready
 ```
 
-Overridable China network variables:
+支持覆盖的国内源环境变量：
+| 变量 | 默认配置 | 说明 |
+| --- | --- | --- |
+| `EVENTLAKE_DEBIAN_IMAGE` | `m.daocloud.io/docker.io/library/debian:bookworm-slim` | Debian 基础镜像 |
+| `EVENTLAKE_DEBIAN_MIRROR` | `http://mirrors.aliyun.com/debian` | 阿里云 Debian 镜像源 |
+| `EVENTLAKE_DEBIAN_SECURITY_MIRROR` | `http://mirrors.aliyun.com/debian-security` | 阿里云 Debian 安全更新源 |
+| `EVENTLAKE_CLICKHOUSE_IMAGE` | `m.daocloud.io/docker.io/clickhouse/clickhouse-server:24.8` | ClickHouse 镜像代理 |
 
-| Variable | Default |
-| --- | --- |
-| `EVENTLAKE_DEBIAN_IMAGE` | `m.daocloud.io/docker.io/library/debian:bookworm-slim` |
-| `EVENTLAKE_DEBIAN_MIRROR` | `http://mirrors.aliyun.com/debian` |
-| `EVENTLAKE_DEBIAN_SECURITY_MIRROR` | `http://mirrors.aliyun.com/debian-security` |
-| `EVENTLAKE_POSTGRES_IMAGE` | `m.daocloud.io/docker.io/library/postgres:18` |
+---
 
-## 7. ClickHouse Deployment
+## 7. 运维与验证
 
-Build the ClickHouse-enabled binary for a prebuilt variant:
-
-```bash
-EVENTLAKE_PREBUILT_BINARY=deploy/prebuilt/eventlake-clickhouse scripts/build-prebuilt-binary.sh
-```
-
-Run the source-build variant:
+### 7.1 Compose 静态语法检查
 
 ```bash
-docker compose --env-file .env.example -f docker-compose.clickhouse.yml up -d --build
+docker compose --env-file .env.example -f docker-compose.yml config > /dev/null
+docker compose --env-file .env.example -f docker-compose.prebuilt.yml config > /dev/null
+docker compose --env-file .env.example -f docker-compose.prebuilt.cn.yml config > /dev/null
 ```
 
-For prebuilt variants, replace the Compose file with
-`docker-compose.prebuilt.clickhouse.yml` or `docker-compose.prebuilt.clickhouse.cn.yml`.
-The ClickHouse Compose files set `EVENTLAKE_CLICKHOUSE_ENABLED=true` and connect to the
-`clickhouse` service over HTTP port `8123`.
-
-## 8. Verification
-
-Static checks:
+### 7.2 日志查看
 
 ```bash
-cargo build --release --locked
-scripts/build-prebuilt-binary.sh
-docker compose config
-docker compose -f docker-compose.prebuilt.yml config
-docker compose -f docker-compose.prebuilt.cn.yml config
-docker compose -f docker-compose.clickhouse.yml config
-docker compose -f docker-compose.prebuilt.clickhouse.yml config
-docker compose -f docker-compose.prebuilt.clickhouse.cn.yml config
+# 查看 EventLake 实时日志
+docker compose logs -f eventlake
+
+# 查看 ClickHouse 实时日志
+docker compose logs -f clickhouse
 ```
 
-Image checks:
+### 7.3 一键备份与恢复
+
+系统内置全自动本地与云端备份脚本，详见 [`docs/BACKUP_AND_RESTORE.md`](BACKUP_AND_RESTORE.md)：
 
 ```bash
-docker build -f Dockerfile -t eventlake:local .
-docker build -f Dockerfile.prebuilt -t eventlake:prebuilt .
-docker build -f Dockerfile.prebuilt.cn -t eventlake:prebuilt-cn .
-docker build -f Dockerfile.clickhouse -t eventlake:clickhouse .
-```
+# 全量备份
+./scripts/backup.sh --full --local
 
-Runtime check:
-
-```bash
-curl -fsS http://127.0.0.1:8080/health/ready
-```
-
-## 9. Optional SSH Tunnel Proxy
-
-The prebuilt Docker images include `scripts/docker-ssh-tunnel-proxy.sh` as the
-container entrypoint. The Dockerfiles, compose files, and script default
-`SSH_TUNNEL_ENABLED=false`, so the wrapper simply starts EventLake unless you
-explicitly enable it. If tunnel variables are set and
-`SSH_TUNNEL_ENABLED=true`, it opens an SSH dynamic SOCKS5 tunnel and exports:
-
-- `ALL_PROXY`
-- `HTTP_PROXY`
-- `HTTPS_PROXY`
-- lowercase equivalents
-- `NO_PROXY`
-
-This is a process-level proxy environment, not an iptables transparent proxy.
-It covers EventLake's `reqwest` JSON-RPC calls and other clients that honor
-`ALL_PROXY`/`HTTP_PROXY`/`HTTPS_PROXY`. Arbitrary raw TCP traffic would need a
-separate privileged transparent-proxy setup.
-
-Minimum `.env` values:
-
-```bash
-SSH_TUNNEL_ENABLED=true
-SSH_TUNNEL_HOST=203.0.113.10
-SSH_TUNNEL_PORT=22
-SSH_TUNNEL_USER=root
-SSH_TUNNEL_PRIVATE_KEY_B64=...
-SSH_TUNNEL_NO_PROXY=127.0.0.1,localhost,::1,postgres,clickhouse,eventlake
-```
-
-Prefer `SSH_TUNNEL_PRIVATE_KEY_B64` because multiline private keys are fragile in
-environment files:
-
-```bash
-base64 -w0 ~/.ssh/id_ed25519
-```
-
-The script is generic. To reuse it in another Docker image, install
-`openssh-client`, copy the script into the image, and wrap the service command:
-
-```dockerfile
-COPY scripts/docker-ssh-tunnel-proxy.sh /usr/local/bin/docker-ssh-tunnel-proxy
-RUN chmod 0755 /usr/local/bin/docker-ssh-tunnel-proxy
-ENV SSH_TUNNEL_ENABLED=false
-ENTRYPOINT ["docker-ssh-tunnel-proxy"]
-CMD ["your-service"]
+# 备份完整性验证
+./scripts/verify-backup.sh --latest
 ```

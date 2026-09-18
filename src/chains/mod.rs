@@ -162,7 +162,7 @@ async fn create_chain(
             default_min_block_window = EXCLUDED.default_min_block_window,
             default_max_block_window = EXCLUDED.default_max_block_window,
             rpc_notes = EXCLUDED.rpc_notes,
-            updated_at = now()
+            updated_at = CURRENT_TIMESTAMP
         RETURNING chain_id, name, native_token_symbol, status, safe_confirmation_depth,
                   default_min_block_window, default_max_block_window, rpc_notes, created_at, updated_at
         "#,
@@ -181,7 +181,7 @@ async fn create_chain(
 }
 
 pub async fn get_collection_policy(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     chain_id: i64,
 ) -> Result<CollectionPolicy, ApplicationError> {
     let row = sqlx::query_as::<_, (i64, i64, i64)>(

@@ -62,10 +62,10 @@ async fn check_enabled_endpoints(
                         UPDATE eventlake_rpc_endpoints
                         SET status = 'healthy',
                             latency_ms = $2,
-                            last_check_at = now(),
+                            last_check_at = CURRENT_TIMESTAMP,
                             failure_count = 0,
                             last_error = NULL,
-                            updated_at = now()
+                            updated_at = CURRENT_TIMESTAMP
                         WHERE id = $1
                         "#,
                     )

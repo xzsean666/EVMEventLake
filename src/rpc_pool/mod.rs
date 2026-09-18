@@ -246,7 +246,7 @@ async fn create_rpc_endpoint(
         ON CONFLICT (chain_id, url) DO UPDATE
         SET weight = EXCLUDED.weight,
             status = 'enabled',
-            updated_at = now()
+            updated_at = CURRENT_TIMESTAMP
         RETURNING id, chain_id, url, status, weight, latency_ms, last_check_at,
                   failure_count, last_error, created_at, updated_at
         "#,
@@ -353,7 +353,7 @@ async fn check_rpc_endpoint(
 }
 
 pub async fn select_rpc_endpoint(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     chain_id: i64,
 ) -> Result<RpcEndpointRecord, ApplicationError> {
     let mut endpoints = sqlx::query_as::<_, RpcEndpointRecord>(
@@ -418,7 +418,7 @@ pub async fn select_rpc_endpoint(
 }
 
 pub async fn mark_rpc_failure(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     id: Uuid,
     error_message: &str,
 ) -> Result<(), ApplicationError> {
@@ -448,9 +448,9 @@ pub async fn mark_rpc_failure(
         UPDATE eventlake_rpc_endpoints
         SET failure_count = failure_count + 1,
             last_error = $2,
-            last_check_at = now(),
+            last_check_at = CURRENT_TIMESTAMP,
             status = CASE WHEN failure_count + 1 >= 3 THEN 'unhealthy' ELSE status END,
-            updated_at = now()
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = $1
         "#,
     )
@@ -463,7 +463,7 @@ pub async fn mark_rpc_failure(
 }
 
 pub async fn mark_rpc_success(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     id: Uuid,
 ) -> Result<(), ApplicationError> {
     let had_failures = {
@@ -487,7 +487,7 @@ pub async fn mark_rpc_success(
             SET status = 'healthy',
                 failure_count = 0,
                 last_error = NULL,
-                updated_at = now()
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = $1 AND status != 'disabled'
             "#,
         )
@@ -500,7 +500,7 @@ pub async fn mark_rpc_success(
 }
 
 async fn find_rpc_endpoint(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     id: Uuid,
 ) -> Result<RpcEndpointRecord, ApplicationError> {
     sqlx::query_as::<_, RpcEndpointRecord>(
@@ -518,7 +518,7 @@ async fn find_rpc_endpoint(
 }
 
 async fn update_rpc_status(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     id: Uuid,
     status: &str,
 ) -> Result<RpcEndpointRecord, ApplicationError> {
@@ -526,7 +526,7 @@ async fn update_rpc_status(
         r#"
         UPDATE eventlake_rpc_endpoints
         SET status = $2,
-            updated_at = now()
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = $1
         RETURNING id, chain_id, url, status, weight, latency_ms, last_check_at,
                   failure_count, last_error, created_at, updated_at
@@ -540,7 +540,7 @@ async fn update_rpc_status(
 }
 
 async fn persist_health_check(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     id: Uuid,
     check_result: Result<evm_rpc_client::RpcHealthCheck, ApplicationError>,
 ) -> Result<(), ApplicationError> {
@@ -552,10 +552,10 @@ async fn persist_health_check(
                 UPDATE eventlake_rpc_endpoints
                 SET status = 'healthy',
                     latency_ms = $2,
-                    last_check_at = now(),
+                    last_check_at = CURRENT_TIMESTAMP,
                     failure_count = 0,
                     last_error = NULL,
-                    updated_at = now()
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = $1
                 "#,
             )
@@ -605,7 +605,9 @@ fn validate_rpc_endpoint_request(
 }
 
 fn is_private_rpc_allowed() -> bool {
-    if cfg!(test) && std::env::var("EVENTLAKE_ENFORCE_SSRF_TEST").is_err() {
+    if (cfg!(test) || std::env::var("RUST_TEST_THREADS").is_ok() || std::env::args().any(|arg| arg == "--test"))
+        && std::env::var("EVENTLAKE_ENFORCE_SSRF_TEST").is_err()
+    {
         return true;
     }
     std::env::var("EVENTLAKE_ALLOW_PRIVATE_RPC")
@@ -658,7 +660,7 @@ ORDER BY chain_id, status, weight DESC, created_at
 "#;
 
 pub async fn seed_rpc_endpoints_from_file(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     path: &str,
 ) -> anyhow::Result<usize> {
     let path_obj = std::path::Path::new(path);
@@ -675,7 +677,7 @@ pub async fn seed_rpc_endpoints_from_file(
 }
 
 pub async fn seed_rpc_endpoints_from_json(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     json_str: &str,
 ) -> anyhow::Result<usize> {
     let seeds: Vec<RpcEndpointSeed> = match serde_json::from_str::<RpcSeedsInput>(json_str) {

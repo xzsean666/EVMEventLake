@@ -32,7 +32,6 @@ pub async fn run(configuration: ApplicationConfiguration) -> anyhow::Result<()> 
     let cors = build_cors_layer(&configuration.http.cors_allowed_origins);
     let state = ApplicationState::new(configuration, pool);
 
-    #[cfg(feature = "clickhouse")]
     let state = match crate::clickhouse::connect(&state.configuration.clickhouse).await {
         Ok(Some(client)) => state.with_clickhouse(client),
         Ok(None) => state,
@@ -62,25 +61,10 @@ pub async fn run(configuration: ApplicationConfiguration) -> anyhow::Result<()> 
 }
 
 fn validate_storage_mode(configuration: &ApplicationConfiguration) -> anyhow::Result<()> {
-    #[cfg(feature = "clickhouse")]
-    if configuration.block_transaction.enabled && !configuration.clickhouse.enabled {
+    if !configuration.clickhouse.enabled {
         anyhow::bail!(
-            "EVENTLAKE_BLOCK_TRANSACTION_ENABLED=true requires EVENTLAKE_CLICKHOUSE_ENABLED=true"
+            "EVMEventLake requires ClickHouse as the event lake engine (EVENTLAKE_CLICKHOUSE_ENABLED=true)"
         );
-    }
-
-    #[cfg(not(feature = "clickhouse"))]
-    {
-        if configuration.clickhouse.enabled {
-            anyhow::bail!(
-                "EVENTLAKE_CLICKHOUSE_ENABLED=true requires a binary built with --features clickhouse"
-            );
-        }
-        if configuration.block_transaction.enabled {
-            anyhow::bail!(
-                "EVENTLAKE_BLOCK_TRANSACTION_ENABLED=true requires a binary built with --features clickhouse"
-            );
-        }
     }
 
     Ok(())

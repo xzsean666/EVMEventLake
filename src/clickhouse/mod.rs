@@ -147,7 +147,7 @@ pub async fn initialize_schema(client: &Client) -> anyhow::Result<()> {
 }
 
 /// Persists an entire RPC response atomically at the collector checkpoint boundary. The
-/// caller advances PostgreSQL's subscription checkpoint only after this returns success.
+/// caller advances SQLite's subscription checkpoint only after this returns success.
 pub async fn write_raw_logs(client: &Client, logs: &[RawLog]) -> anyhow::Result<()> {
     if logs.is_empty() {
         return Ok(());
@@ -320,9 +320,9 @@ pub async fn search_raw_logs(
                 id: row.id,
                 subscription_id: row.subscription_id,
                 chain_id: i64::try_from(row.chain_id)
-                    .context("ClickHouse chain ID exceeds PostgreSQL BIGINT")?,
+                    .context("ClickHouse chain ID exceeds i64")?,
                 block_number: i64::try_from(row.block_number)
-                    .context("ClickHouse block number exceeds PostgreSQL BIGINT")?,
+                    .context("ClickHouse block number exceeds i64")?,
                 block_hash: row.block_hash,
                 transaction_hash: row.transaction_hash,
                 transaction_index: i64::from(row.transaction_index),
@@ -343,150 +343,10 @@ pub async fn raw_log_count(client: &Client) -> anyhow::Result<i64> {
         .query("SELECT count() FROM raw_logs FINAL WHERE is_removed = false")
         .fetch_one::<u64>()
         .await?;
-    i64::try_from(count).context("ClickHouse raw-log count exceeds PostgreSQL BIGINT")
+    i64::try_from(count).context("ClickHouse raw-log count exceeds i64")
 }
 
-pub async fn decoded_event_count(client: &Client) -> anyhow::Result<i64> {
-    let count = client
-        .query("SELECT count() FROM decoded_events FINAL WHERE is_removed = false")
-        .fetch_one::<u64>()
-        .await?;
-    i64::try_from(count).context("ClickHouse decoded-event count exceeds PostgreSQL BIGINT")
-}
 
-#[derive(Row, Deserialize)]
-pub struct AddressRecentEvent {
-    pub chain_id: u64,
-    pub contract_address: String,
-    pub event_name: String,
-    pub field_name: String,
-    pub block_number: u64,
-    pub transaction_hash: String,
-}
-
-#[derive(Row, Deserialize)]
-pub struct RelatedContract {
-    pub chain_id: u64,
-    pub contract_address: String,
-    pub event_count: u64,
-}
-
-#[derive(Row, Deserialize)]
-pub struct EventStatistic {
-    pub event_name: String,
-    pub event_count: u64,
-}
-
-pub async fn address_explorer(
-    client: &Client,
-    address: &str,
-) -> anyhow::Result<(
-    Vec<AddressRecentEvent>,
-    Vec<RelatedContract>,
-    Vec<EventStatistic>,
-)> {
-    let recent_events = client
-        .query(
-            r#"
-            SELECT chain_id, contract_address, event_name, field_name, block_number,
-                   transaction_hash
-            FROM address_index FINAL
-            WHERE is_removed = false AND address = ?
-            ORDER BY block_number DESC
-            LIMIT 50
-            "#,
-        )
-        .bind(address)
-        .fetch_all::<AddressRecentEvent>()
-        .await?;
-    let related_contracts = client
-        .query(
-            r#"
-            SELECT chain_id, contract_address, count() AS event_count
-            FROM address_index FINAL
-            WHERE is_removed = false AND address = ?
-            GROUP BY chain_id, contract_address
-            ORDER BY event_count DESC
-            LIMIT 50
-            "#,
-        )
-        .bind(address)
-        .fetch_all::<RelatedContract>()
-        .await?;
-    let event_statistics = client
-        .query(
-            r#"
-            SELECT event_name, count() AS event_count
-            FROM address_index FINAL
-            WHERE is_removed = false AND address = ?
-            GROUP BY event_name
-            ORDER BY event_count DESC
-            LIMIT 50
-            "#,
-        )
-        .bind(address)
-        .fetch_all::<EventStatistic>()
-        .await?;
-
-    Ok((recent_events, related_contracts, event_statistics))
-}
-
-#[derive(Row, Deserialize)]
-pub struct ContractExplorerStatistics {
-    pub event_count: u64,
-    pub first_seen_block: Option<u64>,
-    pub last_seen_block: Option<u64>,
-    pub event_types: Vec<String>,
-}
-
-pub async fn contract_explorer(
-    client: &Client,
-    chain_id: i64,
-    contract_address: &str,
-) -> anyhow::Result<ContractExplorerStatistics> {
-    let chain_id = as_u64(chain_id, "chain_id")?;
-    client
-        .query(
-            r#"
-            SELECT count() AS event_count,
-                   minOrNull(block_number) AS first_seen_block,
-                   maxOrNull(block_number) AS last_seen_block,
-                   groupUniqArray(event_name) AS event_types
-            FROM decoded_events FINAL
-            WHERE is_removed = false AND chain_id = ? AND contract_address = ?
-            "#,
-        )
-        .bind(chain_id)
-        .bind(contract_address)
-        .fetch_one::<ContractExplorerStatistics>()
-        .await
-        .context("failed to query ClickHouse contract explorer")
-}
-
-#[derive(Row, Deserialize)]
-pub struct EventExplorerStatistics {
-    pub contract_count: u64,
-    pub total_count: u64,
-}
-
-pub async fn event_explorer(
-    client: &Client,
-    event_name: &str,
-) -> anyhow::Result<EventExplorerStatistics> {
-    client
-        .query(
-            r#"
-            SELECT uniqExact(contract_address) AS contract_count,
-                   count() AS total_count
-            FROM decoded_events FINAL
-            WHERE is_removed = false AND event_name = ?
-            "#,
-        )
-        .bind(event_name)
-        .fetch_one::<EventExplorerStatistics>()
-        .await
-        .context("failed to query ClickHouse event explorer")
-}
 
 fn chrono_from_offset_datetime(value: OffsetDateTime) -> anyhow::Result<DateTime<Utc>> {
     DateTime::<Utc>::from_timestamp(value.unix_timestamp(), value.nanosecond())

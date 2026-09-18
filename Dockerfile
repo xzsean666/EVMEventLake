@@ -7,6 +7,7 @@ FROM rust:${RUST_VERSION}-bookworm AS builder
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
+COPY clickhouse ./clickhouse
 COPY migrations ./migrations
 COPY src ./src
 

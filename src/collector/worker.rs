@@ -3,7 +3,6 @@ use std::{
     sync::Arc,
 };
 
-use sqlx::QueryBuilder;
 use tokio::{
     sync::Semaphore,
     task::JoinSet,
@@ -13,9 +12,7 @@ use uuid::Uuid;
 
 use crate::{
     app::application_state::ApplicationState,
-    chains,
-    indexing::partition_manager,
-    reorg,
+    chains, reorg,
     rpc_pool::{self, evm_rpc_client::RpcLog},
     shared::{error::ApplicationError, hex::parse_hex_u64, validation::normalize_address},
     subscriptions::{self, SubscriptionRecord},
@@ -238,16 +235,6 @@ async fn collect_subscription_batch(
     loop {
         let to_block = block_range_end(from_block, block_window, safe_head);
 
-        #[cfg(feature = "clickhouse")]
-        let postgres_raw_storage = !state.configuration.clickhouse.enabled;
-        #[cfg(not(feature = "clickhouse"))]
-        let postgres_raw_storage = true;
-
-        if postgres_raw_storage {
-            partition_manager::ensure_partitions_for_range(&state.pool, from_block, to_block)
-                .await?;
-        }
-
         let logs_result = rpc_pool::evm_rpc_client::eth_get_logs(
             &state.http_client,
             &endpoint.url,
@@ -309,51 +296,46 @@ async fn collect_subscription_batch(
         for log in &logs {
             let block_number = parse_hex_u64(&log.block_number)?;
             if observed_blocks.insert(block_number) {
-                let result = reorg::observe_block_with_postgres_storage(
+                let result = reorg::observe_block(
                     &state.pool,
                     chain_id,
                     block_number,
                     &log.block_hash,
-                    postgres_raw_storage,
-                    postgres_raw_storage,
                 )
                 .await?;
                 if matches!(result, reorg::BlockCheckpointResult::ReorgDetected { .. }) {
-                    #[cfg(feature = "clickhouse")]
-                    if state.configuration.clickhouse.enabled {
-                        let tombstone_result = match crate::clickhouse::active_client(state).await {
-                            Ok(Some(client)) => crate::clickhouse::invalidate_from_block(
-                                &client,
-                                chain_id,
-                                block_number,
-                            )
-                            .await
-                            .map_err(|error| {
-                                ApplicationError::ExternalService(format!(
-                                    "ClickHouse reorg tombstone write failed: {error}"
-                                ))
-                            }),
-                            Ok(None) => Err(ApplicationError::ExternalService(
-                                "ClickHouse is enabled but no client is available".to_owned(),
-                            )),
-                            Err(error) => Err(error),
-                        };
-                        if let Err(error) = tombstone_result {
-                            subscriptions::mark_chain_clickhouse_reorg_retrying(
-                                &state.pool,
-                                chain_id,
-                                block_number,
-                                &error.public_message(),
-                            )
-                            .await?;
-                            tracing::error!(
-                                chain_id,
-                                from_block = block_number,
-                                error = %error,
-                                "ClickHouse reorg tombstone write failed; affected subscriptions will retry"
-                            );
-                            return Ok(());
-                        }
+                    let tombstone_result = match crate::clickhouse::active_client(state).await {
+                        Ok(Some(client)) => crate::clickhouse::invalidate_from_block(
+                            &client,
+                            chain_id,
+                            block_number,
+                        )
+                        .await
+                        .map_err(|error| {
+                            ApplicationError::ExternalService(format!(
+                                "ClickHouse reorg tombstone write failed: {error}"
+                            ))
+                        }),
+                        Ok(None) => Err(ApplicationError::ExternalService(
+                            "ClickHouse is enabled but no client is available".to_owned(),
+                        )),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = tombstone_result {
+                        subscriptions::mark_chain_clickhouse_reorg_retrying(
+                            &state.pool,
+                            chain_id,
+                            block_number,
+                            &error.public_message(),
+                        )
+                        .await?;
+                        tracing::error!(
+                            chain_id,
+                            from_block = block_number,
+                            error = %error,
+                            "ClickHouse reorg tombstone write failed; affected subscriptions will retry"
+                        );
+                        return Ok(());
                     }
                     tracing::warn!(
                         batch_size = batch.len(),
@@ -366,41 +348,26 @@ async fn collect_subscription_batch(
             }
         }
 
-        #[cfg(feature = "clickhouse")]
-        if state.configuration.clickhouse.enabled {
-            let client = crate::clickhouse::active_client(state)
-                .await?
-                .ok_or_else(|| {
-                    ApplicationError::ExternalService(
-                        "ClickHouse is enabled but no client is available".to_owned(),
-                    )
-                })?;
-            let raw_logs = logs
-                .iter()
-                .map(|log| {
-                    let addr = normalize_address(&log.address)?;
-                    let sub_id = address_to_sub_id.get(&addr).copied();
-                    clickhouse_raw_log(sub_id, chain_id, log)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            if let Err(error) = crate::clickhouse::write_raw_logs(&client, &raw_logs).await {
-                state.clear_clickhouse_client();
-                return Err(ApplicationError::ExternalService(format!(
-                    "ClickHouse raw-log write failed: {error}"
-                )));
-            }
-        }
-
-        if postgres_raw_storage {
-            let items = logs
-                .iter()
-                .map(|log| {
-                    let addr = normalize_address(&log.address)?;
-                    let sub_id = address_to_sub_id.get(&addr).copied();
-                    prepare_raw_log_insert(sub_id, chain_id, log)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            store_raw_logs_batch(&state.pool, &items).await?;
+        let client = crate::clickhouse::active_client(state)
+            .await?
+            .ok_or_else(|| {
+                ApplicationError::ExternalService(
+                    "ClickHouse client is not available".to_owned(),
+                )
+            })?;
+        let raw_logs = logs
+            .iter()
+            .map(|log| {
+                let addr = normalize_address(&log.address)?;
+                let sub_id = address_to_sub_id.get(&addr).copied();
+                clickhouse_raw_log(sub_id, chain_id, log)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Err(error) = crate::clickhouse::write_raw_logs(&client, &raw_logs).await {
+            state.clear_clickhouse_client();
+            return Err(ApplicationError::ExternalService(format!(
+                "ClickHouse raw-log write failed: {error}"
+            )));
         }
 
         let next_block = to_block + 1;
@@ -441,9 +408,7 @@ async fn collect_subscription(
     state: &ApplicationState,
     subscription: &SubscriptionRecord,
 ) -> Result<(), ApplicationError> {
-    #[cfg(feature = "clickhouse")]
-    if state.configuration.clickhouse.enabled && subscription.status == "clickhouse_reorg_retrying"
-    {
+    if subscription.status == "clickhouse_reorg_retrying" {
         match crate::clickhouse::active_client(state)
             .await
             .and_then(|client| {
@@ -486,37 +451,62 @@ async fn collect_subscription(
                     chain_id = subscription.chain_id,
                     from_block = subscription.current_block,
                     error = %error,
-                    "ClickHouse is unavailable while retrying a reorg"
+                    "ClickHouse client unavailable for reorg retry"
                 );
             }
         }
         return Ok(());
     }
 
-    let collection_policy =
-        chains::get_collection_policy(&state.pool, subscription.chain_id).await?;
-    let endpoint = rpc_pool::select_rpc_endpoint(&state.pool, subscription.chain_id).await?;
-    let chain_head =
-        rpc_pool::evm_rpc_client::eth_block_number(&state.http_client, &endpoint.url).await?;
-    let safe_head = chain_head.saturating_sub(collection_policy.safe_confirmation_depth);
+    if subscription.status == "clickhouse_write_retrying" {
+        subscriptions::resume_after_clickhouse_writes(&state.pool, subscription.id).await?;
+    }
+
+    let endpoint = match rpc_pool::select_rpc_endpoint(&state.pool, subscription.chain_id).await {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            tracing::warn!(
+                subscription_id = %subscription.id,
+                chain_id = subscription.chain_id,
+                error = %error,
+                "skipping collection: no active RPC endpoint for chain"
+            );
+            return Ok(());
+        }
+    };
+
+    let policy = chains::get_collection_policy(&state.pool, subscription.chain_id).await?;
+    let safe_head = match rpc_pool::evm_rpc_client::eth_block_number(
+        &state.http_client,
+        &endpoint.url,
+    )
+    .await
+    {
+        Ok(head) => (head as i64).saturating_sub(policy.safe_confirmation_depth),
+        Err(error) => {
+            let error_message = error.public_message();
+            let _ =
+                rpc_pool::mark_rpc_failure(&state.pool, endpoint.id, &error_message).await;
+            return Err(error);
+        }
+    };
+
+    if subscription.current_block > safe_head {
+        return Ok(());
+    }
+
     let current_window = clamp_block_window(
         subscription.current_block_window,
         subscription.min_block_window,
         subscription.max_block_window,
     );
-
-    if subscription.current_block > safe_head {
-        let status = if subscription.realtime_enabled {
-            "realtime_syncing"
-        } else {
-            "historical_synced"
-        };
+    if current_window != subscription.current_block_window {
         subscriptions::update_checkpoint(
             &state.pool,
             subscription.id,
             subscription.current_block,
-            Some(safe_head),
-            status,
+            subscription.target_block,
+            &subscription.status,
             current_window,
         )
         .await?;
@@ -529,16 +519,6 @@ async fn collect_subscription(
 
     loop {
         let to_block = block_range_end(from_block, block_window, safe_head);
-        // In ClickHouse mode raw logs never enter PostgreSQL, so PostgreSQL partition
-        // maintenance is only needed for the PostgreSQL raw-log deployment.
-        #[cfg(feature = "clickhouse")]
-        let postgres_raw_storage = !state.configuration.clickhouse.enabled;
-        #[cfg(not(feature = "clickhouse"))]
-        let postgres_raw_storage = true;
-        if postgres_raw_storage {
-            partition_manager::ensure_partitions_for_range(&state.pool, from_block, to_block)
-                .await?;
-        }
         let addrs = subscription
             .contract_address
             .as_deref()
@@ -605,59 +585,50 @@ async fn collect_subscription(
         let _ = rpc_pool::mark_rpc_success(&state.pool, endpoint.id).await;
         let log_count = logs.len();
 
-        // Observe each block once (logs share a block hash within a block) to detect
-        // reorgs cheaply. If the chain reorganised, `observe_block` has already
-        // invalidated the affected range and rewound this subscription, so we abort and
-        // let the next tick re-collect the canonical fork instead of advancing.
         let mut observed_blocks = HashSet::new();
         for log in &logs {
             let block_number = parse_hex_u64(&log.block_number)?;
             if observed_blocks.insert(block_number) {
-                let result = reorg::observe_block_with_postgres_storage(
+                let result = reorg::observe_block(
                     &state.pool,
                     subscription.chain_id,
                     block_number,
                     &log.block_hash,
-                    postgres_raw_storage,
-                    postgres_raw_storage,
                 )
                 .await?;
                 if matches!(result, reorg::BlockCheckpointResult::ReorgDetected { .. }) {
-                    #[cfg(feature = "clickhouse")]
-                    if state.configuration.clickhouse.enabled {
-                        let tombstone_result = match crate::clickhouse::active_client(state).await {
-                            Ok(Some(client)) => crate::clickhouse::invalidate_from_block(
-                                &client,
-                                subscription.chain_id,
-                                block_number,
-                            )
-                            .await
-                            .map_err(|error| {
-                                ApplicationError::ExternalService(format!(
-                                    "ClickHouse reorg tombstone write failed: {error}"
-                                ))
-                            }),
-                            Ok(None) => Err(ApplicationError::ExternalService(
-                                "ClickHouse is enabled but no client is available".to_owned(),
-                            )),
-                            Err(error) => Err(error),
-                        };
-                        if let Err(error) = tombstone_result {
-                            subscriptions::mark_chain_clickhouse_reorg_retrying(
-                                &state.pool,
-                                subscription.chain_id,
-                                block_number,
-                                &error.public_message(),
-                            )
-                            .await?;
-                            tracing::error!(
-                                chain_id = subscription.chain_id,
-                                from_block = block_number,
-                                error = %error,
-                                "ClickHouse reorg tombstone write failed; affected subscriptions will retry"
-                            );
-                            return Ok(());
-                        }
+                    let tombstone_result = match crate::clickhouse::active_client(state).await {
+                        Ok(Some(client)) => crate::clickhouse::invalidate_from_block(
+                            &client,
+                            subscription.chain_id,
+                            block_number,
+                        )
+                        .await
+                        .map_err(|error| {
+                            ApplicationError::ExternalService(format!(
+                                "ClickHouse reorg tombstone write failed: {error}"
+                            ))
+                        }),
+                        Ok(None) => Err(ApplicationError::ExternalService(
+                            "ClickHouse is enabled but no client is available".to_owned(),
+                        )),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = tombstone_result {
+                        subscriptions::mark_chain_clickhouse_reorg_retrying(
+                            &state.pool,
+                            subscription.chain_id,
+                            block_number,
+                            &error.public_message(),
+                        )
+                        .await?;
+                        tracing::error!(
+                            chain_id = subscription.chain_id,
+                            from_block = block_number,
+                            error = %error,
+                            "ClickHouse reorg tombstone write failed; affected subscriptions will retry"
+                        );
+                        return Ok(());
                     }
                     tracing::warn!(
                         subscription_id = %subscription.id,
@@ -670,43 +641,31 @@ async fn collect_subscription(
             }
         }
 
-        #[cfg(feature = "clickhouse")]
-        if state.configuration.clickhouse.enabled {
-            let client = crate::clickhouse::active_client(state)
-                .await?
-                .ok_or_else(|| {
-                    ApplicationError::ExternalService(
-                        "ClickHouse is enabled but no client is available".to_owned(),
-                    )
-                })?;
-            let raw_logs = logs
-                .iter()
-                .map(|log| clickhouse_raw_log(Some(subscription.id), subscription.chain_id, log))
-                .collect::<Result<Vec<_>, _>>()?;
-            if let Err(error) = crate::clickhouse::write_raw_logs(&client, &raw_logs).await {
-                // The checkpoint is deliberately not advanced. On the next worker tick we
-                // fetch and write the same range again; ReplacingMergeTree makes that retry
-                // idempotent at the `(chain, block, tx, log_index)` key.
-                state.clear_clickhouse_client();
-                return Err(ApplicationError::ExternalService(format!(
-                    "ClickHouse raw-log write failed: {error}"
-                )));
-            }
-        }
-
-        if postgres_raw_storage {
-            let items = logs
-                .iter()
-                .map(|log| {
-                    prepare_raw_log_insert(Some(subscription.id), subscription.chain_id, log)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            store_raw_logs_batch(&state.pool, &items).await?;
+        let client = crate::clickhouse::active_client(state)
+            .await?
+            .ok_or_else(|| {
+                ApplicationError::ExternalService(
+                    "ClickHouse client is not available".to_owned(),
+                )
+            })?;
+        let raw_logs = logs
+            .iter()
+            .map(|log| clickhouse_raw_log(Some(subscription.id), subscription.chain_id, log))
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Err(error) = crate::clickhouse::write_raw_logs(&client, &raw_logs).await {
+            state.clear_clickhouse_client();
+            return Err(ApplicationError::ExternalService(format!(
+                "ClickHouse raw-log write failed: {error}"
+            )));
         }
 
         let next_block = to_block + 1;
         let status = if next_block > safe_head {
-            "realtime_syncing"
+            if subscription.realtime_enabled {
+                "realtime_syncing"
+            } else {
+                "historical_synced"
+            }
         } else {
             "historical_syncing"
         };
@@ -730,108 +689,6 @@ async fn collect_subscription(
     }
 }
 
-struct RawLogInsertItem {
-    subscription_id: Option<Uuid>,
-    chain_id: i64,
-    contract_address: String,
-    block_number: i64,
-    block_hash: String,
-    transaction_hash: String,
-    transaction_index: i64,
-    log_index: i64,
-    topics_value: serde_json::Value,
-    data: String,
-    removed: bool,
-}
-
-fn prepare_raw_log_insert(
-    subscription_id: Option<Uuid>,
-    chain_id: i64,
-    log: &RpcLog,
-) -> Result<RawLogInsertItem, ApplicationError> {
-    let block_number = parse_hex_u64(&log.block_number)?;
-    let transaction_index = parse_hex_u64(&log.transaction_index)?;
-    let log_index = parse_hex_u64(&log.log_index)?;
-    let contract_address = normalize_address(&log.address)?;
-    let topics = normalize_topics(&log.topics)?;
-    let topics_value = serde_json::to_value(&topics)
-        .map_err(|error| ApplicationError::BadRequest(error.to_string()))?;
-
-    Ok(RawLogInsertItem {
-        subscription_id,
-        chain_id,
-        contract_address,
-        block_number,
-        block_hash: log.block_hash.clone(),
-        transaction_hash: log.transaction_hash.clone(),
-        transaction_index,
-        log_index,
-        topics_value,
-        data: log.data.clone(),
-        removed: log.removed.unwrap_or(false),
-    })
-}
-
-async fn store_raw_logs_batch(
-    pool: &sqlx::PgPool,
-    items: &[RawLogInsertItem],
-) -> Result<(), ApplicationError> {
-    if items.is_empty() {
-        return Ok(());
-    }
-
-    // Insert in chunks of 200 to stay well under PostgreSQL's 65,535 bind parameter limit
-    for chunk in items.chunks(200) {
-        let mut builder = QueryBuilder::new(
-            r#"
-            INSERT INTO eventlake_raw_logs (
-                id, subscription_id, chain_id, contract_address, block_number, block_hash,
-                transaction_hash, transaction_index, log_index, topics, data, removed
-            )
-            "#,
-        );
-        builder.push_values(chunk, |mut row, item| {
-            row.push_bind(Uuid::new_v4())
-                .push_bind(item.subscription_id)
-                .push_bind(item.chain_id)
-                .push_bind(&item.contract_address)
-                .push_bind(item.block_number)
-                .push_bind(&item.block_hash)
-                .push_bind(&item.transaction_hash)
-                .push_bind(item.transaction_index)
-                .push_bind(item.log_index)
-                .push_bind(&item.topics_value)
-                .push_bind(&item.data)
-                .push_bind(item.removed);
-        });
-        builder.push(
-            r#"
-            ON CONFLICT (chain_id, transaction_hash, log_index, block_number) DO UPDATE
-            SET removed = false,
-                block_hash = EXCLUDED.block_hash,
-                data = EXCLUDED.data,
-                topics = EXCLUDED.topics,
-                ingested_at = now()
-            "#,
-        );
-        builder.build().execute(pool).await?;
-    }
-
-    Ok(())
-}
-
-#[allow(dead_code)]
-async fn store_raw_log(
-    pool: &sqlx::PgPool,
-    subscription_id: Option<Uuid>,
-    chain_id: i64,
-    log: &RpcLog,
-) -> Result<(), ApplicationError> {
-    let item = prepare_raw_log_insert(subscription_id, chain_id, log)?;
-    store_raw_logs_batch(pool, &[item]).await
-}
-
-#[cfg(feature = "clickhouse")]
 fn clickhouse_raw_log(
     subscription_id: Option<Uuid>,
     chain_id: i64,

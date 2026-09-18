@@ -3,7 +3,6 @@ use crate::{
     block_transaction::state::{self, BlockTransactionSyncStateRecord},
     shared::error::ApplicationError,
 };
-#[cfg(feature = "clickhouse")]
 use crate::{chains, rpc_pool};
 
 pub async fn collect_once(state: &ApplicationState) -> Result<(), ApplicationError> {
@@ -54,26 +53,13 @@ async fn collect_chain(
     state: &ApplicationState,
     sync_state: &BlockTransactionSyncStateRecord,
 ) -> Result<(), ApplicationError> {
-    #[cfg(not(feature = "clickhouse"))]
-    {
-        let _ = state;
-        let _ = sync_state;
+    if !state.configuration.clickhouse.enabled {
         return Err(ApplicationError::ExternalService(
-            "block/transaction collection requires binary built with --features clickhouse"
-                .to_owned(),
+            "block/transaction collection requires EVENTLAKE_CLICKHOUSE_ENABLED=true".to_owned(),
         ));
     }
 
-    #[cfg(feature = "clickhouse")]
-    {
-        if !state.configuration.clickhouse.enabled {
-            return Err(ApplicationError::ExternalService(
-                "block/transaction collection requires EVENTLAKE_CLICKHOUSE_ENABLED=true"
-                    .to_owned(),
-            ));
-        }
-
-        if sync_state.status == "reorg_retrying" {
+    if sync_state.status == "reorg_retrying" {
             let client = match crate::clickhouse::active_client(state).await? {
                 Some(c) => c,
                 None => {
@@ -324,5 +310,4 @@ async fn collect_chain(
         );
 
         Ok(())
-    }
 }
