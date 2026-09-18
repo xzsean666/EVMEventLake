@@ -13,6 +13,4 @@ docker compose --env-file .env up -d --build
 curl -fsS http://127.0.0.1:8080/health/ready
 ```
 
-完整使用流程见 [`docs/USAGE.md`](docs/USAGE.md)，ClickHouse raw event lake 升级见
-[`docs/CLICKHOUSE_UPGRADE.md`](docs/CLICKHOUSE_UPGRADE.md)，架构见
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+完整使用流程见 [`docs/USAGE.md`](docs/USAGE.md)，部署说明见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)，系统架构与开发规范见 [`docs/AI/ARCHITECTURE.md`](docs/AI/ARCHITECTURE.md) 与 [`AGENTS.md`](AGENTS.md)。

@@ -1,7 +1,7 @@
 # EventLake 使用说明
 
-本文对应当前仓库中的可运行实现。架构和 ClickHouse 数据一致性说明分别见
-[`ARCHITECTURE.md`](ARCHITECTURE.md) 和 [`CLICKHOUSE_UPGRADE.md`](CLICKHOUSE_UPGRADE.md)。
+本文对应当前仓库中的可运行实现。系统架构与 ClickHouse 数据一致性说明见
+[`AI/ARCHITECTURE.md`](AI/ARCHITECTURE.md)，详细部署说明见 [`DEPLOYMENT.md`](DEPLOYMENT.md)。
 
 ## 1. 选择部署方式
 
