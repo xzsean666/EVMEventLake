@@ -1,0 +1,46 @@
+<clickhouse>
+    <!-- 优化并收敛系统 query_log：保留期缩短至 2 天，调大刷新周期以减少磁盘 IO -->
+    <query_log>
+        <database>system</database>
+        <table>query_log</table>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <max_size_rows>1048576</max_size_rows>
+        <ttl>event_date + INTERVAL 2 DAY DELETE</ttl>
+    </query_log>
+
+    <!-- 彻底移除采样追踪 trace_log，避免频繁采样调用栈撑爆磁盘 -->
+    <trace_log remove="1"/>
+
+    <!-- 限制 part_log 的保留时间为 1 天，防止每次 part 生成和 merge 产生海量审计记录 -->
+    <part_log>
+        <database>system</database>
+        <table>part_log</table>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </part_log>
+
+    <!-- text_log（服务内部日志表）：缩短至 2 天保留期 -->
+    <text_log>
+        <ttl>event_date + INTERVAL 2 DAY DELETE</ttl>
+    </text_log>
+
+    <!-- metric_log / asynchronous_metric_log：缩短至 2 天保留期 -->
+    <metric_log>
+        <ttl>event_date + INTERVAL 2 DAY DELETE</ttl>
+    </metric_log>
+    <asynchronous_metric_log>
+        <ttl>event_date + INTERVAL 2 DAY DELETE</ttl>
+    </asynchronous_metric_log>
+
+    <!-- 后台合并（MergeTree Merge）线程池调优，避免高并发写入时后台合并来不及处理 -->
+    <background_pool_size>16</background_pool_size>
+
+    <!-- 全局 MergeTree 写入与合并防堵调优 -->
+    <merge_tree>
+        <parts_to_delay_insert>300</parts_to_delay_insert>
+        <parts_to_throw_insert>600</parts_to_throw_insert>
+        <max_delay_to_insert>1</max_delay_to_insert>
+    </merge_tree>
+</clickhouse>

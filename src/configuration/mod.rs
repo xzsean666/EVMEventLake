@@ -52,6 +52,9 @@ pub struct ClickHouseConfig {
     pub database: String,
     pub enabled: bool,
     pub secure: bool,
+    pub async_insert: bool,
+    pub wait_for_async_insert: bool,
+    pub log_queries: bool,
 }
 
 impl Default for ClickHouseConfig {
@@ -64,6 +67,9 @@ impl Default for ClickHouseConfig {
             database: "eventlake".to_owned(),
             enabled: false,
             secure: false,
+            async_insert: true,
+            wait_for_async_insert: true,
+            log_queries: false,
         }
     }
 }
@@ -166,6 +172,9 @@ impl ClickHouseConfig {
             database,
             enabled: true,
             secure,
+            async_insert: true,
+            wait_for_async_insert: true,
+            log_queries: false,
         })
     }
 
@@ -192,6 +201,9 @@ impl ClickHouseConfig {
                 database: read_env("EVENTLAKE_CLICKHOUSE_DB", "eventlake"),
                 enabled: true,
                 secure: false,
+                async_insert: true,
+                wait_for_async_insert: true,
+                log_queries: false,
             }
         };
 
@@ -231,6 +243,21 @@ impl ClickHouseConfig {
             if !database.is_empty() {
                 config.database = database.to_owned();
             }
+        }
+        if let Ok(val) = env::var("EVENTLAKE_CLICKHOUSE_ASYNC_INSERT") {
+            config.async_insert = val.trim().parse().with_context(|| {
+                format!("invalid boolean value for EVENTLAKE_CLICKHOUSE_ASYNC_INSERT: {val}")
+            })?;
+        }
+        if let Ok(val) = env::var("EVENTLAKE_CLICKHOUSE_WAIT_FOR_ASYNC_INSERT") {
+            config.wait_for_async_insert = val.trim().parse().with_context(|| {
+                format!("invalid boolean value for EVENTLAKE_CLICKHOUSE_WAIT_FOR_ASYNC_INSERT: {val}")
+            })?;
+        }
+        if let Ok(val) = env::var("EVENTLAKE_CLICKHOUSE_LOG_QUERIES") {
+            config.log_queries = val.trim().parse().with_context(|| {
+                format!("invalid boolean value for EVENTLAKE_CLICKHOUSE_LOG_QUERIES: {val}")
+            })?;
         }
 
         Ok(config)
@@ -442,6 +469,7 @@ mod tests {
             database: "eventlake".to_owned(),
             enabled: true,
             secure: false,
+            ..Default::default()
         };
 
         assert_eq!(configuration.url(), "http://clickhouse:8123");
@@ -457,6 +485,7 @@ mod tests {
             database: "eventlake".to_owned(),
             enabled: true,
             secure: true,
+            ..Default::default()
         };
 
         assert_eq!(configuration.url(), "https://clickhouse.cloud:8443");

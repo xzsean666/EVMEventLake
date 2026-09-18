@@ -63,6 +63,7 @@ fn test_clickhouse_config(enabled: bool) -> ClickHouseConfig {
         database: "eventlake".to_owned(),
         enabled,
         secure: false,
+        ..Default::default()
     }
 }
 

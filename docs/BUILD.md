@@ -21,11 +21,8 @@ Core files include:
 - `clickhouse/`
 - `migrations/`
 - `Dockerfile`
-- `Dockerfile.prebuilt`
-- `Dockerfile.prebuilt.cn`
 - `docker-compose.yml`
-- `docker-compose.prebuilt.yml`
-- `docker-compose.prebuilt.cn.yml`
+- `docker-compose.source.yml`
 - `scripts/build-prebuilt-binary.sh`
 - `scripts/backup.sh`
 - `scripts/restore.sh`
@@ -42,8 +39,7 @@ Current verified commands:
 - `scripts/build-prebuilt-binary.sh`
 - `tests/test_backup_restore_e2e.sh`
 - `docker compose --env-file .env.example config`
-- `docker compose --env-file .env.example -f docker-compose.prebuilt.yml config`
-- `docker compose --env-file .env.example -f docker-compose.prebuilt.cn.yml config`
+- `docker compose --env-file .env.example -f docker-compose.source.yml config`
 
 ## 2. Local Development Requirements
 
@@ -96,7 +92,37 @@ The standard deployment consists of:
 - `clickhouse`: Official `clickhouse/clickhouse-server:24.8` for analytical raw event storage.
 - `eventlake`: Core ingestion and search daemon with embedded SQLite volume mount (`./data/sqlite:/data`).
 
-## 5. Development Workflow
+## 5. CI/CD 与自动化版本发布 (Automated Release Workflow)
+
+为彻底解决生产服务器本地编译慢的痛点，项目配置了云端 GitHub Actions 手动触发流水线 (`.github/workflows/release.yml`)：
+
+### 5.1 触发机制
+- **按需手动触发 (Manual Workflow Dispatch)**：不会在日常每次 push 代码时浪费算力构建。
+- **自动计算版本号**：支持选择 `patch`（如 0.1.0 -> 0.1.1）、`minor`（如 0.1.0 -> 0.2.0）、`major`（如 0.1.0 -> 1.0.0）或 `custom`（自定义版本）。
+- **自动化操作**：
+  1. 自动更新 `Cargo.toml` 与 `Cargo.lock`。
+  2. 自动打 Git Tag（如 `v0.1.1`）并提交推送。
+  3. 云端编译 Linux x86_64 release 二进制包，附带 SHA256 校验和发布至 GitHub Releases。
+  4. 自动构建轻量 Docker 镜像，推送至 GHCR (`ghcr.io/xzsean666/evmeventlake:latest` 与 `vX.Y.Z`)。
+
+### 5.2 触发命令
+
+在 GitHub 网页界面进入 **Actions** -> 选择 **Release and Build Prebuilt** -> 点击 **Run workflow**。
+
+或者使用 GitHub CLI 直接在终端触发：
+
+```bash
+# 默认 patch 递增 (0.1.0 -> 0.1.1)
+gh workflow run release.yml -f bump_type=patch
+
+# 次版本递增 (0.1.0 -> 0.2.0)
+gh workflow run release.yml -f bump_type=minor
+
+# 自定义指定版本
+gh workflow run release.yml -f bump_type=custom -f custom_version=0.3.0
+```
+
+## 6. Development Workflow
 
 Run all tests:
 
@@ -123,22 +149,16 @@ Run local service:
 cargo run
 ```
 
-Run with Docker Compose:
+Run with Docker Compose (预编译二进制秒级构建):
 
 ```bash
-docker compose up --build
+docker compose up -d --build
 ```
 
-Build the prebuilt binary:
+从本地源码调试构建容器:
 
 ```bash
-scripts/build-prebuilt-binary.sh
-```
-
-Run the prebuilt binary container:
-
-```bash
-docker compose -f docker-compose.prebuilt.yml up -d --build
+docker compose -f docker-compose.source.yml up -d --build
 ```
 
 ## 6. Database Migrations

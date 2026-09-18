@@ -26,7 +26,10 @@ CREATE TABLE IF NOT EXISTS raw_logs (
 ) ENGINE = ReplacingMergeTree(stored_at)
 PARTITION BY chain_id
 ORDER BY (chain_id, block_number, transaction_hash, log_index)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192,
+         parts_to_delay_insert = 300,
+         parts_to_throw_insert = 600,
+         max_delay_to_insert = 1;
 
 -- Blocks are the primary block dataset. ReplacingMergeTree gives collector
 -- retries and reorg tombstones a deterministic latest version for each EVM block.
@@ -55,7 +58,10 @@ CREATE TABLE IF NOT EXISTS blocks (
 ) ENGINE = ReplacingMergeTree(stored_at)
 PARTITION BY chain_id
 ORDER BY (chain_id, block_number)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192,
+         parts_to_delay_insert = 300,
+         parts_to_throw_insert = 600,
+         max_delay_to_insert = 1;
 
 -- Transactions dataset. ReplacingMergeTree gives collector retries and
 -- reorg tombstones a deterministic latest version for each EVM transaction.
@@ -86,5 +92,8 @@ CREATE TABLE IF NOT EXISTS transactions (
 ) ENGINE = ReplacingMergeTree(stored_at)
 PARTITION BY chain_id
 ORDER BY (chain_id, block_number, transaction_index, tx_hash)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192,
+         parts_to_delay_insert = 300,
+         parts_to_throw_insert = 600,
+         max_delay_to_insert = 1;
 

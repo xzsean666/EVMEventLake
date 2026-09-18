@@ -7,9 +7,8 @@
 
 | 目的 | Compose 文件 |
 | --- | --- |
-| 源码构建 (本地完整开发、CI 流水线) | `docker-compose.yml` |
-| 预编译二进制 (生产部署、快速启动) | `docker-compose.prebuilt.yml` |
-| 中国大陆网络环境加速预编译 | `docker-compose.prebuilt.cn.yml` |
+| 预编译二进制 (默认推荐，快速免 Rust 编译构建) | `docker-compose.yml` |
+| 源码构建 (本地深度开发、修改源码测试) | `docker-compose.source.yml` |
 
 系统采用 **SQLite (控制面元数据) + ClickHouse (唯一原始事件湖)** 的纯净单一架构，彻底剥离了外部 PostgreSQL 依赖。ClickHouse 存储原始日志、区块和交易；嵌入式 SQLite 负责订阅、checkpoint、节点池与认证状态。
 
@@ -17,34 +16,28 @@
 
 ## 2. 启动本地服务
 
-要求：Docker、Docker Compose；源码构建还需要 Rust 1.94 及 Cargo。
+要求：Docker、Docker Compose。
 
 ```bash
 cp .env.example .env
-docker compose --env-file .env up -d --build
-docker compose --env-file .env ps
+docker compose up -d --build
+docker compose ps
 curl -fsS http://127.0.0.1:8080/health/ready
 ```
 
 首次启动会自动执行 `migrations/` 中的 SQLite migration。停止服务：
 
 ```bash
-docker compose --env-file .env down
+docker compose down
 ```
 
-### 预编译二进制部署
+### 从源码重新编译构建（开发调试）
 
-先在本地或 CI 构建 Linux 二进制：
+如需基于本地修改的 Rust 源码构建：
+
 ```bash
-scripts/build-prebuilt-binary.sh
+docker compose -f docker-compose.source.yml up -d --build
 ```
-
-使用预编译镜像快速启动：
-```bash
-docker compose --env-file .env -f docker-compose.prebuilt.yml up -d --build
-```
-
-更多镜像和国内镜像选项见 [`DEPLOYMENT.md`](DEPLOYMENT.md)。
 
 ## 3. 检查服务和查看 API
 

@@ -30,6 +30,10 @@ TODO -> IN_PROGRESS -> REVIEW -> DONE
 - （暂无待规划任务）
 
 ### 已完成任务 (DONE)
+- **TASK-015**: [ClickHouse 系统日志轻量化抑制与写入碎片（Parts）合并防堵调优](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-015.md)
+- **TASK-014**: [收敛合并为单一 Dockerfile（基于 Target 支持 prebuilt 与 source 模式），清理残存构建文件并恢复 Git 忽略规则](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-014.md)
+- **TASK-013**: [收敛与重构 Docker Compose 编排体系（默认预编译二进制构建，独立源码构建并清理冗余文件）](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-013.md)
+- **TASK-012**: [建设 GitHub Actions 手动触发发布流水线 (Release 二进制 + GHCR 预编译镜像) 与极简部署体系](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-012.md)
 - **TASK-011**: [清理冗余 Dockerfile 与 Compose 配置，统一构建与部署流水线至纯净 SQLite + ClickHouse](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-011.md)
 - **TASK-010**: [构建 SQLite + ClickHouse 统一备份恢复体系与 S3 增量运维脚本](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-010.md)
 - **TASK-009**: [存储层全面迁移至 SQLite 元数据引擎 + ClickHouse 唯一数据湖](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-009.md)

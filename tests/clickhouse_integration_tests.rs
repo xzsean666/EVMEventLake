@@ -46,6 +46,7 @@ async fn mirrors_events_routes_search_and_hides_tombstones() -> anyhow::Result<(
             database: read_env("EVENTLAKE_CLICKHOUSE_DB", "eventlake"),
             enabled: true,
             secure: false,
+            ..Default::default()
         }
     };
     clickhouse_configuration.enabled = true;
@@ -194,6 +195,7 @@ async fn blocks_and_transactions_write_and_query_and_reorg() -> anyhow::Result<(
             database: read_env("EVENTLAKE_CLICKHOUSE_DB", "eventlake"),
             enabled: true,
             secure: false,
+            ..Default::default()
         }
     };
     clickhouse_configuration.enabled = true;

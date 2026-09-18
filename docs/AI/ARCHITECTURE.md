@@ -69,6 +69,22 @@
 | **查询机制** | ClickHouse | `FINAL` 引擎查询，自动过滤 `is_removed = true` 的分叉数据。 |
 | **备份与恢复** | SQLite + ClickHouse | SQLite `VACUUM INTO` + ClickHouse 原生分片增量快照，统一上传 S3 或本地归档。 |
 
+### 3.1 ClickHouse 写入分片防堵塞与异步聚合规范 (Part Merge & Async Insert)
+- **碎片与阻塞风险**：ClickHouse MergeTree 每次 INSERT 生成独立 Part。客户端微批高频直写会迅速导致 Parts 累积速度超过后台 Merge 速度，触发 `parts_to_delay_insert`（强制休眠延迟）或 `parts_to_throw_insert`（`Too many parts` 异常卡死）。
+- **四层防堵体系**：
+  1. **服务端异步攒批**：客户端启用 `async_insert = 1` + `wait_for_async_insert = 1`，ClickHouse 在内存中缓冲微批（200ms 或 10MB）并以大 Part 原子落盘，兼顾高性能与 Checkpoint 一致性。
+  2. **表级容忍度调优**：所有 MergeTree 表 `SETTINGS` 显式声明 `parts_to_delay_insert = 300`, `parts_to_throw_insert = 600`, `max_delay_to_insert = 1`。
+  3. **后台合并并发提升**：配置 `<background_pool_size>16</background_pool_size>`，提升合并吞吐。
+  4. **粗粒度分区**：严禁按块或按日过度分区，统一维持 `PARTITION BY chain_id`。
+
+### 3.2 ClickHouse 系统操作日志轻量化规范 (System Logs Suppression)
+- **日志膨胀风险**：ClickHouse 默认全量记录 `query_log`、`part_log`、`trace_log`，在千万级数据写入场景下，系统表体积往往比实际业务数据高出一个数量级，极易导致磁盘爆满。
+- **治理原则**：
+  1. **客户端免记录**：数据管道写入连接默认设置 `log_queries = 0`，从源头切断高频微批插入向 `system.query_log` 的日志放大。
+  2. **短周期生命周期截断**：通过 `clickhouse/config.d/system_logs.xml` 强制设定 `system.query_log`、`system.part_log`、`system.text_log`、`system.metric_log` 的 TTL 为 1~2 天（自动淘汰清理）。
+  3. **高开销日志直接移除**：彻底移除采样堆栈日志（`<trace_log remove="1"/>`），严禁在生产容器中全量留存堆栈与高频指标。
+- **AI 审查与调优指令**：完整检查项与配置模板详见 [`docs/AI_CLICKHOUSE_DIRECTIVE.md`](file:///ssd0/git/EVMEventLake/docs/AI_CLICKHOUSE_DIRECTIVE.md)。
+
 ---
 
 ## 4. 核心模块职责与边界

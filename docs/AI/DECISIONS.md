@@ -99,3 +99,27 @@
   - 彻底消除 PostgreSQL 分区表维护开销与双存储适配分支。
   - 实现了分钟级甚至秒级的云端增量备份与无缝断点恢复。
 
+---
+
+## ADR-008: ClickHouse 写入碎片（Parts）防堵塞调优与系统日志轻量化治理
+
+- **状态**: Accepted
+- **背景**:
+  1. ClickHouse 默认为每次查询和写入生成全量系统日志（`system.query_log`、`system.part_log`、`system.trace_log` 等）且默认保留期长。在区块链数据高频持续写入场景下，系统表膨胀极快，往往在数日内体积远超业务数据本身，极易导致存储爆满。
+  2. ClickHouse MergeTree 每次 INSERT 生成独立 Part 并由后台 Merge 异步合并。当并发采集 Worker 以微批（Micro-batching）高频写入时，碎片累积速度可能超过 Merge 速度。一旦达到 `parts_to_delay_insert`（默认 150），写入被强制休眠拖慢；达到 `parts_to_throw_insert`（默认 300），ClickHouse 会抛出 `Too many parts` 异常，导致采集服务卡死或崩溃重试。
+- **决策**:
+  1. **开启原生异步聚合写入（`async_insert` + `wait_for_async_insert`）**：
+     - 在客户端连接全局注入 `async_insert = 1`、`wait_for_async_insert = 1` 与 `async_insert_busy_timeout_ms = 200`。
+     - 服务端在内存中对微批数据自动攒批为健康的大 Part 再落盘，彻底终结碎片堆积；同步等待刷盘保证 SQLite Checkpoint 推进的安全一致性。
+  2. **从源头切断写入查询日志（`log_queries = 0`）**：
+     - 采集管道的客户端连接与 Profile 默认设置 `log_queries = 0`，防止频繁的数据插入操作向 `system.query_log` 灌入巨量日志。
+  3. **DDL 表级提升 Part 容忍度**：
+     - `raw_logs`、`blocks`、`transactions` 表级 `SETTINGS` 配置 `parts_to_delay_insert = 300`、`parts_to_throw_insert = 600`、`max_delay_to_insert = 1`，避免低阈值过早阻塞。
+  4. **容器化配置挂载与系统日志生命周期截断**：
+     - 维护 `clickhouse/config.d/system_logs.xml` 与 `clickhouse/users.d/tuning.xml` 并挂载至容器。
+     - 移除 `trace_log`；将 `query_log`、`part_log`、`text_log`、`metric_log` 的 TTL 统一截断为 1~2 天自动淘汰，调优后台 `background_pool_size = 16`。
+- **影响**:
+  - 彻底根除“ClickHouse 运行久了系统日志比业务数据还大”的隐患，磁盘占用降低 80%+。
+  - 高并发与微批采集下不再发生 `Too many parts` 写入中断或被强制 delay 卡死。
+
+

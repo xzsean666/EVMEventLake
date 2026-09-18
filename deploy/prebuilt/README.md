@@ -1,13 +1,11 @@
 # Prebuilt Binary
 
-This directory is used as Docker build context input for `Dockerfile.prebuilt`
-and `Dockerfile.prebuilt.cn`.
+This directory contains the prebuilt Linux x86_64 binary used as Docker build context
+input for `Dockerfile` (target: `prebuilt`) in `docker-compose.yml`.
 
-Generate the binary with:
+To recompile the binary locally:
 
 ```bash
 scripts/build-prebuilt-binary.sh
 ```
-
-The generated `eventlake` binary is intentionally ignored by git.
 

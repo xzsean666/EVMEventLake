@@ -14,14 +14,23 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
     volumes:
       - ./data/clickhouse:/var/lib/clickhouse
       - ./logs/clickhouse:/var/log/clickhouse-server
+      - ./clickhouse/config.d:/etc/clickhouse-server/config.d:ro
+      - ./clickhouse/users.d:/etc/clickhouse-server/users.d:ro
 
   eventlake:
     build:
       context: .
       dockerfile: Dockerfile
+      target: prebuilt
+      args:
+        EVENTLAKE_BINARY: ${EVENTLAKE_PREBUILT_BINARY:-deploy/prebuilt/eventlake}
     image: eventlake:local
     restart: unless-stopped
     env_file:

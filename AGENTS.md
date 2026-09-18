@@ -33,6 +33,7 @@ AI Agent 的所有决策与工作必须基于以下事实来源，不得凭空�
 | **具体任务定义** | `docs/AI/tasks/TASK-xxx.md` | 细粒度任务详情（参考 [`TASK-TEMPLATE.md`](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-TEMPLATE.md)） |
 | **系统架构说明** | [`docs/AI/ARCHITECTURE.md`](file:///ssd0/git/EVMEventLake/docs/AI/ARCHITECTURE.md) | 模块边界、双存储模式与关键数据流 |
 | **关键架构决策** | [`docs/AI/DECISIONS.md`](file:///ssd0/git/EVMEventLake/docs/AI/DECISIONS.md) | 技术与架构决策记录（ADR） |
+| **ClickHouse 调优指令规范** | [`docs/AI_CLICKHOUSE_DIRECTIVE.md`](file:///ssd0/git/EVMEventLake/docs/AI_CLICKHOUSE_DIRECTIVE.md) | ClickHouse 容器化防爆日志与碎片防堵审查指令 |
 
 ---
 

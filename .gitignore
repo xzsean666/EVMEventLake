@@ -5,5 +5,5 @@
 !/.env.example
 *.log
 
-/deploy/prebuilt/*
-!/deploy/prebuilt/README.md
+#/deploy/prebuilt/*
+#!/deploy/prebuilt/README.md

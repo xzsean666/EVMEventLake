@@ -88,6 +88,18 @@ pub async fn connect(configuration: &ClickHouseConfig) -> anyhow::Result<Option<
         client = client.with_database(configuration.database.clone());
     }
 
+    if configuration.async_insert {
+        client = client
+            .with_option("async_insert", "1")
+            .with_option("async_insert_busy_timeout_ms", "200");
+        if configuration.wait_for_async_insert {
+            client = client.with_option("wait_for_async_insert", "1");
+        }
+    }
+    if !configuration.log_queries {
+        client = client.with_option("log_queries", "0");
+    }
+
     client
         .query("SELECT 1")
         .fetch_one::<u8>()

@@ -1,6 +1,6 @@
 services:
   clickhouse:
-    image: ${EVENTLAKE_CLICKHOUSE_IMAGE:-m.daocloud.io/docker.io/clickhouse/clickhouse-server:24.8}
+    image: ${EVENTLAKE_CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:24.8}
     restart: unless-stopped
     environment:
       CLICKHOUSE_DB: eventlake
@@ -14,20 +14,22 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
     volumes:
       - ./data/clickhouse:/var/lib/clickhouse
       - ./logs/clickhouse:/var/log/clickhouse-server
+      - ./clickhouse/config.d:/etc/clickhouse-server/config.d:ro
+      - ./clickhouse/users.d:/etc/clickhouse-server/users.d:ro
 
   eventlake:
     build:
       context: .
-      dockerfile: Dockerfile.prebuilt.cn
-      args:
-        EVENTLAKE_BINARY: ${EVENTLAKE_PREBUILT_BINARY:-deploy/prebuilt/eventlake}
-        DEBIAN_IMAGE: ${EVENTLAKE_DEBIAN_IMAGE:-m.daocloud.io/docker.io/library/debian:bookworm-slim}
-        DEBIAN_MIRROR: ${EVENTLAKE_DEBIAN_MIRROR:-http://mirrors.aliyun.com/debian}
-        DEBIAN_SECURITY_MIRROR: ${EVENTLAKE_DEBIAN_SECURITY_MIRROR:-http://mirrors.aliyun.com/debian-security}
-    image: eventlake:prebuilt-cn
+      dockerfile: Dockerfile
+      target: source
+    image: eventlake:local
     restart: unless-stopped
     env_file:
       - ${EVENTLAKE_ENV_FILE:-.env.example}

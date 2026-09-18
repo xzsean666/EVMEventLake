@@ -1,0 +1,30 @@
+[Unit]
+Description=EVMEventLake Ingestion Engine & Data Lake Service
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/eventlake
+
+# 加载环境变量配置文件
+EnvironmentFile=/opt/eventlake/.env
+
+# 启动二进制
+ExecStart=/usr/local/bin/eventlake
+
+# 崩溃自动重启策略
+Restart=always
+RestartSec=5s
+
+# 资源与文件限制优化
+LimitNOFILE=65536
+LimitNPROC=65536
+
+# 安全隔离（可选）
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

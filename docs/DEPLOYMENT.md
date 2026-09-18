@@ -1,168 +1,141 @@
-# EventLake Docker Deployment
+# EventLake 部署运维指南 (Deployment Guide)
 
-Version: 2.0
+Version: 2.1
 
 Status: Current implementation
 
-## 1. Deployment Modes
+## 1. 部署模式全景
 
 EventLake 收敛为极简统一架构：**SQLite**（轻量嵌入式控制面）+ **ClickHouse**（唯一原始事件与区块交易数据湖）。
 
-系统提供三套标准 Docker 部署方式：
+为彻底解决“服务器端编译耗时漫长、依赖复杂”的痛点，构建流水线已完全移至云端 GitHub Actions。目标服务器支持以下两种零本地编译的生产部署形态：
 
-| Mode | Files | When to use |
-| --- | --- | --- |
-| **源码构建 (Source build)** | `Dockerfile`, `docker-compose.yml` | 本地完整开发、CI 流水线或具备 Rust 编译环境的主机。 |
-| **预编译二进制部署 (Prebuilt binary)** | `scripts/build-prebuilt-binary.sh`, `Dockerfile.prebuilt`, `docker-compose.prebuilt.yml` | 生产服务器或只需要打包并运行 Linux release 二进制的环境。 |
-| **中国大陆镜像预编译 (China prebuilt)** | `Dockerfile.prebuilt.cn`, `docker-compose.prebuilt.cn.yml` | 中国大陆网络环境（自动配置 DaoCloud Docker 镜像加速与 Aliyun apt 镜像源）。 |
-
-每套部署统一启动两个服务：
-- `clickhouse`: 高性能列式数据湖引擎（`clickhouse/clickhouse-server:24.8`），对外提供 HTTP（8123）与 Native（9000）接口，数据持久化于 `./data/clickhouse`。
-- `eventlake`: Rust 单体核心进程，内嵌 SQLite 作为元数据事实源（持久化于 `./data/sqlite`）。
+| 模式 | 运行依赖 | 核心优势 | 推荐场景 |
+| :--- | :--- | :--- | :--- |
+| **模式 A：预编译 Docker Compose (默认)** | Docker & Compose | **零 Rust 编译**，直接基于随仓库分发的预编译二进制秒级构建容器，一键拉起 ClickHouse。 | 快速容器化部署、生产环境。 |
+| **模式 B：预编译独立二进制 (Systemd)** | 无 (或独立跑 ClickHouse) | **零编译、零 Docker 负担**，原生 Linux 二进制秒级启动，Systemd 工业级守护。 | 生产服务器、单机轻量部署、资源紧张的小型 VPS。 |
+| **模式 C：本地源码构建 (开发调试)** | Rust 工具链 / Docker build | 基于当前源码重新编译（`docker-compose.source.yml`）。 | 本地二次开发、定制测试。 |
 
 ---
 
-## 2. 运行时配置与目录约定
+## 2. 模式 A：预编译独立二进制部署 (GitHub Release + Systemd) - 最简推荐
 
-- Rust package: `eventlake`
-- 二进制产物: `eventlake`（位于 `/usr/local/bin/eventlake` 或 `deploy/prebuilt/eventlake`）
-- 容器用户: `eventlake` (uid 10001)
-- 监听端口: `8080`（容器内），可通过环境变量 `EVENTLAKE_HTTP_PORT` 映射到宿主机
-- 健康检查: `/health/ready`（检查 HTTP 服务及底层存储连通性）
-- 持久化目录结构：
-  - `./data/sqlite`: SQLite 数据库文件（`eventlake.db`）
-  - `./data/clickhouse`: ClickHouse 数据分片与元数据
-  - `./logs/clickhouse`: ClickHouse 服务日志
-  - `./backups`: 本地备份归档目录
-- 统一备份与灾难恢复：详见 [`docs/BACKUP_AND_RESTORE.md`](BACKUP_AND_RESTORE.md)。
+### 2.1 一键安装/升级二进制
 
----
-
-## 3. 环境配置文件 (.env)
-
-从模版复制配置文件：
+通过一键脚本直接从 GitHub Release 下载预编译的 Linux x86_64 二进制：
 
 ```bash
+# 标准下载安装（解压至 /usr/local/bin/eventlake）
+curl -sSL https://raw.githubusercontent.com/xzsean666/EVMEventLake/main/scripts/install.sh | bash
+
+# 中国大陆服务器高速下载（启用代理加速）：
+curl -sSL https://raw.githubusercontent.com/xzsean666/EVMEventLake/main/scripts/install.sh | bash -s -- --cn
+
+# 指定固定版本（如 v0.1.1）：
+curl -sSL https://raw.githubusercontent.com/xzsean666/EVMEventLake/main/scripts/install.sh | bash -s -- --version v0.1.1
+```
+
+### 2.2 启动 ClickHouse 依赖
+
+EventLake 依赖 ClickHouse 保存事件湖数据。只需启动一个纯运行时 ClickHouse 单容器（无需编译）：
+
+```bash
+mkdir -p /opt/eventlake/data/clickhouse
+docker run -d \
+  --name clickhouse \
+  --restart unless-stopped \
+  -p 8123:8123 -p 9000:9000 \
+  -e CLICKHOUSE_DB=eventlake \
+  -e CLICKHOUSE_USER=eventlake \
+  -e CLICKHOUSE_PASSWORD=eventlake \
+  -v /opt/eventlake/data/clickhouse:/var/lib/clickhouse \
+  clickhouse/clickhouse-server:24.8
+```
+
+### 2.3 配置与 Systemd 守护
+
+1. 准备配置工作目录：
+```bash
+mkdir -p /opt/eventlake/data
+cp .env.example /opt/eventlake/.env
+# 修改 /opt/eventlake/.env 中的强随机 JWT 密钥及连接串
+```
+
+2. 安装 Systemd 服务：
+```bash
+cp deploy/systemd/eventlake.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now eventlake
+```
+
+3. 检查服务与日志：
+```bash
+# 查看状态
+systemctl status eventlake
+
+# 实时日志追踪
+journalctl -u eventlake -f
+
+# 验证健康检查端点
+curl -fsS http://127.0.0.1:8080/health/ready
+```
+
+---
+
+## 3. 模式 A：预编译 Docker Compose 部署 (默认)
+
+拉取仓库后，默认 `docker-compose.yml` 直接利用内置预编译二进制（`deploy/prebuilt/eventlake`）秒级构建轻量容器，无需在本地安装 Rust 工具链或执行耗时的 Rust 编译：
+
+### 3.1 启动服务
+
+```bash
+# 复制环境变量
 cp .env.example .env
-```
 
-在生产环境中，请至少修改：
-- `EVENTLAKE_JWT_SECRET`：强随机密钥
-- `EVENTLAKE_DATABASE_URL`：SQLite 连接串（Compose 默认为 `sqlite:///data/eventlake.db?mode=rwc`）
-- `EVENTLAKE_CLICKHOUSE_URL`：ClickHouse 连接串（Compose 默认为 `http://eventlake:eventlake@clickhouse:8123/eventlake`）
+# 构建并启动服务（使用预编译二进制，几秒内构建完成）
+docker compose up -d --build
 
-如果使用自定义环境变量文件，同时传递给 Compose 与容器：
+# 检查服务状态
+docker compose ps
 
-```bash
-EVENTLAKE_ENV_FILE=.env.prod docker compose --env-file .env.prod up -d --build
-```
-
----
-
-## 4. 模式一：源码构建部署 (Source Build)
-
-适用于具备外网或本地包含 Rust 依赖缓存的环境：
-
-```bash
-# 启动 ClickHouse 与 EventLake
-docker compose --env-file .env up -d --build
-
-# 检查服务运行状态
-docker compose --env-file .env ps
-
-# 验证就绪状态
+# 验证就绪
 curl -fsS http://127.0.0.1:8080/health/ready
 ```
 
-停止服务：
+### 3.2 常用运维命令
 
 ```bash
-docker compose --env-file .env down
-```
-
----
-
-## 5. 模式二：预编译二进制部署 (Prebuilt Binary)
-
-1. 先在构建机或宿主机编译 Linux release 二进制：
-
-```bash
-scripts/build-prebuilt-binary.sh
-```
-
-生成的二进制保存在 `deploy/prebuilt/eventlake`。
-
-2. 在目标主机启动精简运行时镜像（Debian slim）：
-
-```bash
-docker compose --env-file .env -f docker-compose.prebuilt.yml up -d --build
-docker compose --env-file .env -f docker-compose.prebuilt.yml ps
-curl -fsS http://127.0.0.1:8080/health/ready
-```
-
-可选参数：
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `EVENTLAKE_PREBUILT_BINARY` | `deploy/prebuilt/eventlake` | 指定预编译二进制路径 |
-| `EVENTLAKE_CARGO_TARGET` | 宿主机架构 | 交叉编译 target triple（例如 `x86_64-unknown-linux-gnu`） |
-| `CARGO_TARGET_DIR` | `target` | Cargo 构建目录 |
-
----
-
-## 6. 模式三：中国大陆加速预编译部署 (China Prebuilt)
-
-1. 编译 Linux 二进制：
-
-```bash
-scripts/build-prebuilt-binary.sh
-```
-
-2. 使用配置了国内镜像源的 Compose 启动：
-
-```bash
-docker compose --env-file .env -f docker-compose.prebuilt.cn.yml up -d --build
-docker compose --env-file .env -f docker-compose.prebuilt.cn.yml ps
-curl -fsS http://127.0.0.1:8080/health/ready
-```
-
-支持覆盖的国内源环境变量：
-| 变量 | 默认配置 | 说明 |
-| --- | --- | --- |
-| `EVENTLAKE_DEBIAN_IMAGE` | `m.daocloud.io/docker.io/library/debian:bookworm-slim` | Debian 基础镜像 |
-| `EVENTLAKE_DEBIAN_MIRROR` | `http://mirrors.aliyun.com/debian` | 阿里云 Debian 镜像源 |
-| `EVENTLAKE_DEBIAN_SECURITY_MIRROR` | `http://mirrors.aliyun.com/debian-security` | 阿里云 Debian 安全更新源 |
-| `EVENTLAKE_CLICKHOUSE_IMAGE` | `m.daocloud.io/docker.io/clickhouse/clickhouse-server:24.8` | ClickHouse 镜像代理 |
-
----
-
-## 7. 运维与验证
-
-### 7.1 Compose 静态语法检查
-
-```bash
-docker compose --env-file .env.example -f docker-compose.yml config > /dev/null
-docker compose --env-file .env.example -f docker-compose.prebuilt.yml config > /dev/null
-docker compose --env-file .env.example -f docker-compose.prebuilt.cn.yml config > /dev/null
-```
-
-### 7.2 日志查看
-
-```bash
-# 查看 EventLake 实时日志
+# 查看实时日志
 docker compose logs -f eventlake
-
-# 查看 ClickHouse 实时日志
 docker compose logs -f clickhouse
+
+# 升级到最新发布版本
+docker compose pull && docker compose up -d
+
+# 停止服务
+docker compose down
 ```
 
-### 7.3 一键备份与恢复
+---
 
-系统内置全自动本地与云端备份脚本，详见 [`docs/BACKUP_AND_RESTORE.md`](BACKUP_AND_RESTORE.md)：
+## 4. 模式 C：本地源码构建部署 (开发调试)
+
+如果需要基于当前工作目录源码重新构建镜像进行本地调试：
 
 ```bash
-# 全量备份
+docker compose -f docker-compose.source.yml up -d --build
+```
+
+---
+
+## 5. 备份与灾难恢复
+
+系统内置全自动本地与 S3 云端备份脚本，详见 [`docs/BACKUP_AND_RESTORE.md`](BACKUP_AND_RESTORE.md)：
+
+```bash
+# 全量备份 SQLite + ClickHouse
 ./scripts/backup.sh --full --local
 
-# 备份完整性验证
+# 校验备份完整性与数据行数
 ./scripts/verify-backup.sh --latest
 ```
