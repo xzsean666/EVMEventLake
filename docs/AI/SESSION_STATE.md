@@ -74,6 +74,14 @@ cargo check --ignore-rust-version --all-targets
 # 5. 运行全部单元与集成测试
 cargo test --ignore-rust-version
 # 输出: 55 passed; 0 failed (退出码 0)
+
+# 6. GitHub Actions 真实发布流水线触发与成功运行
+gh workflow run release.yml -f bump_type=patch
+# 运行结果: Run ID 35345528772, 全部步骤在 3m9s 内执行完毕，成功发布 Release v0.1.1 并推送 GHCR 镜像
+
+# 7. 实测 download-prebuilt-binary.sh 从 GitHub Release 下载安装
+./scripts/download-prebuilt-binary.sh
+# 输出: 成功解析最新 Release v0.1.1，下载解压 eventlake (15MB stripped) 至 deploy/prebuilt/eventlake (退出码 0)
 ```
 
 ---
