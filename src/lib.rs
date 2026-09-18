@@ -1,4 +1,3 @@
-pub mod abi_registry;
 pub mod api;
 pub mod app;
 pub mod auth;
@@ -11,8 +10,6 @@ pub mod collector;
 pub mod configuration;
 pub mod dashboard;
 pub mod database;
-pub mod decoder;
-pub mod explorers;
 pub mod indexing;
 pub mod reorg;
 pub mod rpc_pool;

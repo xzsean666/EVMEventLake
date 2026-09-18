@@ -6,17 +6,15 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
-use chrono::Utc;
 use eventlake::{
     api,
     app::application_state::ApplicationState,
-    clickhouse::{self, IndexedEvent, RawLog},
+    clickhouse::{self, RawLog},
     configuration::{
         ApplicationConfiguration, AuthConfiguration, BackgroundConfiguration,
         BlockTransactionConfiguration, ClickHouseConfig, DatabaseConfiguration, HttpConfiguration,
         TelemetryConfiguration,
     },
-    indexing::{self, DecodedFieldValue},
 };
 
 use serde_json::{Value, json};
@@ -57,53 +55,18 @@ async fn mirrors_events_routes_search_and_hides_tombstones() -> anyhow::Result<(
         .await?
         .expect("enabled configuration returns a client");
 
-    let event_id = Uuid::new_v4();
     let raw_log_id = Uuid::new_v4();
-    let event_name = format!("ClickHouseIntegration{event_id}");
-    let event = IndexedEvent {
-        id: event_id,
-        raw_log_id,
-        subscription_id: Some(Uuid::new_v4()),
+    let sub_id = Uuid::new_v4();
+    let raw_log = RawLog {
+        id: raw_log_id,
+        subscription_id: Some(sub_id),
         chain_id: 31_337,
         block_number: 123_456,
         block_hash: "0xabc".to_owned(),
-        transaction_hash: format!("0x{event_id:x}"),
+        transaction_hash: format!("0x{:x}", raw_log_id.as_u128()),
+        transaction_index: 3,
         log_index: 7,
         contract_address: CONTRACT_ADDRESS.to_owned(),
-        event_name: event_name.clone(),
-        topic0: TOPIC0.to_owned(),
-        abi_id: Some(Uuid::new_v4()),
-        indexed_fields: json!({ "from": FROM_ADDRESS }),
-        non_indexed_fields: json!({ "value": "1234" }),
-        fields: vec![
-            DecodedFieldValue {
-                field_name: "from".to_owned(),
-                field_type: "address".to_owned(),
-                normalized_value: FROM_ADDRESS.to_owned(),
-                json_value: json!(FROM_ADDRESS),
-            },
-            DecodedFieldValue {
-                field_name: "value".to_owned(),
-                field_type: "uint256".to_owned(),
-                normalized_value: "1234".to_owned(),
-                json_value: json!("1234"),
-            },
-        ],
-        is_removed: false,
-        decoded_at: Utc::now(),
-    };
-    indexing::mirror_decoded_event(&client, event.clone()).await?;
-
-    let raw_log = RawLog {
-        id: raw_log_id,
-        subscription_id: event.subscription_id,
-        chain_id: event.chain_id,
-        block_number: event.block_number,
-        block_hash: event.block_hash.clone(),
-        transaction_hash: event.transaction_hash.clone(),
-        transaction_index: 3,
-        log_index: event.log_index,
-        contract_address: event.contract_address.clone(),
         topics: vec![TOPIC0.to_owned(), format!("0x{:064x}", 1)],
         data: "0x1234".to_owned(),
         is_removed: false,
@@ -113,21 +76,6 @@ async fn mirrors_events_routes_search_and_hides_tombstones() -> anyhow::Result<(
     let state = ApplicationState::new(test_configuration(clickhouse_configuration), lazy_pool()?)
         .with_clickhouse(client.clone());
     let router = api::routes::build_router(state);
-
-    let response = search(
-        &router,
-        json!({
-            "filters": [
-                { "field": "event_name", "operator": "eq", "value": event_name },
-                { "field": "address", "operator": "eq", "value": FROM_ADDRESS },
-                { "field": "field.value", "operator": "eq", "value": "1234" }
-            ]
-        }),
-    )
-    .await?;
-    assert_eq!(response.0, StatusCode::OK);
-    assert_eq!(response.1["data"].as_array().map(Vec::len), Some(1));
-    assert_eq!(response.1["data"][0]["id"], json!(event_id));
 
     let raw_response = search_raw_logs(
         &router,
@@ -143,27 +91,6 @@ async fn mirrors_events_routes_search_and_hides_tombstones() -> anyhow::Result<(
     assert_eq!(raw_response.0, StatusCode::OK);
     assert_eq!(raw_response.1["data"].as_array().map(Vec::len), Some(1));
     assert_eq!(raw_response.1["data"][0]["data"], json!("0x1234"));
-
-    let mut removed_event = event;
-    removed_event.is_removed = true;
-    clickhouse::write_indexed_event(&client, removed_event).await?;
-
-    let response = search(
-        &router,
-        json!({
-            "filters": [
-                { "field": "event_name", "operator": "eq", "value": event_name }
-            ]
-        }),
-    )
-    .await?;
-    assert_eq!(response.0, StatusCode::OK);
-    assert!(
-        response.1["data"]
-            .as_array()
-            .expect("data is an array")
-            .is_empty()
-    );
 
     clickhouse::invalidate_from_block(&client, 31_337, 123_456).await?;
     let raw_response = search_raw_logs(
@@ -214,6 +141,7 @@ fn test_configuration(clickhouse: ClickHouseConfig) -> ApplicationConfiguration 
             decode_batch_size: 1,
             partition_tick: Duration::from_secs(1),
             max_batch_addresses: 50,
+            collector_concurrency: 4,
         },
         block_transaction: BlockTransactionConfiguration {
             enabled: false,
@@ -230,17 +158,7 @@ fn test_configuration(clickhouse: ClickHouseConfig) -> ApplicationConfiguration 
     }
 }
 
-async fn search(router: &axum::Router, body: Value) -> anyhow::Result<(StatusCode, Value)> {
-    let request = Request::builder()
-        .method("POST")
-        .uri("/api/search")
-        .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(&body)?))?;
-    let response = router.clone().oneshot(request).await?;
-    let status = response.status();
-    let bytes = to_bytes(response.into_body(), usize::MAX).await?;
-    Ok((status, serde_json::from_slice(&bytes)?))
-}
+
 
 async fn search_raw_logs(
     router: &axum::Router,
@@ -323,6 +241,10 @@ async fn blocks_and_transactions_write_and_query_and_reorg() -> anyhow::Result<(
             max_priority_fee_per_gas: Some("1000000000".to_owned()),
             tx_type: Some(2),
             method_id: Some("0xa9059cbb".to_owned()),
+            status: None,
+            gas_used: None,
+            effective_gas_price: None,
+            l1_fee: None,
         }],
     };
 

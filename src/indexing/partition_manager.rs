@@ -38,8 +38,6 @@ pub async fn ensure_partitions(pool: &sqlx::PgPool) -> Result<(), ApplicationErr
         let start = floor_partition_start(block_number);
         create_raw_partition(pool, start).await?;
         create_raw_partition(pool, start + PARTITION_BLOCK_SIZE).await?;
-        create_decoded_partition(pool, start).await?;
-        create_decoded_partition(pool, start + PARTITION_BLOCK_SIZE).await?;
     }
 
     Ok(())
@@ -52,18 +50,6 @@ pub async fn ensure_partitions_for_range(
 ) -> Result<(), ApplicationError> {
     for start in partition_starts(from_block, to_block)? {
         create_raw_partition(pool, start).await?;
-    }
-
-    Ok(())
-}
-
-pub async fn ensure_decoded_partitions_for_range(
-    pool: &sqlx::PgPool,
-    from_block: i64,
-    to_block: i64,
-) -> Result<(), ApplicationError> {
-    for start in partition_starts(from_block, to_block)? {
-        create_decoded_partition(pool, start).await?;
     }
 
     Ok(())
@@ -118,34 +104,6 @@ async fn create_raw_partition(pool: &sqlx::PgPool, start: i64) -> Result<(), App
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     cache.insert(raw_partition);
-
-    Ok(())
-}
-
-async fn create_decoded_partition(pool: &sqlx::PgPool, start: i64) -> Result<(), ApplicationError> {
-    let end = start + PARTITION_BLOCK_SIZE;
-    let decoded_partition = format!("eventlake_decoded_events_{}_{}", start, end);
-    {
-        let cache = CREATED_PARTITIONS
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if cache.contains(&decoded_partition) {
-            return Ok(());
-        }
-    }
-
-    let decoded_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {decoded_partition} PARTITION OF eventlake_decoded_events FOR VALUES FROM ({start}) TO ({end})"
-    );
-
-    sqlx::query(sqlx::AssertSqlSafe(decoded_sql))
-        .execute(pool)
-        .await?;
-
-    let mut cache = CREATED_PARTITIONS
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    cache.insert(decoded_partition);
 
     Ok(())
 }

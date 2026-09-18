@@ -70,7 +70,7 @@ async fn dashboard_summary(
             (SELECT COUNT(*)::BIGINT FROM eventlake_subscriptions WHERE status = 'paused') AS paused_jobs,
             (SELECT COUNT(*)::BIGINT FROM eventlake_subscriptions WHERE status = 'error') AS errored_jobs,
             (SELECT COUNT(*)::BIGINT FROM eventlake_raw_logs WHERE removed = false) AS total_raw_logs,
-            (SELECT COUNT(*)::BIGINT FROM eventlake_decoded_events WHERE decode_status = 'decoded') AS total_decoded_events,
+            0::BIGINT AS total_decoded_events,
             (SELECT COUNT(*)::BIGINT FROM eventlake_rpc_endpoints WHERE status = 'healthy') AS healthy_rpc_endpoints,
             (SELECT COUNT(*)::BIGINT FROM eventlake_rpc_endpoints WHERE status = 'unhealthy') AS unhealthy_rpc_endpoints,
             (SELECT COUNT(*)::BIGINT FROM eventlake_block_transaction_sync_state WHERE status IN ('syncing', 'caught_up', 'realtime_syncing')) AS active_block_sync_jobs,
@@ -98,18 +98,9 @@ async fn dashboard_summary(
                     "ClickHouse dashboard query failed: {error}"
                 ))
             })?;
-        let total_decoded_events = crate::clickhouse::decoded_event_count(&client)
-            .await
-            .map_err(|error| {
-                ApplicationError::ExternalService(format!(
-                    "ClickHouse dashboard query failed: {error}"
-                ))
-            })?;
         DashboardSummary {
             total_raw_logs,
-            // This legacy field is preserved for historical pre-upgrade rows. New
-            // raw-event-lake collection does not create decoded-event rows.
-            total_decoded_events,
+            total_decoded_events: 0,
             ..summary
         }
     } else {

@@ -1,3 +1,8 @@
+use std::{
+    collections::HashMap,
+    sync::{LazyLock, RwLock},
+};
+
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -19,6 +24,68 @@ use crate::{
 
 pub mod evm_rpc_client;
 pub mod worker;
+
+/// Progressive backoff cooldown in seconds:
+/// 1 failure: 60s (1m)
+/// 2 failures: 300s (5m)
+/// 3 failures: 900s (15m)
+/// 4 failures: 3600s (1h)
+/// 5 failures: 14400s (4h)
+/// 6+ failures: 86400s (24h max)
+pub fn calculate_cooldown_seconds(consecutive_failures: u32) -> u64 {
+    match consecutive_failures {
+        0 => 0,
+        1 => 60,
+        2 => 300,
+        3 => 900,
+        4 => 3600,
+        5 => 14400,
+        _ => 86400,
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EndpointRuntimeStatus {
+    pub consecutive_failures: u32,
+    pub cooldown_until: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub last_success_at: Option<DateTime<Utc>>,
+}
+
+static ENDPOINT_RUNTIME_STATES: LazyLock<RwLock<HashMap<Uuid, EndpointRuntimeStatus>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+pub fn get_cooldown_info(
+    endpoint_id: &Uuid,
+    now: DateTime<Utc>,
+) -> (Option<DateTime<Utc>>, Option<i64>) {
+    let cache = ENDPOINT_RUNTIME_STATES
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(status) = cache.get(endpoint_id) {
+        if let Some(until) = status.cooldown_until {
+            if until > now {
+                let remaining = (until - now).num_seconds().max(0);
+                return (Some(until), Some(remaining));
+            }
+        }
+    }
+    (None, None)
+}
+
+pub fn get_endpoint_runtime_status(endpoint_id: &Uuid) -> EndpointRuntimeStatus {
+    let cache = ENDPOINT_RUNTIME_STATES
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.get(endpoint_id).cloned().unwrap_or_default()
+}
+
+pub fn reset_endpoint_cooldown_for_test() {
+    let mut cache = ENDPOINT_RUNTIME_STATES
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.clear();
+}
 
 pub fn routes() -> Router<ApplicationState> {
     Router::new()
@@ -70,6 +137,10 @@ pub struct RpcEndpointRecord {
     pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[sqlx(default)]
+    pub cooldown_until: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    pub cooldown_remaining_seconds: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -108,9 +179,16 @@ async fn list_rpc_endpoints(
     _principal: AuthenticatedPrincipal,
     State(state): State<ApplicationState>,
 ) -> Result<Json<ApiResponse<Vec<RpcEndpointRecord>>>, ApplicationError> {
-    let endpoints = sqlx::query_as::<_, RpcEndpointRecord>(SELECT_RPC_ENDPOINTS)
+    let mut endpoints = sqlx::query_as::<_, RpcEndpointRecord>(SELECT_RPC_ENDPOINTS)
         .fetch_all(&state.pool)
         .await?;
+
+    let now = Utc::now();
+    for ep in &mut endpoints {
+        let (until, remaining) = get_cooldown_info(&ep.id, now);
+        ep.cooldown_until = until;
+        ep.cooldown_remaining_seconds = remaining;
+    }
 
     Ok(response::success(endpoints))
 }
@@ -130,7 +208,10 @@ async fn get_rpc_endpoint(
     State(state): State<ApplicationState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<RpcEndpointRecord>>, ApplicationError> {
-    let endpoint = find_rpc_endpoint(&state.pool, id).await?;
+    let mut endpoint = find_rpc_endpoint(&state.pool, id).await?;
+    let (until, remaining) = get_cooldown_info(&endpoint.id, Utc::now());
+    endpoint.cooldown_until = until;
+    endpoint.cooldown_remaining_seconds = remaining;
     Ok(response::success(endpoint))
 }
 
@@ -275,20 +356,65 @@ pub async fn select_rpc_endpoint(
     pool: &sqlx::PgPool,
     chain_id: i64,
 ) -> Result<RpcEndpointRecord, ApplicationError> {
-    sqlx::query_as::<_, RpcEndpointRecord>(
+    let mut endpoints = sqlx::query_as::<_, RpcEndpointRecord>(
         r#"
         SELECT id, chain_id, url, status, weight, latency_ms, last_check_at,
                failure_count, last_error, created_at, updated_at
         FROM eventlake_rpc_endpoints
-        WHERE chain_id = $1 AND status IN ('enabled', 'healthy')
+        WHERE chain_id = $1 AND status != 'disabled'
         ORDER BY failure_count ASC, weight DESC, latency_ms ASC NULLS LAST, updated_at ASC
-        LIMIT 1
         "#,
     )
     .bind(chain_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| ApplicationError::NotFound(format!("healthy RPC endpoint for chain {chain_id}")))
+    .fetch_all(pool)
+    .await?;
+
+    if endpoints.is_empty() {
+        return Err(ApplicationError::NotFound(format!("RPC endpoint for chain {chain_id}")));
+    }
+
+    let now = Utc::now();
+    for ep in &mut endpoints {
+        let (until, remaining) = get_cooldown_info(&ep.id, now);
+        ep.cooldown_until = until;
+        ep.cooldown_remaining_seconds = remaining;
+    }
+
+    // 1. Healthy / enabled endpoints that are NOT in CD
+    let mut available: Vec<_> = endpoints
+        .iter()
+        .filter(|ep| ep.cooldown_remaining_seconds.is_none() && (ep.status == "enabled" || ep.status == "healthy"))
+        .cloned()
+        .collect();
+
+    if !available.is_empty() {
+        return Ok(available.remove(0));
+    }
+
+    // 2. Any non-disabled endpoint that is NOT in CD (e.g. status was marked 'unhealthy' in DB but CD passed)
+    let mut non_cd: Vec<_> = endpoints
+        .iter()
+        .filter(|ep| ep.cooldown_remaining_seconds.is_none())
+        .cloned()
+        .collect();
+
+    if !non_cd.is_empty() {
+        return Ok(non_cd.remove(0));
+    }
+
+    // 3. Fallback: all candidate endpoints are in CD. Choose the one with the shortest remaining CD
+    endpoints.sort_by_key(|ep| ep.cooldown_remaining_seconds.unwrap_or(i64::MAX));
+    let fallback = endpoints.remove(0);
+
+    tracing::warn!(
+        chain_id,
+        endpoint_id = %fallback.id,
+        url = %fallback.url,
+        remaining_cd_secs = ?fallback.cooldown_remaining_seconds,
+        "All RPC endpoints for chain are in cooldown; falling back to endpoint with shortest remaining CD"
+    );
+
+    Ok(fallback)
 }
 
 pub async fn mark_rpc_failure(
@@ -296,6 +422,27 @@ pub async fn mark_rpc_failure(
     id: Uuid,
     error_message: &str,
 ) -> Result<(), ApplicationError> {
+    let now = Utc::now();
+    let (failures, cd_secs) = {
+        let mut cache = ENDPOINT_RUNTIME_STATES
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = cache.entry(id).or_default();
+        entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+        let cd_secs = calculate_cooldown_seconds(entry.consecutive_failures);
+        entry.cooldown_until = Some(now + chrono::Duration::seconds(cd_secs as i64));
+        entry.last_error = Some(error_message.to_owned());
+        (entry.consecutive_failures, cd_secs)
+    };
+
+    tracing::warn!(
+        endpoint_id = %id,
+        consecutive_failures = failures,
+        cooldown_seconds = cd_secs,
+        error = %error_message,
+        "RPC endpoint failed; cooldown applied"
+    );
+
     sqlx::query(
         r#"
         UPDATE eventlake_rpc_endpoints
@@ -311,6 +458,43 @@ pub async fn mark_rpc_failure(
     .bind(error_message)
     .execute(pool)
     .await?;
+
+    Ok(())
+}
+
+pub async fn mark_rpc_success(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+) -> Result<(), ApplicationError> {
+    let had_failures = {
+        let mut cache = ENDPOINT_RUNTIME_STATES
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = cache.entry(id).or_default();
+        let had_failures = entry.consecutive_failures > 0 || entry.cooldown_until.is_some();
+        entry.consecutive_failures = 0;
+        entry.cooldown_until = None;
+        entry.last_error = None;
+        entry.last_success_at = Some(Utc::now());
+        had_failures
+    };
+
+    if had_failures {
+        tracing::info!(endpoint_id = %id, "RPC endpoint recovered; cleared cooldown and reset healthy in DB");
+        let _ = sqlx::query(
+            r#"
+            UPDATE eventlake_rpc_endpoints
+            SET status = 'healthy',
+                failure_count = 0,
+                last_error = NULL,
+                updated_at = now()
+            WHERE id = $1 AND status != 'disabled'
+            "#,
+        )
+        .bind(id)
+        .execute(pool)
+        .await;
+    }
 
     Ok(())
 }
@@ -362,6 +546,7 @@ async fn persist_health_check(
 ) -> Result<(), ApplicationError> {
     match check_result {
         Ok(check) => {
+            let _ = mark_rpc_success(pool, id).await;
             sqlx::query(
                 r#"
                 UPDATE eventlake_rpc_endpoints

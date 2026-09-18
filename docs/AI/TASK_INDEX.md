@@ -24,12 +24,17 @@ TODO -> IN_PROGRESS -> REVIEW -> DONE
 ## 2. 当前任务看板
 
 ### 活跃任务 (In Progress)
-- 当前无处于进行中的任务（Active Task: None）。
+- 暂无
 
 ### 待规划 / 待执行 (TODO)
-- 当前无预置任务（遵循“不提前添加任务、不猜测需求”原则，等待用户明确需求后拆分录入）。
+- 暂无
 
 ### 已完成任务 (DONE)
+- **TASK-005**: [核心日志采集流水线并发化改造与多链/多订阅异步隔离](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-005.md)
+- **TASK-004**: [实现 RPC 节点池阶梯式退避冷却 (1m->5m->24h) 与内存化路由缓存](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-004.md)
+- **TASK-003**: [精简 ClickHouse 存储与 Reorg 流程（清理废表定义、消除 Reorg 4倍写入放大与空表 DDL 调度）](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-003.md)
+- **TASK-002**: [剥离并彻底删除遗留解码 (Decoder)、ABI 注册表 (ABI Registry) 与 Explorers 模块](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-002.md)
+- **TASK-001**: [扩展区块交易采集模块以支持交易收据 (Receipts) 与 L2 燃气指标](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-001.md)
 - **TASK-000**: AI Agent 文档架构与格式规范初始化 (初始化完成，建立规范体系)
 
 ---

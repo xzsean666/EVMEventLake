@@ -132,6 +132,7 @@ async fn collect_chain(
                 return Err(error);
             }
         };
+        let _ = rpc_pool::mark_rpc_success(&state.pool, endpoint.id).await;
 
         let safe_head = chain_head.saturating_sub(policy.safe_confirmation_depth);
 
@@ -244,7 +245,7 @@ async fn collect_chain(
         )
         .await;
 
-        let blocks = match blocks_res {
+        let mut blocks = match blocks_res {
             Ok(b) => b,
             Err(error) => {
                 let error_message = error.public_message();
@@ -252,6 +253,40 @@ async fn collect_chain(
                 return Err(error);
             }
         };
+        let _ = rpc_pool::mark_rpc_success(&state.pool, endpoint.id).await;
+
+        let total_txs: usize = blocks.iter().map(|b| b.transactions.len()).sum();
+        if total_txs > 0 {
+            match rpc_pool::evm_rpc_client::eth_get_block_receipts_batch(
+                &state.http_client,
+                &endpoint.url,
+                &block_numbers,
+            )
+            .await
+            {
+                Ok(Some(receipts_by_block)) => {
+                    rpc_pool::evm_rpc_client::attach_receipts_to_blocks(
+                        &mut blocks,
+                        &receipts_by_block,
+                    );
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        chain_id = sync_state.chain_id,
+                        endpoint_id = %endpoint.id,
+                        "RPC endpoint does not support eth_getBlockReceipts; proceeding without transaction receipts"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        chain_id = sync_state.chain_id,
+                        endpoint_id = %endpoint.id,
+                        error = %error,
+                        "failed to fetch block receipts batch; falling back without receipts"
+                    );
+                }
+            }
+        }
 
         if let Err(error) = crate::clickhouse::write_blocks_and_transactions(&client, &blocks).await
         {

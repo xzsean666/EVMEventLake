@@ -9,8 +9,6 @@ default = []
 clickhouse = ["dep:clickhouse", "dep:time"]
 
 [dependencies]
-alloy-dyn-abi = "1.6.0"
-alloy-json-abi = { version = "1.6.0", features = ["serde_json"] }
 alloy-primitives = { version = "1.6.0", features = ["serde"] }
 anyhow = "1.0.100"
 axum = { version = "0.8.9", features = ["json", "macros"] }

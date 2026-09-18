@@ -53,6 +53,10 @@ pub struct TransactionRow {
     pub max_priority_fee_per_gas: Option<String>,
     pub tx_type: Option<u32>,
     pub method_id: Option<String>,
+    pub status: Option<u8>,
+    pub gas_used: Option<String>,
+    pub effective_gas_price: Option<String>,
+    pub l1_fee: Option<String>,
     pub is_canonical: bool,
     #[serde(with = "clickhouse::serde::time::datetime64::millis")]
     pub stored_at: OffsetDateTime,
@@ -122,6 +126,10 @@ pub async fn write_blocks_and_transactions(
                 max_priority_fee_per_gas: tx.max_priority_fee_per_gas.clone(),
                 tx_type,
                 method_id: tx.method_id.clone(),
+                status: tx.status,
+                gas_used: tx.gas_used.clone(),
+                effective_gas_price: tx.effective_gas_price.clone(),
+                l1_fee: tx.l1_fee.clone(),
                 is_canonical: true,
                 stored_at: stored_at_offset,
             });
@@ -168,6 +176,7 @@ pub async fn invalidate_blocks_and_transactions_from_block(
         SELECT chain_id, tx_hash, block_number, transaction_index,
                from_address, to_address, value, nonce, gas, gas_price,
                max_fee_per_gas, max_priority_fee_per_gas, tx_type, method_id,
+               status, gas_used, effective_gas_price, l1_fee,
                false, now64(3)
         FROM transactions FINAL
         WHERE chain_id = ? AND block_number >= ? AND is_canonical = true
@@ -264,6 +273,7 @@ pub async fn get_block_transactions(
         SELECT chain_id, tx_hash, block_number, transaction_index,
                from_address, to_address, value, nonce, gas, gas_price,
                max_fee_per_gas, max_priority_fee_per_gas, tx_type, method_id,
+               status, gas_used, effective_gas_price, l1_fee,
                is_canonical, stored_at
         FROM transactions FINAL
         WHERE chain_id = ? AND block_number = ? AND is_canonical = true
@@ -303,6 +313,7 @@ pub async fn get_transaction_by_hash(
             SELECT chain_id, tx_hash, block_number, transaction_index,
                from_address, to_address, value, nonce, gas, gas_price,
                max_fee_per_gas, max_priority_fee_per_gas, tx_type, method_id,
+               status, gas_used, effective_gas_price, l1_fee,
                is_canonical, stored_at
             FROM transactions FINAL
             WHERE chain_id = ? AND tx_hash = ? AND is_canonical = true
@@ -340,6 +351,7 @@ pub async fn get_address_transactions(
         SELECT chain_id, tx_hash, block_number, transaction_index,
                from_address, to_address, value, nonce, gas, gas_price,
                max_fee_per_gas, max_priority_fee_per_gas, tx_type, method_id,
+               status, gas_used, effective_gas_price, l1_fee,
                is_canonical, stored_at
         FROM transactions FINAL
         WHERE chain_id = ? AND is_canonical = true

@@ -90,6 +90,7 @@ fn test_configuration(clickhouse: ClickHouseConfig) -> ApplicationConfiguration 
             decode_batch_size: 1,
             partition_tick: Duration::from_secs(1),
             max_batch_addresses: 50,
+            collector_concurrency: 4,
         },
         block_transaction: BlockTransactionConfiguration {
             enabled: true,
@@ -404,6 +405,10 @@ async fn test_keyset_cursor_pagination_and_tamper_proofing() -> anyhow::Result<(
                 max_priority_fee_per_gas: None,
                 tx_type: Some(0),
                 method_id: None,
+                status: None,
+                gas_used: None,
+                effective_gas_price: None,
+                l1_fee: None,
             });
         }
         mock_blocks.push(evm_rpc_client::DecodedBlock {
@@ -566,6 +571,10 @@ async fn test_reorg_tombstone_and_reingest_recovery() -> anyhow::Result<()> {
             max_priority_fee_per_gas: None,
             tx_type: Some(0),
             method_id: None,
+            status: None,
+            gas_used: None,
+            effective_gas_price: None,
+            l1_fee: None,
         }],
     };
 

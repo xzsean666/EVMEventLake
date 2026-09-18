@@ -1,7 +1,14 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use sqlx::QueryBuilder;
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::{
+    sync::Semaphore,
+    task::JoinSet,
+    time::{MissedTickBehavior, interval},
+};
 use uuid::Uuid;
 
 use crate::{
@@ -16,6 +23,12 @@ use crate::{
 
 const MAX_WINDOW_REDUCTION_ATTEMPTS: usize = 16;
 const FAST_GROW_LOG_THRESHOLD: usize = 100;
+
+#[derive(Clone, Debug)]
+pub(crate) enum CollectionTask {
+    Standalone(SubscriptionRecord),
+    Batch(Vec<SubscriptionRecord>),
+}
 
 pub async fn run(state: ApplicationState) {
     let mut ticker = interval(state.configuration.background.worker_tick);
@@ -34,63 +47,85 @@ pub async fn collect_once(state: &ApplicationState) -> Result<(), ApplicationErr
     let candidate_limit = (max_batch_size * 4).max(50) as i64;
     let subscriptions = subscriptions::runnable_subscriptions(&state.pool, candidate_limit).await?;
 
+    if subscriptions.is_empty() {
+        return Ok(());
+    }
+
     let buckets = bucket_subscriptions(subscriptions);
+    let mut tasks = Vec::new();
 
     for subscription in buckets.standalone {
-        if let Err(error) = collect_subscription(state, &subscription).await {
-            tracing::warn!(
-                subscription_id = %subscription.id,
-                error = %error,
-                "subscription collection failed"
-            );
-            subscriptions::mark_subscription_error(
-                &state.pool,
-                subscription.id,
-                &error.public_message(),
-            )
-            .await?;
-        }
+        tasks.push(CollectionTask::Standalone(subscription));
     }
 
     for ((_chain_id, _current_block), subs) in buckets.batched {
         for chunk in subs.chunks(max_batch_size) {
             if chunk.len() == 1 {
-                if let Err(error) = collect_subscription(state, &chunk[0]).await {
-                    tracing::warn!(
-                        subscription_id = %chunk[0].id,
-                        error = %error,
-                        "subscription collection failed"
-                    );
-                    subscriptions::mark_subscription_error(
-                        &state.pool,
-                        chunk[0].id,
-                        &error.public_message(),
-                    )
-                    .await?;
-                }
-            } else if let Err(error) = collect_subscription_batch(state, chunk).await {
-                tracing::warn!(
-                    batch_size = chunk.len(),
-                    error = %error,
-                    "subscription batch collection failed; falling back to individual"
-                );
-                // Graceful fallback: execute individually on failure
-                for sub in chunk {
-                    if let Err(sub_error) = collect_subscription(state, sub).await {
+                tasks.push(CollectionTask::Standalone(chunk[0].clone()));
+            } else {
+                tasks.push(CollectionTask::Batch(chunk.to_vec()));
+            }
+        }
+    }
+
+    let concurrency = state.configuration.background.collector_concurrency.max(1);
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let mut set = JoinSet::new();
+
+    for task in tasks {
+        let sem = semaphore.clone();
+        let state = state.clone();
+
+        set.spawn(async move {
+            let _permit = sem.acquire().await;
+            match task {
+                CollectionTask::Standalone(subscription) => {
+                    if let Err(error) = collect_subscription(&state, &subscription).await {
                         tracing::warn!(
-                            subscription_id = %sub.id,
-                            error = %sub_error,
-                            "individual subscription fallback failed"
+                            subscription_id = %subscription.id,
+                            error = %error,
+                            "subscription collection failed"
                         );
-                        subscriptions::mark_subscription_error(
+                        let _ = subscriptions::mark_subscription_error(
                             &state.pool,
-                            sub.id,
-                            &sub_error.public_message(),
+                            subscription.id,
+                            &error.public_message(),
                         )
-                        .await?;
+                        .await;
+                    }
+                }
+                CollectionTask::Batch(chunk) => {
+                    if let Err(error) = collect_subscription_batch(&state, &chunk).await {
+                        tracing::warn!(
+                            batch_size = chunk.len(),
+                            error = %error,
+                            "subscription batch collection failed; falling back to individual"
+                        );
+                        // Graceful fallback: execute individually on failure
+                        for sub in &chunk {
+                            if let Err(sub_error) = collect_subscription(&state, sub).await {
+                                tracing::warn!(
+                                    subscription_id = %sub.id,
+                                    error = %sub_error,
+                                    "individual subscription fallback failed"
+                                );
+                                let _ = subscriptions::mark_subscription_error(
+                                    &state.pool,
+                                    sub.id,
+                                    &sub_error.public_message(),
+                                )
+                                .await;
+                            }
+                        }
                     }
                 }
             }
+        });
+    }
+
+    while let Some(res) = set.join_next().await {
+        if let Err(err) = res {
+            tracing::warn!(error = %err, "collector worker task panicked or canceled");
         }
     }
 
@@ -267,6 +302,7 @@ async fn collect_subscription_batch(
             }
         };
 
+        let _ = rpc_pool::mark_rpc_success(&state.pool, endpoint.id).await;
         let log_count = logs.len();
 
         let mut observed_blocks = HashSet::new();
@@ -566,6 +602,7 @@ async fn collect_subscription(
             }
         };
 
+        let _ = rpc_pool::mark_rpc_success(&state.pool, endpoint.id).await;
         let log_count = logs.len();
 
         // Observe each block once (logs share a block hash within a block) to detect

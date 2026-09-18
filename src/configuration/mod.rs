@@ -255,6 +255,8 @@ pub struct BackgroundConfiguration {
     pub partition_tick: Duration,
     /// Maximum number of contract addresses bundled into a single eth_getLogs request.
     pub max_batch_addresses: usize,
+    /// Maximum number of subscription groups collected concurrently.
+    pub collector_concurrency: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -304,6 +306,10 @@ impl ApplicationConfiguration {
             max_batch_addresses: read_positive_usize_env(
                 "EVENTLAKE_COLLECTOR_MAX_BATCH_ADDRESSES",
                 "50",
+            )?,
+            collector_concurrency: read_positive_usize_env(
+                "EVENTLAKE_COLLECTOR_CONCURRENCY",
+                "8",
             )?,
         };
 

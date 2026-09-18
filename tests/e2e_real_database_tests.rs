@@ -80,11 +80,6 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
             .get("/api/subscriptions/batch")
             .is_some()
     );
-    assert!(
-        openapi_response.1["paths"]
-            .get("/api/explorer/events/{event_name}")
-            .is_some()
-    );
 
     let api_key_response = post_json(
         &router,
@@ -284,29 +279,7 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
     // Verify custom chain was created
     assert_ok(get(&router, "/api/chains/99999").await?, StatusCode::OK);
 
-    let abi_response = post_json(
-        &router,
-        "/api/abis",
-        json!({
-            "name": "ERC20",
-            "abi_json": erc20_transfer_abi()
-        }),
-    )
-    .await?;
-    assert_ok(abi_response.clone(), StatusCode::OK);
-    let abi_id = uuid_from_response(&abi_response.1, "id");
-    assert_eq!(response_data(&abi_response.1)["event_count"], 1);
-    assert_ok(
-        get(&router, &format!("/api/abis/{abi_id}")).await?,
-        StatusCode::OK,
-    );
-
-    let events_response = get(&router, "/api/events").await?;
-    assert_ok(events_response.clone(), StatusCode::OK);
-    assert_eq!(
-        response_data(&events_response.1)[0]["event_name"],
-        "Transfer"
-    );
+    let abi_id: Option<Uuid> = None;
 
     assert_error(
         post_json(
@@ -479,10 +452,6 @@ async fn complete_eventlake_workflow_on_real_postgres() -> anyhow::Result<()> {
         delete(&router, &format!("/api/subscriptions/{subscription_id}")).await?,
         StatusCode::OK,
     );
-    assert_ok(
-        delete(&router, &format!("/api/abis/{abi_id}")).await?,
-        StatusCode::OK,
-    );
 
     Ok(())
 }
@@ -558,17 +527,7 @@ async fn live_chain_collects_and_searches_raw_base_usdc_logs() -> anyhow::Result
     );
     eprintln!("live e2e rpc health check passed");
 
-    let abi_response = post_json(
-        &router,
-        "/api/abis",
-        json!({
-            "name": "Live ERC20",
-            "abi_json": erc20_transfer_and_approval_abi()
-        }),
-    )
-    .await?;
-    assert_ok(abi_response.clone(), StatusCode::OK);
-    let abi_id = uuid_from_response(&abi_response.1, "id");
+    let abi_id: Option<Uuid> = None;
 
     let subscription_response = post_json(
         &router,
@@ -807,6 +766,7 @@ fn build_test_state(
                 decode_batch_size: 100,
                 partition_tick: Duration::from_secs(300),
                 max_batch_addresses: 50,
+                collector_concurrency: 4,
             },
             block_transaction: configuration::BlockTransactionConfiguration {
                 enabled: false,
@@ -933,45 +893,7 @@ async fn json_rpc_fixture(Json(request): Json<Value>) -> Json<Value> {
     Json(response)
 }
 
-fn erc20_transfer_abi() -> Value {
-    json!([
-        {
-            "anonymous": false,
-            "inputs": [
-                {"indexed": true, "internalType": "address", "name": "from", "type": "address"},
-                {"indexed": true, "internalType": "address", "name": "to", "type": "address"},
-                {"indexed": false, "internalType": "uint256", "name": "value", "type": "uint256"}
-            ],
-            "name": "Transfer",
-            "type": "event"
-        }
-    ])
-}
 
-fn erc20_transfer_and_approval_abi() -> Value {
-    json!([
-        {
-            "anonymous": false,
-            "inputs": [
-                {"indexed": true, "internalType": "address", "name": "from", "type": "address"},
-                {"indexed": true, "internalType": "address", "name": "to", "type": "address"},
-                {"indexed": false, "internalType": "uint256", "name": "value", "type": "uint256"}
-            ],
-            "name": "Transfer",
-            "type": "event"
-        },
-        {
-            "anonymous": false,
-            "inputs": [
-                {"indexed": true, "internalType": "address", "name": "owner", "type": "address"},
-                {"indexed": true, "internalType": "address", "name": "spender", "type": "address"},
-                {"indexed": false, "internalType": "uint256", "name": "value", "type": "uint256"}
-            ],
-            "name": "Approval",
-            "type": "event"
-        }
-    ])
-}
 
 fn address_topic(address: &str) -> String {
     format!("0x{:0>64}", address.trim_start_matches("0x"))

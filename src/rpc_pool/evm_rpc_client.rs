@@ -79,6 +79,34 @@ pub struct RpcTransaction {
     pub input: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcReceipt {
+    pub transaction_hash: String,
+    pub transaction_index: Option<String>,
+    pub block_hash: Option<String>,
+    pub block_number: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_hex_or_num_u8"
+    )]
+    pub status: Option<u8>,
+    #[serde(default, deserialize_with = "deserialize_optional_hex_or_num_string")]
+    pub gas_used: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_hex_or_num_string")]
+    pub effective_gas_price: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_hex_or_num_string")]
+    pub cumulative_gas_used: Option<String>,
+    #[serde(
+        default,
+        alias = "l1_fee",
+        deserialize_with = "deserialize_optional_hex_or_num_string"
+    )]
+    pub l1_fee: Option<String>,
+}
+
 fn deserialize_optional_hex_or_num_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -104,6 +132,63 @@ where
                 u64::from_str_radix(trimmed, 16)
                     .map(Some)
                     .map_err(serde::de::Error::custom)
+            }
+        }
+        Some(HexOrNum::Null) | None => Ok(None),
+    }
+}
+
+fn deserialize_optional_hex_or_num_u8<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum HexOrNum {
+        Num(u64),
+        Str(String),
+        Null,
+    }
+
+    match Option::<HexOrNum>::deserialize(deserializer)? {
+        Some(HexOrNum::Num(n)) => Ok(u8::try_from(n).ok()),
+        Some(HexOrNum::Str(s)) => {
+            let trimmed = s
+                .strip_prefix("0x")
+                .or_else(|| s.strip_prefix("0X"))
+                .unwrap_or(&s);
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                u8::from_str_radix(trimmed, 16)
+                    .map(Some)
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+        Some(HexOrNum::Null) | None => Ok(None),
+    }
+}
+
+fn deserialize_optional_hex_or_num_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum HexOrNum {
+        Num(serde_json::Number),
+        Str(String),
+        Null,
+    }
+
+    match Option::<HexOrNum>::deserialize(deserializer)? {
+        Some(HexOrNum::Num(n)) => Ok(Some(n.to_string())),
+        Some(HexOrNum::Str(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_owned()))
             }
         }
         Some(HexOrNum::Null) | None => Ok(None),
@@ -173,6 +258,21 @@ pub struct DecodedTransaction {
     pub max_priority_fee_per_gas: Option<String>,
     pub tx_type: Option<i64>,
     pub method_id: Option<String>,
+    pub status: Option<u8>,
+    pub gas_used: Option<String>,
+    pub effective_gas_price: Option<String>,
+    pub l1_fee: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedReceipt {
+    pub transaction_hash: String,
+    pub transaction_index: Option<i64>,
+    pub block_number: Option<i64>,
+    pub status: Option<u8>,
+    pub gas_used: Option<String>,
+    pub effective_gas_price: Option<String>,
+    pub l1_fee: Option<String>,
 }
 
 pub fn decode_rpc_block(
@@ -335,6 +435,10 @@ pub fn decode_rpc_block(
             max_priority_fee_per_gas,
             tx_type,
             method_id,
+            status: None,
+            gas_used: None,
+            effective_gas_price: None,
+            l1_fee: None,
         });
     }
 
@@ -536,6 +640,246 @@ pub fn parse_batch_block_response(
         }
         _ => Err(ApplicationError::ExternalService(
             "unexpected response type from json-rpc batch".to_owned(),
+        )),
+    }
+}
+
+pub fn parse_quantity_to_dec(value: &str) -> Result<String, ApplicationError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ApplicationError::BadRequest(
+            "empty quantity value".to_owned(),
+        ));
+    }
+    if let Some(hex_part) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+        if hex_part.is_empty() {
+            return Err(ApplicationError::BadRequest(format!(
+                "invalid empty hex quantity: {value}"
+            )));
+        }
+        let parsed = alloy_primitives::U256::from_str_radix(hex_part, 16)
+            .map_err(|_| ApplicationError::BadRequest(format!("invalid hex quantity: {value}")))?;
+        Ok(parsed.to_string())
+    } else if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        let parsed = alloy_primitives::U256::from_str_radix(trimmed, 10)
+            .map_err(|_| ApplicationError::BadRequest(format!("invalid decimal quantity: {value}")))?;
+        Ok(parsed.to_string())
+    } else {
+        let parsed = alloy_primitives::U256::from_str_radix(trimmed, 16)
+            .map_err(|_| ApplicationError::BadRequest(format!("invalid quantity: {value}")))?;
+        Ok(parsed.to_string())
+    }
+}
+
+pub fn decode_rpc_receipt(receipt: RpcReceipt) -> Result<DecodedReceipt, ApplicationError> {
+    let transaction_hash = normalize_hash(&receipt.transaction_hash)?;
+    let transaction_index = receipt
+        .transaction_index
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| parse_hex_u64_quantity(s).map(|v| v as i64))
+        .transpose()?;
+    let block_number = receipt
+        .block_number
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| parse_hex_u64_quantity(s).map(|v| v as i64))
+        .transpose()?;
+    let gas_used = receipt
+        .gas_used
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(parse_quantity_to_dec)
+        .transpose()?;
+    let effective_gas_price = receipt
+        .effective_gas_price
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(parse_quantity_to_dec)
+        .transpose()?;
+    let l1_fee = receipt
+        .l1_fee
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(parse_quantity_to_dec)
+        .transpose()?;
+
+    Ok(DecodedReceipt {
+        transaction_hash,
+        transaction_index,
+        block_number,
+        status: receipt.status,
+        gas_used,
+        effective_gas_price,
+        l1_fee,
+    })
+}
+
+pub fn is_method_not_found(code: i64, message: &str) -> bool {
+    if code == -32601 {
+        return true;
+    }
+    let lower = message.to_ascii_lowercase();
+    lower.contains("method not found")
+        || lower.contains("does not exist")
+        || lower.contains("not available")
+        || lower.contains("not implemented")
+        || lower.contains("unknown method")
+        || lower.contains("unsupported method")
+}
+
+pub fn attach_receipts_to_blocks(
+    blocks: &mut [DecodedBlock],
+    receipts_by_block: &HashMap<i64, Vec<DecodedReceipt>>,
+) {
+    for block in blocks {
+        if let Some(receipts) = receipts_by_block.get(&block.block_number) {
+            let mut by_hash: HashMap<&str, &DecodedReceipt> =
+                HashMap::with_capacity(receipts.len());
+            let mut by_index: HashMap<i64, &DecodedReceipt> =
+                HashMap::with_capacity(receipts.len());
+
+            for r in receipts {
+                by_hash.insert(r.transaction_hash.as_str(), r);
+                if let Some(idx) = r.transaction_index {
+                    by_index.insert(idx, r);
+                }
+            }
+
+            for (i, tx) in block.transactions.iter_mut().enumerate() {
+                let receipt_opt = by_hash
+                    .get(tx.tx_hash.as_str())
+                    .copied()
+                    .or_else(|| by_index.get(&tx.transaction_index).copied())
+                    .or_else(|| by_index.get(&(i as i64)).copied());
+
+                if let Some(receipt) = receipt_opt {
+                    tx.status = receipt.status;
+                    tx.gas_used = receipt.gas_used.clone();
+                    tx.effective_gas_price = receipt.effective_gas_price.clone();
+                    tx.l1_fee = receipt.l1_fee.clone();
+                }
+            }
+        }
+    }
+}
+
+pub async fn eth_get_block_receipts_batch(
+    client: &Client,
+    rpc_url: &str,
+    block_numbers: &[i64],
+) -> Result<Option<HashMap<i64, Vec<DecodedReceipt>>>, ApplicationError> {
+    if block_numbers.is_empty() {
+        return Ok(Some(HashMap::new()));
+    }
+
+    let requests: Vec<JsonRpcRequest> = block_numbers
+        .iter()
+        .map(|&bn| JsonRpcRequest {
+            jsonrpc: "2.0",
+            method: "eth_getBlockReceipts",
+            params: json!([format!("0x{:x}", bn)]),
+            id: bn as u64,
+        })
+        .collect();
+
+    let http_response = client
+        .post(rpc_url)
+        .json(&requests)
+        .send()
+        .await
+        .map_err(|error| ApplicationError::ExternalService(error.to_string()))?
+        .error_for_status()
+        .map_err(|error| ApplicationError::ExternalService(error.to_string()))?;
+
+    let raw_bytes = read_bounded_bytes(http_response, DEFAULT_MAX_RESPONSE_BYTES).await?;
+    let response_value: Value = serde_json::from_slice(&raw_bytes)
+        .map_err(|error| ApplicationError::ExternalService(error.to_string()))?;
+
+    parse_batch_receipts_response(block_numbers, response_value)
+}
+
+pub fn parse_batch_receipts_response(
+    block_numbers: &[i64],
+    response_value: Value,
+) -> Result<Option<HashMap<i64, Vec<DecodedReceipt>>>, ApplicationError> {
+    match response_value {
+        Value::Array(items) => {
+            let mut response_by_id: HashMap<u64, Result<Option<Vec<RpcReceipt>>, JsonRpcError>> =
+                HashMap::with_capacity(items.len());
+
+            for item in items {
+                let parsed_item: JsonRpcResponse<Vec<RpcReceipt>> =
+                    serde_json::from_value(item).map_err(|err| {
+                        ApplicationError::ExternalService(format!(
+                            "failed to parse json-rpc receipts response item: {err}"
+                        ))
+                    })?;
+
+                let id = parsed_item.id.ok_or_else(|| {
+                    ApplicationError::ExternalService(
+                        "json-rpc batch receipts response item missing id".to_owned(),
+                    )
+                })?;
+
+                if let Some(err) = parsed_item.error {
+                    if is_method_not_found(err.code, &err.message) {
+                        return Ok(None);
+                    }
+                    response_by_id.insert(id, Err(err));
+                } else {
+                    response_by_id.insert(id, Ok(parsed_item.result));
+                }
+            }
+
+            let mut receipts_by_block = HashMap::with_capacity(block_numbers.len());
+            for &bn in block_numbers {
+                let resp_res = response_by_id.get(&(bn as u64)).ok_or_else(|| {
+                    ApplicationError::ExternalService(format!(
+                        "json-rpc batch response missing receipts result for block {bn}"
+                    ))
+                })?;
+
+                match resp_res {
+                    Ok(Some(rpc_receipts)) => {
+                        let mut decoded_receipts = Vec::with_capacity(rpc_receipts.len());
+                        for r in rpc_receipts {
+                            decoded_receipts.push(decode_rpc_receipt(r.clone())?);
+                        }
+                        receipts_by_block.insert(bn, decoded_receipts);
+                    }
+                    Ok(None) => {
+                        receipts_by_block.insert(bn, Vec::new());
+                    }
+                    Err(err) => {
+                        return Err(ApplicationError::ExternalService(format!(
+                            "block receipts {bn} failed with json-rpc error {}: {}",
+                            err.code, err.message
+                        )));
+                    }
+                }
+            }
+
+            Ok(Some(receipts_by_block))
+        }
+        Value::Object(map) => {
+            if let Some(error_val) = map.get("error")
+                && let Ok(error_obj) = serde_json::from_value::<JsonRpcError>(error_val.clone())
+            {
+                if is_method_not_found(error_obj.code, &error_obj.message) {
+                    return Ok(None);
+                }
+                return Err(ApplicationError::ExternalService(format!(
+                    "json-rpc batch error {}: {}",
+                    error_obj.code, error_obj.message
+                )));
+            }
+            Err(ApplicationError::ExternalService(
+                "unexpected single response object for batch receipts request".to_owned(),
+            ))
+        }
+        _ => Err(ApplicationError::ExternalService(
+            "unexpected response type from json-rpc batch receipts".to_owned(),
         )),
     }
 }
@@ -878,5 +1222,165 @@ mod tests {
                 "toBlock": "0xc8"
             }])
         );
+    }
+
+    #[test]
+    fn decodes_rpc_receipt_and_op_stack_l1_fee() {
+        let receipt_json = json!({
+            "transactionHash": "0x111102cfba1925b6a715f1fbe148f98a28e367809930f7de3e6b22eb012a6001",
+            "transactionIndex": "0x0",
+            "blockNumber": "0x1b4",
+            "status": "0x1",
+            "gasUsed": "0x5208",
+            "effectiveGasPrice": "0x3b9aca00",
+            "l1Fee": "0x1234"
+        });
+
+        let rpc_receipt: RpcReceipt =
+            serde_json::from_value(receipt_json).expect("deserializes rpc receipt");
+        let decoded = decode_rpc_receipt(rpc_receipt).expect("decodes receipt");
+
+        assert_eq!(
+            decoded.transaction_hash,
+            "0x111102cfba1925b6a715f1fbe148f98a28e367809930f7de3e6b22eb012a6001"
+        );
+        assert_eq!(decoded.transaction_index, Some(0));
+        assert_eq!(decoded.block_number, Some(436));
+        assert_eq!(decoded.status, Some(1));
+        assert_eq!(decoded.gas_used, Some("21000".to_owned()));
+        assert_eq!(decoded.effective_gas_price, Some("1000000000".to_owned()));
+        assert_eq!(decoded.l1_fee, Some("4660".to_owned()));
+    }
+
+    #[test]
+    fn parse_batch_receipts_response_handles_success_and_out_of_order() {
+        let raw_batch_response = json!([
+            {
+                "id": 101,
+                "result": [
+                    {
+                        "transactionHash": "0x222202cfba1925b6a715f1fbe148f98a28e367809930f7de3e6b22eb012a6002",
+                        "transactionIndex": "0x0",
+                        "status": "0x0",
+                        "gasUsed": "0x186a0"
+                    }
+                ]
+            },
+            {
+                "id": 100,
+                "result": []
+            }
+        ]);
+
+        let res = parse_batch_receipts_response(&[100, 101], raw_batch_response)
+            .expect("parses batch receipts")
+            .expect("should be Some");
+
+        assert_eq!(res.get(&100).unwrap().len(), 0);
+        let block101_receipts = res.get(&101).unwrap();
+        assert_eq!(block101_receipts.len(), 1);
+        assert_eq!(block101_receipts[0].status, Some(0));
+        assert_eq!(block101_receipts[0].gas_used, Some("100000".to_owned()));
+    }
+
+    #[test]
+    fn parse_batch_receipts_response_downgrades_on_method_not_found() {
+        // Single JSON error object
+        let single_error_response = json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": {
+                "code": -32601,
+                "message": "the method eth_getBlockReceipts does not exist/is not available"
+            }
+        });
+        let res1 = parse_batch_receipts_response(&[100], single_error_response)
+            .expect("handles downgrade");
+        assert_eq!(res1, None);
+
+        // Batch array with method not found in item
+        let batch_item_error_response = json!([
+            {
+                "id": 100,
+                "error": {
+                    "code": -32601,
+                    "message": "Method not found"
+                }
+            }
+        ]);
+        let res2 = parse_batch_receipts_response(&[100], batch_item_error_response)
+            .expect("handles downgrade");
+        assert_eq!(res2, None);
+    }
+
+    #[test]
+    fn attach_receipts_to_blocks_matches_txs_accurately() {
+        let mut blocks = vec![DecodedBlock {
+            chain_id: 1,
+            block_number: 100,
+            block_hash: "0x0000000000000000000000000000000000000000000000000000000000000100"
+                .to_owned(),
+            parent_hash: "0x0000000000000000000000000000000000000000000000000000000000000099"
+                .to_owned(),
+            timestamp: 1000,
+            gas_limit: "30000000".to_owned(),
+            gas_used: "21000".to_owned(),
+            base_fee_per_gas: None,
+            beneficiary: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            size: None,
+            withdrawals_root: None,
+            blob_gas_used: None,
+            excess_blob_gas: None,
+            parent_beacon_block_root: None,
+            transaction_count: 1,
+            transactions: vec![DecodedTransaction {
+                chain_id: 1,
+                tx_hash: "0x111102cfba1925b6a715f1fbe148f98a28e367809930f7de3e6b22eb012a6001"
+                    .to_owned(),
+                block_number: 100,
+                transaction_index: 0,
+                from_address: "0x0000000000000000000000000000000000000001".to_owned(),
+                to_address: None,
+                value: "0".to_owned(),
+                nonce: "0".to_owned(),
+                gas: "21000".to_owned(),
+                gas_price: None,
+                max_fee_per_gas: None,
+                max_priority_fee_per_gas: None,
+                tx_type: Some(2),
+                method_id: None,
+                status: None,
+                gas_used: None,
+                effective_gas_price: None,
+                l1_fee: None,
+            }],
+        }];
+
+        let mut receipts_by_block = HashMap::new();
+        receipts_by_block.insert(
+            100,
+            vec![DecodedReceipt {
+                transaction_hash:
+                    "0x111102cfba1925b6a715f1fbe148f98a28e367809930f7de3e6b22eb012a6001"
+                        .to_owned(),
+                transaction_index: Some(0),
+                block_number: Some(100),
+                status: Some(1),
+                gas_used: Some("21000".to_owned()),
+                effective_gas_price: Some("1000000000".to_owned()),
+                l1_fee: Some("4660".to_owned()),
+            }],
+        );
+
+        attach_receipts_to_blocks(&mut blocks, &receipts_by_block);
+
+        let tx = &blocks[0].transactions[0];
+        assert_eq!(tx.status, Some(1));
+        assert_eq!(tx.gas_used, Some("21000".to_owned()));
+        assert_eq!(tx.effective_gas_price, Some("1000000000".to_owned()));
+        assert_eq!(tx.l1_fee, Some("4660".to_owned()));
     }
 }

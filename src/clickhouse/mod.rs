@@ -2,17 +2,15 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clickhouse::{Client, Row};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
     app::application_state::ApplicationState,
     configuration::ClickHouseConfig,
-    indexing::DecodedFieldValue,
     search::{
-        RawLogRecord, RawLogSearchRequest, SearchEventRecord, SearchFilter, SearchOperator,
-        SearchRequest, SearchSort,
+        RawLogRecord, RawLogSearchRequest, SearchFilter, SearchOperator, SearchSort,
     },
     shared::{
         error::ApplicationError,
@@ -28,27 +26,6 @@ pub use block_transaction::{
     get_block_transactions, get_transaction_by_hash, invalidate_blocks_and_transactions_from_block,
     write_blocks_and_transactions,
 };
-
-#[derive(Clone, Debug)]
-pub struct IndexedEvent {
-    pub id: Uuid,
-    pub raw_log_id: Uuid,
-    pub subscription_id: Option<Uuid>,
-    pub chain_id: i64,
-    pub block_number: i64,
-    pub block_hash: String,
-    pub transaction_hash: String,
-    pub log_index: i64,
-    pub contract_address: String,
-    pub event_name: String,
-    pub topic0: String,
-    pub abi_id: Option<Uuid>,
-    pub indexed_fields: Value,
-    pub non_indexed_fields: Value,
-    pub fields: Vec<DecodedFieldValue>,
-    pub is_removed: bool,
-    pub decoded_at: DateTime<Utc>,
-}
 
 /// An encoded EVM log. ClickHouse raw-event-lake mode writes this directly from the
 /// collector and intentionally never requires an ABI or a decoding queue.
@@ -66,64 +43,6 @@ pub struct RawLog {
     pub topics: Vec<String>,
     pub data: String,
     pub is_removed: bool,
-}
-
-#[derive(Row, Serialize)]
-struct DecodedEventRow {
-    #[serde(with = "clickhouse::serde::uuid")]
-    id: Uuid,
-    #[serde(with = "clickhouse::serde::uuid")]
-    raw_log_id: Uuid,
-    #[serde(with = "clickhouse::serde::uuid::option")]
-    subscription_id: Option<Uuid>,
-    chain_id: u64,
-    block_number: u64,
-    block_hash: String,
-    transaction_hash: String,
-    log_index: u32,
-    contract_address: String,
-    event_name: String,
-    topic0: String,
-    #[serde(with = "clickhouse::serde::uuid::option")]
-    abi_id: Option<Uuid>,
-    indexed_fields: String,
-    non_indexed_fields: String,
-    decoded_fields: String,
-    is_removed: bool,
-    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
-    decoded_at: OffsetDateTime,
-    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
-    indexed_at: OffsetDateTime,
-}
-
-#[derive(Row, Serialize)]
-struct AddressIndexRow {
-    chain_id: u64,
-    address: String,
-    block_number: u64,
-    transaction_hash: String,
-    log_index: u32,
-    event_name: String,
-    contract_address: String,
-    role: String,
-    field_name: String,
-    is_removed: bool,
-    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
-    indexed_at: OffsetDateTime,
-}
-
-#[derive(Row, Serialize)]
-struct EventFieldIndexRow {
-    chain_id: u64,
-    topic0: String,
-    field_name: String,
-    field_value: String,
-    block_number: u64,
-    transaction_hash: String,
-    log_index: u32,
-    is_removed: bool,
-    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
-    indexed_at: OffsetDateTime,
 }
 
 #[derive(Row, Serialize)]
@@ -227,100 +146,6 @@ pub async fn initialize_schema(client: &Client) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Writes one decoded-event search projection.
-pub async fn write_indexed_event(client: &Client, event: IndexedEvent) -> anyhow::Result<()> {
-    write_indexed_events(client, &[event]).await
-}
-
-/// Writes multiple decoded-event search projections in a single batch to ClickHouse.
-/// This prevents micro-parts generation that leads to 'Too many parts' errors.
-pub async fn write_indexed_events(client: &Client, events: &[IndexedEvent]) -> anyhow::Result<()> {
-    if events.is_empty() {
-        return Ok(());
-    }
-
-    let indexed_at = Utc::now();
-    let indexed_at_offset = to_offset_datetime(indexed_at)?;
-
-    let mut main_rows = Vec::with_capacity(events.len());
-    let mut address_rows = Vec::new();
-    let mut field_rows = Vec::new();
-
-    for event in events {
-        let chain_id = as_u64(event.chain_id, "chain_id")?;
-        let block_number = as_u64(event.block_number, "block_number")?;
-        let log_index = as_u32(event.log_index, "log_index")?;
-        let decoded_fields = json!({
-            "indexed": event.indexed_fields.clone(),
-            "non_indexed": event.non_indexed_fields.clone(),
-        })
-        .to_string();
-
-        main_rows.push(DecodedEventRow {
-            id: event.id,
-            raw_log_id: event.raw_log_id,
-            subscription_id: event.subscription_id,
-            chain_id,
-            block_number,
-            block_hash: event.block_hash.clone(),
-            transaction_hash: event.transaction_hash.clone(),
-            log_index,
-            contract_address: event.contract_address.clone(),
-            event_name: event.event_name.clone(),
-            topic0: event.topic0.clone(),
-            abi_id: event.abi_id,
-            indexed_fields: event.indexed_fields.to_string(),
-            non_indexed_fields: event.non_indexed_fields.to_string(),
-            decoded_fields,
-            is_removed: event.is_removed,
-            decoded_at: to_offset_datetime(event.decoded_at)?,
-            indexed_at: indexed_at_offset,
-        });
-
-        for field in &event.fields {
-            if let Ok(address) = crate::shared::validation::normalize_address(&field.normalized_value) {
-                address_rows.push(AddressIndexRow {
-                    chain_id,
-                    address,
-                    block_number,
-                    transaction_hash: event.transaction_hash.clone(),
-                    log_index,
-                    event_name: event.event_name.clone(),
-                    contract_address: event.contract_address.clone(),
-                    role: "field".to_owned(),
-                    field_name: field.field_name.clone(),
-                    is_removed: event.is_removed,
-                    indexed_at: indexed_at_offset,
-                });
-            }
-
-            if should_index_field_value(&field.json_value) {
-                field_rows.push(EventFieldIndexRow {
-                    chain_id,
-                    topic0: event.topic0.clone(),
-                    field_name: field.field_name.clone(),
-                    field_value: field.normalized_value.clone(),
-                    block_number,
-                    transaction_hash: event.transaction_hash.clone(),
-                    log_index,
-                    is_removed: event.is_removed,
-                    indexed_at: indexed_at_offset,
-                });
-            }
-        }
-    }
-
-    write_rows(client, "decoded_events", &main_rows).await?;
-    if !address_rows.is_empty() {
-        write_rows(client, "address_index", &address_rows).await?;
-    }
-    if !field_rows.is_empty() {
-        write_rows(client, "event_field_index", &field_rows).await?;
-    }
-
-    Ok(())
-}
-
 /// Persists an entire RPC response atomically at the collector checkpoint boundary. The
 /// caller advances PostgreSQL's subscription checkpoint only after this returns success.
 pub async fn write_raw_logs(client: &Client, logs: &[RawLog]) -> anyhow::Result<()> {
@@ -361,8 +186,7 @@ pub async fn write_raw_logs(client: &Client, logs: &[RawLog]) -> anyhow::Result<
     write_rows(client, "raw_logs", &rows).await
 }
 
-/// Writes raw-log tombstone versions directly from ClickHouse. Legacy projection
-/// tombstones are also retained so a pre-upgrade decoded-data reader stays consistent.
+/// Writes raw-log tombstone versions directly from ClickHouse.
 pub async fn invalidate_from_block(
     client: &Client,
     chain_id: i64,
@@ -379,47 +203,6 @@ pub async fn invalidate_from_block(
                transaction_index, log_index, contract_address, topic0, topic1, topic2, topic3,
                topics, data, true, ingested_at, now64(3)
         FROM raw_logs FINAL
-        WHERE chain_id = ? AND block_number >= ? AND is_removed = false
-        "#,
-        chain_id,
-        from_block,
-    )
-    .await?;
-
-    execute_reorg_tombstone(
-        client,
-        r#"
-        INSERT INTO decoded_events
-        SELECT id, raw_log_id, subscription_id, chain_id, block_number, block_hash,
-               transaction_hash, log_index, contract_address, event_name, topic0, abi_id,
-               indexed_fields, non_indexed_fields, decoded_fields, true, decoded_at, now64(3)
-        FROM decoded_events FINAL
-        WHERE chain_id = ? AND block_number >= ? AND is_removed = false
-        "#,
-        chain_id,
-        from_block,
-    )
-    .await?;
-    execute_reorg_tombstone(
-        client,
-        r#"
-        INSERT INTO address_index
-        SELECT chain_id, address, block_number, transaction_hash, log_index, event_name,
-               contract_address, role, field_name, true, now64(3)
-        FROM address_index FINAL
-        WHERE chain_id = ? AND block_number >= ? AND is_removed = false
-        "#,
-        chain_id,
-        from_block,
-    )
-    .await?;
-    execute_reorg_tombstone(
-        client,
-        r#"
-        INSERT INTO event_field_index
-        SELECT chain_id, topic0, field_name, field_value, block_number, transaction_hash,
-               log_index, true, now64(3)
-        FROM event_field_index FINAL
         WHERE chain_id = ? AND block_number >= ? AND is_removed = false
         "#,
         chain_id,
@@ -464,10 +247,6 @@ where
     Ok(())
 }
 
-fn should_index_field_value(value: &Value) -> bool {
-    matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_))
-}
-
 pub(crate) fn as_u64(value: i64, field: &str) -> anyhow::Result<u64> {
     u64::try_from(value).with_context(|| format!("{field} cannot be negative"))
 }
@@ -483,23 +262,6 @@ pub(crate) fn to_offset_datetime(value: DateTime<Utc>) -> anyhow::Result<OffsetD
 
 pub(crate) fn as_u32(value: i64, field: &str) -> anyhow::Result<u32> {
     u32::try_from(value).with_context(|| format!("{field} is outside ClickHouse UInt32 range"))
-}
-
-#[derive(Row, Deserialize)]
-struct SearchRow {
-    #[serde(with = "clickhouse::serde::uuid")]
-    id: Uuid,
-    #[serde(with = "clickhouse::serde::uuid")]
-    raw_log_id: Uuid,
-    block_number: u64,
-    chain_id: u64,
-    contract_address: String,
-    event_name: String,
-    topic0: String,
-    indexed_fields: String,
-    non_indexed_fields: String,
-    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
-    decoded_at: OffsetDateTime,
 }
 
 #[derive(Row, Deserialize)]
@@ -531,45 +293,6 @@ enum QueryArgument {
 struct SearchQuery {
     sql: String,
     arguments: Vec<QueryArgument>,
-}
-
-pub async fn search_events(
-    client: &Client,
-    request: &SearchRequest,
-    limit: i64,
-    offset: i64,
-) -> anyhow::Result<Vec<SearchEventRecord>> {
-    let search = build_search_query(request, limit, offset)?;
-    let mut query = client.query(&search.sql);
-    for argument in search.arguments {
-        query = match argument {
-            QueryArgument::Text(value) => query.bind(value),
-            QueryArgument::Signed(value) => query.bind(value),
-            QueryArgument::Unsigned(value) => query.bind(value),
-        };
-    }
-
-    let rows = query.fetch_all::<SearchRow>().await?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(SearchEventRecord {
-                id: row.id,
-                raw_log_id: row.raw_log_id,
-                block_number: i64::try_from(row.block_number)
-                    .context("ClickHouse block number exceeds PostgreSQL BIGINT")?,
-                chain_id: i64::try_from(row.chain_id)
-                    .context("ClickHouse chain ID exceeds PostgreSQL BIGINT")?,
-                contract_address: row.contract_address,
-                event_name: row.event_name,
-                topic0: row.topic0,
-                indexed_fields: serde_json::from_str(&row.indexed_fields)
-                    .context("invalid indexed_fields JSON in ClickHouse")?,
-                non_indexed_fields: serde_json::from_str(&row.non_indexed_fields)
-                    .context("invalid non_indexed_fields JSON in ClickHouse")?,
-                decoded_at: chrono_from_offset_datetime(row.decoded_at)?,
-            })
-        })
-        .collect()
 }
 
 pub async fn search_raw_logs(
@@ -770,44 +493,7 @@ fn chrono_from_offset_datetime(value: OffsetDateTime) -> anyhow::Result<DateTime
         .context("ClickHouse timestamp cannot be converted to chrono")
 }
 
-fn build_search_query(
-    request: &SearchRequest,
-    limit: i64,
-    offset: i64,
-) -> Result<SearchQuery, ApplicationError> {
-    let mut query = SearchQuery {
-        sql: String::from(
-            r#"
-            SELECT id, raw_log_id, block_number, chain_id, contract_address,
-                   event_name, topic0, indexed_fields, non_indexed_fields, decoded_at
-            FROM decoded_events FINAL
-            WHERE is_removed = false
-            "#,
-        ),
-        arguments: Vec::new(),
-    };
-    let chain_id = exact_integer_filter(request, "chain_id");
-    let topic0 = exact_text_filter(request, "topic0");
 
-    for filter in &request.filters {
-        push_search_filter(&mut query, filter, chain_id, topic0.as_deref())?;
-    }
-
-    push_search_sort(&mut query, request.sort.as_ref())?;
-    query.sql.push_str(" LIMIT ? OFFSET ?");
-    query
-        .arguments
-        .push(QueryArgument::Unsigned(u64::try_from(limit).map_err(
-            |_| ApplicationError::BadRequest("search limit cannot be negative".to_owned()),
-        )?));
-    query
-        .arguments
-        .push(QueryArgument::Unsigned(u64::try_from(offset).map_err(
-            |_| ApplicationError::BadRequest("search offset cannot be negative".to_owned()),
-        )?));
-
-    Ok(query)
-}
 
 fn build_raw_log_search_query(
     request: &RawLogSearchRequest,
@@ -924,59 +610,7 @@ fn push_raw_log_search_sort(
     Ok(())
 }
 
-fn exact_integer_filter(request: &SearchRequest, field: &str) -> Option<i64> {
-    request.filters.iter().find_map(|filter| {
-        (filter.field == field && matches!(filter.operator, SearchOperator::Eq))
-            .then(|| filter.value.as_i64())
-            .flatten()
-    })
-}
 
-fn exact_text_filter(request: &SearchRequest, field: &str) -> Option<String> {
-    request.filters.iter().find_map(|filter| {
-        (filter.field == field && matches!(filter.operator, SearchOperator::Eq))
-            .then(|| filter.value.as_str().map(str::to_owned))
-            .flatten()
-    })
-}
-
-fn push_search_filter(
-    query: &mut SearchQuery,
-    filter: &SearchFilter,
-    chain_id: Option<i64>,
-    topic0: Option<&str>,
-) -> Result<(), ApplicationError> {
-    match filter.field.as_str() {
-        "chain_id" => push_integer_filter(query, "chain_id", filter),
-        "block_number" => push_integer_filter(query, "block_number", filter),
-        "contract_address" => {
-            let normalized = normalize_address(&string_value(&filter.value)?)?;
-            push_text_filter(query, "contract_address", &filter.operator, normalized)
-        }
-        "event_name" => push_text_filter(
-            query,
-            "event_name",
-            &filter.operator,
-            string_value(&filter.value)?,
-        ),
-        "topic0" => push_text_filter(
-            query,
-            "topic0",
-            &filter.operator,
-            string_value(&filter.value)?,
-        ),
-        "transaction_hash" => push_transaction_filter(query, filter),
-        "address" => push_address_filter(query, filter, chain_id),
-        field if field.starts_with("field.") => push_event_field_filter(
-            query,
-            field.trim_start_matches("field."),
-            filter,
-            chain_id,
-            topic0,
-        ),
-        _ => Err(ApplicationError::BadRequest("invalid filter".to_owned())),
-    }
-}
 
 fn push_integer_filter(
     query: &mut SearchQuery,
@@ -1063,133 +697,6 @@ fn push_text_filter(
     Ok(())
 }
 
-fn push_transaction_filter(
-    query: &mut SearchQuery,
-    filter: &SearchFilter,
-) -> Result<(), ApplicationError> {
-    if !matches!(filter.operator, SearchOperator::Eq) {
-        return Err(ApplicationError::BadRequest(
-            "transaction_hash currently supports eq".to_owned(),
-        ));
-    }
-
-    query.sql.push_str(" AND lowerUTF8(transaction_hash) = ?");
-    query.arguments.push(QueryArgument::Text(
-        string_value(&filter.value)?.to_ascii_lowercase(),
-    ));
-    Ok(())
-}
-
-fn push_address_filter(
-    query: &mut SearchQuery,
-    filter: &SearchFilter,
-    chain_id: Option<i64>,
-) -> Result<(), ApplicationError> {
-    if !matches!(filter.operator, SearchOperator::Eq) {
-        return Err(ApplicationError::BadRequest(
-            "address currently supports eq".to_owned(),
-        ));
-    }
-
-    query.sql.push_str(
-        r#"
-        AND (chain_id, transaction_hash, log_index, block_number) IN (
-            SELECT chain_id, transaction_hash, log_index, block_number
-            FROM address_index FINAL
-            WHERE is_removed = false AND role = 'field' AND address = ?
-        "#,
-    );
-    query
-        .arguments
-        .push(QueryArgument::Text(normalize_address(&string_value(
-            &filter.value,
-        )?)?));
-    if let Some(chain_id) = chain_id {
-        query.sql.push_str(" AND chain_id = ?");
-        query.arguments.push(QueryArgument::Signed(chain_id));
-    }
-    query.sql.push_str(
-        r#"
-        )
-        "#,
-    );
-    Ok(())
-}
-
-fn push_event_field_filter(
-    query: &mut SearchQuery,
-    field_name: &str,
-    filter: &SearchFilter,
-    chain_id: Option<i64>,
-    topic0: Option<&str>,
-) -> Result<(), ApplicationError> {
-    let condition = match filter.operator {
-        SearchOperator::Eq => "field_value = ?",
-        SearchOperator::Contains => "positionCaseInsensitiveUTF8(field_value, ?) > 0",
-        _ => {
-            return Err(ApplicationError::BadRequest(
-                "field filters currently support eq and contains".to_owned(),
-            ));
-        }
-    };
-
-    query.sql.push_str(
-        r#"
-        AND (chain_id, transaction_hash, log_index, block_number) IN (
-            SELECT chain_id, transaction_hash, log_index, block_number
-            FROM event_field_index FINAL
-            WHERE is_removed = false AND field_name = ? AND "#,
-    );
-    query.sql.push_str(condition);
-    query
-        .arguments
-        .push(QueryArgument::Text(field_name.to_owned()));
-    query.arguments.push(QueryArgument::Text(
-        string_value(&filter.value)?.to_ascii_lowercase(),
-    ));
-    if let Some(chain_id) = chain_id {
-        query.sql.push_str(" AND chain_id = ?");
-        query.arguments.push(QueryArgument::Signed(chain_id));
-    }
-    if let Some(topic0) = topic0 {
-        query.sql.push_str(" AND topic0 = ?");
-        query.arguments.push(QueryArgument::Text(topic0.to_owned()));
-    }
-    query.sql.push(')');
-    Ok(())
-}
-
-fn push_search_sort(
-    query: &mut SearchQuery,
-    sort: Option<&SearchSort>,
-) -> Result<(), ApplicationError> {
-    match sort {
-        Some(sort) if sort.field == "block_number" || sort.field == "decoded_at" => {
-            query.sql.push_str(" ORDER BY ");
-            query.sql.push_str(&sort.field);
-            query.sql.push(' ');
-            query.sql.push_str(
-                if matches!(sort.direction.as_deref(), Some("asc") | Some("ASC")) {
-                    "ASC"
-                } else {
-                    "DESC"
-                },
-            );
-        }
-        Some(sort) => {
-            return Err(ApplicationError::BadRequest(format!(
-                "unsupported sort field: {}",
-                sort.field
-            )));
-        }
-        None => query
-            .sql
-            .push_str(" ORDER BY block_number DESC, decoded_at DESC"),
-    }
-
-    Ok(())
-}
-
 fn push_clickhouse_direction(query: &mut SearchQuery, direction: Option<&str>) {
     query
         .sql
@@ -1205,37 +712,4 @@ fn string_value(value: &Value) -> Result<String, ApplicationError> {
         .as_str()
         .map(str::to_owned)
         .ok_or_else(|| ApplicationError::BadRequest("filter value must be a string".to_owned()))
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    #[test]
-    fn search_query_uses_analytical_indexes_for_address_and_fields() {
-        let request = SearchRequest {
-            page: Some(1),
-            limit: Some(10),
-            filters: vec![
-                SearchFilter {
-                    field: "address".to_owned(),
-                    operator: SearchOperator::Eq,
-                    value: json!("0x1111111111111111111111111111111111111111"),
-                },
-                SearchFilter {
-                    field: "field.value".to_owned(),
-                    operator: SearchOperator::Eq,
-                    value: json!("1234"),
-                },
-            ],
-            sort: None,
-        };
-
-        let query = build_search_query(&request, 10, 0).expect("query builds");
-        assert!(query.sql.contains("FROM address_index FINAL"));
-        assert!(query.sql.contains("FROM event_field_index FINAL"));
-        assert_eq!(query.arguments.len(), 5);
-    }
 }
