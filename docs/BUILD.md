@@ -24,6 +24,7 @@ Core files include:
 - `docker-compose.yml`
 - `docker-compose.source.yml`
 - `scripts/build-prebuilt-binary.sh`
+- `scripts/download-prebuilt-binary.sh`
 - `scripts/backup.sh`
 - `scripts/restore.sh`
 - `scripts/verify-backup.sh`

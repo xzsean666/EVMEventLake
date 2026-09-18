@@ -30,6 +30,7 @@ TODO -> IN_PROGRESS -> REVIEW -> DONE
 - （暂无待规划任务）
 
 ### 已完成任务 (DONE)
+- **TASK-016**: [优化 Dockerfile 与 Docker Compose 支持 GitHub Release 二进制拉取构建并剥离 Git 大文件追踪](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-016.md)
 - **TASK-015**: [ClickHouse 系统日志轻量化抑制与写入碎片（Parts）合并防堵调优](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-015.md)
 - **TASK-014**: [收敛合并为单一 Dockerfile（基于 Target 支持 prebuilt 与 source 模式），清理残存构建文件并恢复 Git 忽略规则](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-014.md)
 - **TASK-013**: [收敛与重构 Docker Compose 编排体系（默认预编译二进制构建，独立源码构建并清理冗余文件）](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-013.md)

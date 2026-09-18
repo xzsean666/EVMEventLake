@@ -82,23 +82,28 @@ curl -fsS http://127.0.0.1:8080/health/ready
 
 ---
 
-## 3. 模式 A：预编译 Docker Compose 部署 (默认)
+## 3. 模式 A：预编译 Docker Compose 部署 (默认推荐)
 
-拉取仓库后，默认 `docker-compose.yml` 直接利用内置预编译二进制（`deploy/prebuilt/eventlake`）秒级构建轻量容器，无需在本地安装 Rust 工具链或执行耗时的 Rust 编译：
+克隆仓库后，默认 `docker-compose.yml` 具备**零本地 Rust 编译**与**自适应 Release 拉取**能力：
+- 若本地存在 `deploy/prebuilt/eventlake`，秒级复用构建；
+- 若本地无二进制（如全新克隆环境），Docker 构建阶段自动从 GitHub Releases 下载官方 Linux 预编译二进制包并解压安装。
 
 ### 3.1 启动服务
 
 ```bash
-# 复制环境变量
+# 1. 复制环境变量
 cp .env.example .env
 
-# 构建并启动服务（使用预编译二进制，几秒内构建完成）
+# 2. 可选：显式下载指定版本的预编译二进制到本地构建上下文（支持中国大陆代理加速）
+./scripts/download-prebuilt-binary.sh --cn
+
+# 3. 一键构建并启动服务（零 Rust 编译，几秒内完成）
 docker compose up -d --build
 
-# 检查服务状态
+# 4. 检查服务状态
 docker compose ps
 
-# 验证就绪
+# 5. 验证就绪
 curl -fsS http://127.0.0.1:8080/health/ready
 ```
 

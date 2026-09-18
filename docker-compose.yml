@@ -30,8 +30,12 @@ services:
       dockerfile: Dockerfile
       target: prebuilt
       args:
+        GITHUB_REPO: ${EVENTLAKE_GITHUB_REPO:-xzsean666/EVMEventLake}
+        EVENTLAKE_VERSION: ${EVENTLAKE_VERSION:-latest}
+        EVENTLAKE_DOWNLOAD_URL: ${EVENTLAKE_DOWNLOAD_URL:-}
+        USE_CN_PROXY: ${EVENTLAKE_CN_PROXY:-false}
         EVENTLAKE_BINARY: ${EVENTLAKE_PREBUILT_BINARY:-deploy/prebuilt/eventlake}
-    image: eventlake:local
+    image: ${EVENTLAKE_IMAGE:-eventlake:local}
     restart: unless-stopped
     env_file:
       - ${EVENTLAKE_ENV_FILE:-.env.example}
