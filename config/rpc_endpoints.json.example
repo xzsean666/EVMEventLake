@@ -1,7 +1,7 @@
 {
-  "updated_at": "2026-08-20T11:30:00Z",
+  "updated_at": "2026-09-20T17:15:00Z",
   "mode": "direct_no_proxy_verified",
-  "total_endpoints": 84,
+  "total_endpoints": 92,
   "endpoints": [
     {
       "chain_id": 1,
@@ -308,6 +308,102 @@
       "native_token_symbol": "GLMR",
       "updated_at": "2026-08-20T11:30:00Z",
       "latency_ms": 4330.6
+    },
+    {
+      "chain_id": 1868,
+      "url": "https://rpc.soneium.org",
+      "weight": 100,
+      "is_archive": true,
+      "max_block_range": 100000,
+      "max_batch_size": 50,
+      "chain_name": "Soneium",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-09-20T16:30:00Z",
+      "latency_ms": 1200.0
+    },
+    {
+      "chain_id": 1868,
+      "url": "https://soneium-mainnet.rpc.sentio.xyz",
+      "weight": 95,
+      "is_archive": true,
+      "max_block_range": 10000,
+      "max_batch_size": 50,
+      "chain_name": "Soneium",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-09-20T17:15:00Z",
+      "latency_ms": 1250.0
+    },
+    {
+      "chain_id": 1868,
+      "url": "https://1868.rpc.thirdweb.com",
+      "weight": 90,
+      "is_archive": true,
+      "max_block_range": 1000,
+      "max_batch_size": 20,
+      "chain_name": "Soneium",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-09-20T16:30:00Z",
+      "latency_ms": 1300.0
+    },
+    {
+      "chain_id": 1868,
+      "url": "https://nodes.sequence.app/soneium",
+      "weight": 85,
+      "is_archive": true,
+      "max_block_range": 10000,
+      "max_batch_size": 20,
+      "chain_name": "Soneium",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-09-20T16:30:00Z",
+      "latency_ms": 1350.0
+    },
+    {
+      "chain_id": 1868,
+      "url": "https://soneium.gateway.tenderly.co",
+      "weight": 85,
+      "is_archive": true,
+      "max_block_range": 10000,
+      "max_batch_size": 20,
+      "chain_name": "Soneium",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-09-20T17:15:00Z",
+      "latency_ms": 1300.0
+    },
+    {
+      "chain_id": 1868,
+      "url": "https://rpc.nodeflare.app/soneium/public",
+      "weight": 80,
+      "is_archive": false,
+      "max_block_range": 1000,
+      "max_batch_size": 20,
+      "chain_name": "Soneium",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-09-20T16:30:00Z",
+      "latency_ms": 1500.0
+    },
+    {
+      "chain_id": 1868,
+      "url": "https://rpc.swiftnodes.io/rpc/soneium",
+      "weight": 80,
+      "is_archive": false,
+      "max_block_range": 0,
+      "max_batch_size": 50,
+      "chain_name": "Soneium",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-09-20T17:15:00Z",
+      "latency_ms": 1400.0
+    },
+    {
+      "chain_id": 1868,
+      "url": "https://soneium.drpc.org",
+      "weight": 70,
+      "is_archive": true,
+      "max_block_range": 100,
+      "max_batch_size": 10,
+      "chain_name": "Soneium",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-09-20T16:30:00Z",
+      "latency_ms": 1400.0
     },
     {
       "chain_id": 2222,

@@ -8,12 +8,16 @@
 
 - **当前 Goal**: 建设与完善生产运维与业务落地全流程支持体系
 - **当前 Task**: 
+  - **TASK-028**: 基于可用 RPC 动态并发与节点能力自适应切片流水线 (`DONE`)
+  - **TASK-027**: 区块与交易多节点并发分片抓取流水线与切片故障自愈顶替机制 (`DONE`)
+  - **TASK-026**: RPC 节点能力感知、Archive/普通节点分流调度与合约 Logs 动态切片策略 (`DONE`)
+  - **TASK-025**: 预置 Soneium 主网 Archive RPC 节点与加权配置进入默认与示例配置 (`DONE`)
   - **TASK-024**: lakectl 支持先登录后操作 (login/logout/whoami) 与自定义远程端口 (`DONE`)
   - **TASK-023**: lakectl 支持声明式配置幂等导入与导出 (import/export config) (`DONE`)
   - **TASK-022**: 服务端区块交易常驻解耦与独立纯 Shell 客户端 (lakectl) (`DONE`)
   - **TASK-021**: 完善部署后全流程业务使用与下游集成指南 (USAGE.md) (`DONE`)
   - **TASK-020**: 远程一键部署自动化脚本 (deploy-remote.sh) 与部署文档支持 (`DONE`)
-- **当前状态**: `DONE` (已完成 lakectl 先登录后操作机制与凭据持久化 ~/.lakectl/config，支持公网直连、SSH 内部端口穿透与本地直连 3 大模式，支持 login/logout/whoami 及 --remote-port)
+- **当前状态**: `DONE` (已完成基于可用 RPC 动态并发、节点吞吐能力自适应切片流水线与全节点算力释放)
 
 ---
 
@@ -79,6 +83,7 @@
   - **自动 SSH 穿透**：通过 `-s/--ssh` 选项自动管理安全 SSH 端口转发隧道，解决服务器 8080/8123 端口处于私网未向公网开放的问题。
   - **终端动态监控大盘 (`lakectl top`)**：支持像 `htop` / `k9s` 一样实时动态刷新概况指标、RPC 节点延迟池、日志订阅 Checkpoint 以及区块交易同步进度条。
   - **动态管理子命令**：包含 `block start/pause/resume/status`、`log list/add/pause/resume/delete`、`rpc list/check/add`、`chain list/add`。
+
 ### 2.10 lakectl 声明式配置幂等导入与导出 (TASK-023)
 - **声明式配置规范与模板**：
   - 新增标准化全量配置文件模板 [`config/eventlake.example.json`](file:///ssd0/git/EVMEventLake/config/eventlake.example.json)，包含 `chains`、`rpc_endpoints`、`subscriptions`、`block_transaction_sync`。
@@ -106,26 +111,97 @@
 - **文档同步**：
   - 在 [`docs/USAGE.md`](file:///ssd0/git/EVMEventLake/docs/USAGE.md) 中加入 2.2 登录模式与凭据持久化章节。
 
+### 2.12 预置 Soneium 主网 Archive RPC 节点与加权配置 (TASK-025)
+- **实测支持 Archive 历史状态查询**：
+  - `https://rpc.soneium.org` (官方公共节点，归档完备，权重 100)
+  - `https://1868.rpc.thirdweb.com` (Thirdweb 公共端点，归档完备，单次日志跨度 1000 块，权重 90)
+  - `https://nodes.sequence.app/soneium` (Sequence 公共端点，归档完备，权重 85)
+  - `https://soneium.drpc.org` (dRPC 公共端点，归档完备，大范围日志受限，权重 70)
+- **预置入系统默认配置**：
+  - 在 `config/rpc_endpoints.json` 和 `config/rpc_endpoints.json.example` 中补充上述 4 个端点，`total_endpoints` 递增至 88，支持系统启动时无缝种子化 Soneium 节点池。
+  - 在 `config/eventlake.example.json` 中增加 Soneium (Chain ID 1868) 的链定义与 RPC 节点声明。
+
+### 2.13 RPC 节点能力感知、Archive/普通节点分流调度与合约 Logs 动态切片策略 (TASK-026)
+- **压平基础 Schema (无额外迁移)**：
+  - 直接在 `migrations/202609180001_initial_schema.sql` 中的 `eventlake_rpc_endpoints` 增加 `is_archive BOOLEAN NOT NULL DEFAULT 1`、`max_block_range INTEGER`、`max_batch_size INTEGER`，不保留额外递增迁移文件。
+- **RPC 节点池调度算法增强 (`src/rpc_pool/mod.rs`)**：
+  - 升级 `RpcEndpointRecord`、`CreateRpcEndpointRequest` 与 `RpcEndpointSeed`，支持节点能力标注。
+  - 引入 `EndpointRequirements { needs_archive, preferred_block_range }` 及 `select_rpc_endpoint_with_requirements`：
+    - **历史追赶**（`needs_archive = true`）：仅向 `is_archive = true` 的节点分发请求，杜绝向修剪节点请求历史引发的 `state pruned` 错误；
+    - **实时同步**（`needs_archive = false`）：普通节点（Pruned，如 NodeFlare）与 Archive 节点共同依据权重平滑负载均衡，保护高价值 Archive 节点算力；
+    - **推荐跨度优先**：优先调度支持大跨度的节点。
+- **日志采集器动态安全切片 (`src/collector/worker.rs`)**：
+  - 在 `collect_subscription` 与 `collect_subscription_batch` 中引入动态切片：`effective_window = match endpoint.max_block_range { Some(limit) if limit > 0 => block_window.min(limit), _ => block_window }`。
+  - 允许冷门合约 `max_block_window` 配置至百万级（1,000,000 块）高速追赶；当调度至 1000 块限制节点时，请求自动切片，绝不触发超限报错或误折半降速；调度至大跨度节点时即可大步跳跃。
+- **区块交易同步批处理自适应 (`src/block_transaction/collector.rs`)**：
+  - 依据 `endpoint.max_batch_size` 动态截断单批拉取大小，杜绝大批超时。
+- **单元与集成测试覆盖**：
+  - 在 `tests/rpc_pool_cooldown_test.rs` 中新增 `test_select_rpc_endpoint_with_archive_and_range_requirements`，验证归档隔离与大跨度优先策略，全量测试全部通过。
+
+### 2.14 区块与交易多节点并发分片抓取流水线与切片故障自愈顶替机制 (TASK-027)
+- **历史追赶多节点分片流水线（Multi-Node Chunk Pipeline）**：
+  - 实现 `partition_block_range_into_slices` 函数，在历史追赶（`syncing`）且剩余落后区块较多时，自动将抓取区间切分为多个连续切片。
+  - 使用 `tokio::task::JoinSet` 并发派发各个切片，利用 RPC 节点池的 SWRR 调度将不同切片自然分散到不同健康节点，实现历史区块与交易的几倍吞吐提速。
+- **实时跟进单切片防抖（Realtime Tip）**：
+  - 当同步状态处于 `caught_up` 或剩余区块 $\le$ 单批大小时，强制单切片单节点顺序执行，保留严密的 Reorg 探针与父哈希检测，避免在链顶产生不必要的并发竞争与开销。
+- **单切片故障自愈顶替机制（Failover Takeover）**：
+  - 实现 `fetch_slice_with_failover`，每个切片内部最多支持 5 次动态故障转移重试。
+  - 当某个 RPC 节点在抓取区块或批量收据时遭遇网络抖动、超时、429 限流或 502/503 报错，自动调用 `mark_rpc_failure` 将故障节点置入阶梯退避冷却，并由 `select_rpc_endpoint_with_requirements` 选出其他可用健康节点即刻顶替继续重试，直到该切片完整成功。
+- **全量完备性保障（All-or-Nothing Completeness）**：
+  - 只有当前任务分发的所有切片全部抓取成功，且跨切片通过 `validate_block_sequence`（验证全局严格连续且父哈希完全吻合）并成功批量写入 ClickHouse 后，才原子推进 SQLite Checkpoint。
+  - 若最终有切片因所有节点均不可用而失败，整批任务失败并退出，绝不推进 Checkpoint，坚决杜绝区块空洞与漏块。
+
+### 2.15 基于可用 RPC 动态并发与节点能力自适应切片流水线 (TASK-028)
+- **解除区块交易历史归档强依赖**：
+  - 区块头、交易体与收据属于 EVM 规范的全节点必备存储，无需中间状态树。将 `collect_chain` 中的路由要求调整为 `needs_archive: false`，释放普通全节点（如 NodeFlare）并发算力，Soneium 5 个节点全部投入追赶。
+- **活跃健康节点列表暴露 (`src/rpc_pool/mod.rs`)**：
+  - 提取并暴露 `get_available_rpc_endpoints_with_requirements`，允许上层收集模块动态获取当前链全部健康、非冷却且符合条件的活跃候选节点列表。
+- **节点吞吐能力自适应切片（Capacity-Aware Chunk Slicing）**：
+  - 重构 `partition_block_range_into_slices`，不再使用静态切片数和统一批大小，而是根据当前活跃节点的各自能力参数（`max_batch_size`）进行自适应连续切分：
+    - 官方节点分配 50 块；
+    - Thirdweb、Sequence、NodeFlare 分配 20 块；
+    - dRPC 分配 10 块；
+    - 单 Tick 瞬间拉取 $50 + 20 + 20 + 20 + 10 = 120$ 块，各节点均工作在最优参数下，无闲置无超载。
+- **切片精准指派与动态故障转移**：
+  - 重构 `fetch_slice_with_failover`，切片初始直接交由为其量身定制的节点执行；一旦发生故障，记录冷却并由其他健康节点接管，内部依据新节点的 `max_batch_size` 自动进行安全子切片拆分。
+- **单元测试与回归验证**：
+  - 更新 `tests/block_transaction_test.rs` 中的 `test_partition_block_range_into_slices_historical_and_tip`，全库 8 项 block_transaction 测试、7 项 rpc_pool 测试与全项目编译检查全部通过。
+
+### 2.16 Soneium 节点扩容与全节点链上实测验证 (8 节点并发矩阵)
+- **发现并实测 3 个全新端点**：
+  - `https://soneium-mainnet.rpc.sentio.xyz` (Sentio: Archive, Batch 50, Logs 10k)
+  - `https://soneium.gateway.tenderly.co` (Tenderly: Archive, Batch 20, Logs 10k)
+  - `https://rpc.swiftnodes.io/rpc/soneium` (SwiftNodes: Pruned 全节点, Batch 50, 支持区块与收据批量获取)
+- **链上真实验证全连通**：
+  - 对 8 个节点进行全项探测（最新块高、延迟、历史块 #100、收据获取、Archive 状态、Logs 范围），全部节点真实可用，最新 Head 同步在 `28,380,417~28,380,457` 之间。
+- **并发能力倍增**：
+  - 8 个节点全部投入区块与交易追赶，单 Tick 历史追赶总并发吞吐量达到 **240 块**。
+- **配置文件更新**：
+  - `config/rpc_endpoints.json` 端点数增至 92。
+  - `config/rpc_endpoints.json.example` 同步更新至 92。
+  - `config/eventlake.example.json` 补充了全部 8 个端点定义。
+
 ---
 
 ## 3. 文件变动清单
 
 ### 新建文件 (Created Files)
-- `config/eventlake.example.json`: 声明式全量配置参考模板。
-- `scripts/lakectl`: 独立纯 Shell 客户端（支持 SSH 隧道穿透、TUI 动态大盘、声明式导入导出、先登录后操作与全流程控制）。
-- `scripts/deploy-remote.sh`: 远程一键部署自动化脚本（支持 SSH、指定目录、指定本地 env、环境嗅探与健康轮询）。
-- `docs/AI/tasks/TASK-020.md`: TASK-020 任务目标、范围、验收标准与验证结果记录。
-- `docs/AI/tasks/TASK-021.md`: TASK-021 任务目标、范围、验收标准与验证结果记录。
-- `docs/AI/tasks/TASK-022.md`: TASK-022 任务目标、范围、验收标准与验证结果记录。
-- `docs/AI/tasks/TASK-023.md`: TASK-023 任务目标、范围、验收标准与验证结果记录。
-- `docs/AI/tasks/TASK-024.md`: TASK-024 任务目标、范围、验收标准与验证结果记录。
+- `docs/AI/tasks/TASK-028.md`: TASK-028 任务目标、范围、验收标准与验证结果记录。
+- `docs/AI/tasks/TASK-027.md`: TASK-027 任务目标、范围、验收标准与验证结果记录。
+- `docs/AI/tasks/TASK-026.md`: TASK-026 任务目标、范围、验收标准与验证结果记录。
+- `docs/AI/tasks/TASK-025.md`: TASK-025 任务目标、范围、验收标准与验证结果记录。
 
 ### 调整修正的文件 (Modified Files)
-- `src/configuration/mod.rs`: 将 `EVENTLAKE_BLOCK_TRANSACTION_ENABLED` 默认配置值调整为 `true`。
-- `.env.example`: 同步说明区块交易 Worker 默认常驻待命。
-- `docs/USAGE.md`: 全面升级为包含架构流程图、业务实操命令、ClickHouse 查询准则、多语言 SDK 示例、声明式配置导入导出、3种连接模式与登录凭据持久化手册。
-- `docs/DEPLOYMENT.md`: 补充远程一键自动化部署手册及多场景使用命令。
-- `docs/AI/TASK_INDEX.md`: 登记并标记 TASK-024 为 `DONE`。
+- `src/rpc_pool/mod.rs`: 提取并公开 `get_available_rpc_endpoints_with_requirements`，支持上层获取当前活跃健康节点列表。
+- `src/block_transaction/collector.rs`: 解除 `needs_archive` 限制，实现节点能力自适应切片 `partition_block_range_into_slices` 与精准初始指派/故障自愈 `fetch_slice_with_failover`。
+- `tests/block_transaction_test.rs`: 适配节点能力自适应切片测试用例（验证 5 节点 120 块与早停逻辑）。
+- `migrations/202609180001_initial_schema.sql`: 压平初始 Schema，直接声明 `is_archive`, `max_block_range`, `max_batch_size`。
+- `src/collector/worker.rs`: 在单合约与批量日志收集中接入 `EndpointRequirements`，并实现基于节点 `max_block_range` 的动态安全切片（Dynamic Clamping）。
+- `tests/rpc_pool_cooldown_test.rs`: 补充归档隔离与大跨度优先路由的针对性单元测试。
+- `config/rpc_endpoints.json`: 标注并更新 Soneium 8 个节点（含 SwiftNodes、NodeFlare 非 Archive 节点）的归档能力、区块跨度与 Batch 大小（总端点数 92）。
+- `config/rpc_endpoints.json.example`: 同步更新节点配置与能力标注（总端点数 92）。
+- `config/eventlake.example.json`: 增加 Soneium 链定义与 8 个 RPC 节点完整声明。
+- `docs/AI/TASK_INDEX.md`: 登记并标记 TASK-028 为 `DONE`。
 - `docs/AI/SESSION_STATE.md`: 更新核心状态与交接记录。
 
 ---
@@ -133,25 +209,17 @@
 ## 4. 已运行的验证命令及结果
 
 ```bash
-# 1. 验证脚本语法正确性
-bash -n scripts/deploy-remote.sh
-# 退出码 0
+# 1. 区块与交易测试（含节点能力自适应分片与连续性/空洞检测）
+cargo test --ignore-rust-version --test block_transaction_test
+# 退出码 0 (8 passed)
 
-# 2. 帮助信息输出测试
-./scripts/deploy-remote.sh --help
-# 退出码 0
+# 2. RPC 节点池测试（含 SWRR、冷却与活跃候选节点提取）
+cargo test --ignore-rust-version --test rpc_pool_cooldown_test
+# 退出码 0 (7 passed)
 
-# 3. 容错测试：非法 env 文件路径拦截
-./scripts/deploy-remote.sh -s root@127.0.0.1 -d /opt/eventlake -e non_existent_env.env
-# 退出码 1，输出: [ERROR] 指定的本地 env 配置文件不存在: non_existent_env.env
-
-# 4. 容错测试：非法 SSH 主机连通性拦截
-./scripts/deploy-remote.sh -s invalid.test.host.local -d /opt/eventlake -e .env.example --dry-run
-# 退出码 1，输出: [ERROR] 无法通过 SSH 连接到目标服务器: invalid.test.host.local
-
-# 5. 全库编译与静态检查
+# 3. 全项目与全部目标编译与类型检查
 cargo check --ignore-rust-version --all-targets
-# 退出码 0
+# 退出码 0 (0 warnings, 0 errors)
 ```
 
 ---
@@ -164,14 +232,14 @@ cargo check --ignore-rust-version --all-targets
 
 ## 6. 风险和假设 (Risks and Assumptions)
 
-- **假设**: 目标服务器具备基础 SSH 访问权限，且服务器已安装 Docker。
-- **风险**: 极低，脚本为独立运维工具，不侵入后端核心业务代码。
+- **假设**: 配置中至少存在 1 个可用的 RPC 节点。
+- **风险**: 极低，ClickHouse 写入幂等，全量完备性校验与父哈希连续性校验保证数据绝对强一致。
 
 ---
 
 ## 7. 下一步计划 (Next Task)
 
-- **建议**: 用户可提供目标服务器的 SSH 链接（如 `root@x.x.x.x`）、远端目标目录（如 `/opt/eventlake`）与本地 `.env` 配置文件路径，执行一键部署。
+- **建议**: 所有核心优化与自愈机制均已高质落地。可使用 `lakectl` 执行线上实际同步监控，或部署至生产环境。
 - **下一次 Session 应先读取的文件**:
   1. [`AGENTS.md`](file:///ssd0/git/EVMEventLake/AGENTS.md)
   2. [`docs/AI/GOAL.md`](file:///ssd0/git/EVMEventLake/docs/AI/GOAL.md)

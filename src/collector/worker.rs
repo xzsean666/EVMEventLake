@@ -172,8 +172,15 @@ async fn collect_subscription_batch(
     let chain_id = batch[0].chain_id;
     let from_block = batch[0].current_block;
 
+    let any_historical = batch.iter().any(|s| s.status == "historical_syncing");
+    let preferred_window = batch.iter().map(|s| s.current_block_window).max();
+    let req = rpc_pool::EndpointRequirements {
+        needs_archive: any_historical,
+        preferred_block_range: preferred_window,
+    };
+
     let collection_policy = chains::get_collection_policy(&state.pool, chain_id).await?;
-    let endpoint = rpc_pool::select_rpc_endpoint(&state.pool, chain_id).await?;
+    let endpoint = rpc_pool::select_rpc_endpoint_with_requirements(&state.pool, chain_id, &req).await?;
     let chain_head =
         rpc_pool::evm_rpc_client::eth_block_number(&state.http_client, &endpoint.url).await?;
     let safe_head = chain_head.saturating_sub(collection_policy.safe_confirmation_depth);
@@ -233,7 +240,11 @@ async fn collect_subscription_batch(
     let mut reduction_attempts = 0;
 
     loop {
-        let to_block = block_range_end(from_block, block_window, safe_head);
+        let effective_window = match endpoint.max_block_range {
+            Some(limit) if limit > 0 => block_window.min(limit),
+            _ => block_window,
+        };
+        let to_block = block_range_end(from_block, effective_window, safe_head);
 
         let logs_result = rpc_pool::evm_rpc_client::eth_get_logs(
             &state.http_client,
@@ -462,7 +473,12 @@ async fn collect_subscription(
         subscriptions::resume_after_clickhouse_writes(&state.pool, subscription.id).await?;
     }
 
-    let endpoint = match rpc_pool::select_rpc_endpoint(&state.pool, subscription.chain_id).await {
+    let req = rpc_pool::EndpointRequirements {
+        needs_archive: subscription.status == "historical_syncing",
+        preferred_block_range: Some(subscription.current_block_window),
+    };
+
+    let endpoint = match rpc_pool::select_rpc_endpoint_with_requirements(&state.pool, subscription.chain_id, &req).await {
         Ok(endpoint) => endpoint,
         Err(error) => {
             tracing::warn!(
@@ -518,7 +534,11 @@ async fn collect_subscription(
     let mut reduction_attempts = 0;
 
     loop {
-        let to_block = block_range_end(from_block, block_window, safe_head);
+        let effective_window = match endpoint.max_block_range {
+            Some(limit) if limit > 0 => block_window.min(limit),
+            _ => block_window,
+        };
+        let to_block = block_range_end(from_block, effective_window, safe_head);
         let addrs = subscription
             .contract_address
             .as_deref()

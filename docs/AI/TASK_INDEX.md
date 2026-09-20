@@ -30,6 +30,10 @@ TODO -> IN_PROGRESS -> REVIEW -> DONE
 - （暂无待规划任务）
 
 ### 已完成任务 (DONE)
+- **TASK-028**: [基于可用 RPC 动态并发与节点能力自适应切片流水线](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-028.md)
+- **TASK-027**: [区块与交易多节点并发分片抓取流水线与切片故障自愈顶替机制](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-027.md)
+- **TASK-026**: [RPC 节点能力感知、Archive/普通节点分流调度与合约 Logs 动态切片策略](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-026.md)
+- **TASK-025**: [预置 Soneium 主网 Archive RPC 节点与加权配置进入默认与示例配置](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-025.md)
 - **TASK-024**: [lakectl 支持先登录后操作 (login/logout/whoami) 与自定义远程端口](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-024.md)
 - **TASK-023**: [lakectl 支持声明式配置幂等导入与导出 (import/export config)](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-023.md)
 - **TASK-022**: [服务端区块交易常驻解耦与独立纯 Shell 客户端 (lakectl)](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-022.md)

@@ -187,6 +187,12 @@ pub struct RpcEndpointRecord {
     pub last_check_at: Option<DateTime<Utc>>,
     pub failure_count: i32,
     pub last_error: Option<String>,
+    #[sqlx(default)]
+    pub is_archive: bool,
+    #[sqlx(default)]
+    pub max_block_range: Option<i64>,
+    #[sqlx(default)]
+    pub max_batch_size: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[sqlx(default)]
@@ -200,6 +206,9 @@ pub struct CreateRpcEndpointRequest {
     pub chain_id: i64,
     pub url: String,
     pub weight: Option<i32>,
+    pub is_archive: Option<bool>,
+    pub max_block_range: Option<i64>,
+    pub max_batch_size: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
@@ -208,6 +217,12 @@ pub struct RpcEndpointSeed {
     pub url: String,
     #[serde(default)]
     pub weight: Option<i32>,
+    #[serde(default)]
+    pub is_archive: Option<bool>,
+    #[serde(default)]
+    pub max_block_range: Option<i64>,
+    #[serde(default)]
+    pub max_batch_size: Option<i32>,
     #[serde(default)]
     pub chain_name: Option<String>,
     #[serde(default)]
@@ -291,22 +306,35 @@ async fn create_rpc_endpoint(
     validate_rpc_endpoint_request(request.chain_id, &url, weight)?;
     chains::get_collection_policy(&state.pool, request.chain_id).await?;
 
+    let is_archive = request.is_archive.unwrap_or(true);
+    let max_block_range = request.max_block_range;
+    let max_batch_size = request.max_batch_size;
+
     let endpoint = sqlx::query_as::<_, RpcEndpointRecord>(
         r#"
-        INSERT INTO eventlake_rpc_endpoints (id, chain_id, url, weight)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO eventlake_rpc_endpoints (
+            id, chain_id, url, weight, is_archive, max_block_range, max_batch_size
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (chain_id, url) DO UPDATE
         SET weight = EXCLUDED.weight,
+            is_archive = EXCLUDED.is_archive,
+            max_block_range = EXCLUDED.max_block_range,
+            max_batch_size = EXCLUDED.max_batch_size,
             status = 'enabled',
             updated_at = CURRENT_TIMESTAMP
         RETURNING id, chain_id, url, status, weight, latency_ms, last_check_at,
-                  failure_count, last_error, created_at, updated_at
+                  failure_count, last_error, is_archive, max_block_range, max_batch_size,
+                  created_at, updated_at
         "#,
     )
     .bind(Uuid::new_v4())
     .bind(request.chain_id)
     .bind(url)
     .bind(weight)
+    .bind(is_archive)
+    .bind(max_block_range)
+    .bind(max_batch_size)
     .fetch_one(&state.pool)
     .await?;
 
@@ -336,7 +364,8 @@ async fn delete_rpc_endpoint(
         DELETE FROM eventlake_rpc_endpoints
         WHERE id = $1
         RETURNING id, chain_id, url, status, weight, latency_ms, last_check_at,
-                  failure_count, last_error, created_at, updated_at
+                  failure_count, last_error, is_archive, max_block_range, max_batch_size,
+                  created_at, updated_at
         "#,
     )
     .bind(id)
@@ -404,14 +433,29 @@ async fn check_rpc_endpoint(
     Ok(response::success(endpoint))
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct EndpointRequirements {
+    pub needs_archive: bool,
+    pub preferred_block_range: Option<i64>,
+}
+
 pub async fn select_rpc_endpoint(
     pool: &sqlx::SqlitePool,
     chain_id: i64,
 ) -> Result<RpcEndpointRecord, ApplicationError> {
+    select_rpc_endpoint_with_requirements(pool, chain_id, &EndpointRequirements::default()).await
+}
+
+pub async fn get_available_rpc_endpoints_with_requirements(
+    pool: &sqlx::SqlitePool,
+    chain_id: i64,
+    requirements: &EndpointRequirements,
+) -> Result<Vec<RpcEndpointRecord>, ApplicationError> {
     let mut endpoints = sqlx::query_as::<_, RpcEndpointRecord>(
         r#"
         SELECT id, chain_id, url, status, weight, latency_ms, last_check_at,
-               failure_count, last_error, created_at, updated_at
+               failure_count, last_error, is_archive, max_block_range, max_batch_size,
+               created_at, updated_at
         FROM eventlake_rpc_endpoints
         WHERE chain_id = $1 AND status != 'disabled'
         ORDER BY failure_count ASC, weight DESC, latency_ms ASC NULLS LAST, updated_at ASC
@@ -432,41 +476,86 @@ pub async fn select_rpc_endpoint(
         ep.cooldown_remaining_seconds = remaining;
     }
 
-    // 1. Healthy / enabled endpoints that are NOT in CD: dispatch proportionally via SWRR
-    let available: Vec<_> = endpoints
+    // 1. Filter by archive requirement if needed
+    let filtered_endpoints: Vec<RpcEndpointRecord> = if requirements.needs_archive {
+        let archive_only: Vec<_> = endpoints
+            .iter()
+            .filter(|ep| ep.is_archive)
+            .cloned()
+            .collect();
+        if archive_only.is_empty() {
+            tracing::warn!(
+                chain_id,
+                "No archive RPC endpoints available for chain requiring archive; falling back to all endpoints"
+            );
+            endpoints
+        } else {
+            archive_only
+        }
+    } else {
+        endpoints
+    };
+
+    // 2. If preferred_block_range is specified, prioritize endpoints that satisfy it
+    let candidate_pool = if let Some(preferred) = requirements.preferred_block_range {
+        let large_range_candidates: Vec<_> = filtered_endpoints
+            .iter()
+            .filter(|ep| match ep.max_block_range {
+                Some(max_r) => max_r >= preferred,
+                None => true,
+            })
+            .cloned()
+            .collect();
+        if !large_range_candidates.is_empty() {
+            large_range_candidates
+        } else {
+            filtered_endpoints
+        }
+    } else {
+        filtered_endpoints
+    };
+
+    // 3. Healthy / enabled endpoints that are NOT in CD: dispatch proportionally via SWRR
+    let available: Vec<_> = candidate_pool
         .iter()
         .filter(|ep| ep.cooldown_remaining_seconds.is_none() && (ep.status == "enabled" || ep.status == "healthy"))
         .cloned()
         .collect();
 
     if !available.is_empty() {
-        return Ok(select_weighted_round_robin(&available));
+        return Ok(available);
     }
 
-    // 2. Any non-disabled endpoint that is NOT in CD: dispatch proportionally via SWRR
-    let non_cd: Vec<_> = endpoints
+    // 4. Any non-disabled endpoint that is NOT in CD: dispatch proportionally via SWRR
+    let non_cd: Vec<_> = candidate_pool
         .iter()
         .filter(|ep| ep.cooldown_remaining_seconds.is_none())
         .cloned()
         .collect();
 
     if !non_cd.is_empty() {
-        return Ok(select_weighted_round_robin(&non_cd));
+        return Ok(non_cd);
     }
 
-    // 3. Fallback: all candidate endpoints are in CD. Choose the one with the shortest remaining CD
-    endpoints.sort_by_key(|ep| ep.cooldown_remaining_seconds.unwrap_or(i64::MAX));
-    let fallback = endpoints.remove(0);
+    // 5. Fallback: all candidate endpoints are in CD. Choose the one with the shortest remaining CD
+    let mut fallback_pool = candidate_pool;
+    fallback_pool.sort_by_key(|ep| ep.cooldown_remaining_seconds.unwrap_or(i64::MAX));
 
     tracing::warn!(
         chain_id,
-        endpoint_id = %fallback.id,
-        url = %fallback.url,
-        remaining_cd_secs = ?fallback.cooldown_remaining_seconds,
-        "All RPC endpoints for chain are in cooldown; falling back to endpoint with shortest remaining CD"
+        "All candidate RPC endpoints for chain are in cooldown; falling back to endpoints with shortest remaining CD"
     );
 
-    Ok(fallback)
+    Ok(fallback_pool)
+}
+
+pub async fn select_rpc_endpoint_with_requirements(
+    pool: &sqlx::SqlitePool,
+    chain_id: i64,
+    requirements: &EndpointRequirements,
+) -> Result<RpcEndpointRecord, ApplicationError> {
+    let endpoints = get_available_rpc_endpoints_with_requirements(pool, chain_id, requirements).await?;
+    Ok(select_weighted_round_robin(&endpoints))
 }
 
 pub async fn mark_rpc_failure(
@@ -558,7 +647,8 @@ async fn find_rpc_endpoint(
     sqlx::query_as::<_, RpcEndpointRecord>(
         r#"
         SELECT id, chain_id, url, status, weight, latency_ms, last_check_at,
-               failure_count, last_error, created_at, updated_at
+               failure_count, last_error, is_archive, max_block_range, max_batch_size,
+               created_at, updated_at
         FROM eventlake_rpc_endpoints
         WHERE id = $1
         "#,
@@ -581,7 +671,8 @@ async fn update_rpc_status(
             updated_at = CURRENT_TIMESTAMP
         WHERE id = $1
         RETURNING id, chain_id, url, status, weight, latency_ms, last_check_at,
-                  failure_count, last_error, created_at, updated_at
+                  failure_count, last_error, is_archive, max_block_range, max_batch_size,
+                  created_at, updated_at
         "#,
     )
     .bind(id)
@@ -732,7 +823,8 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
 
 const SELECT_RPC_ENDPOINTS: &str = r#"
 SELECT id, chain_id, url, status, weight, latency_ms, last_check_at,
-       failure_count, last_error, created_at, updated_at
+       failure_count, last_error, is_archive, max_block_range, max_batch_size,
+       created_at, updated_at
 FROM eventlake_rpc_endpoints
 ORDER BY chain_id, status, weight DESC, created_at
 "#;
@@ -811,17 +903,30 @@ pub async fn seed_rpc_endpoints_from_json(
             .await;
         }
 
+        let is_archive = seed.is_archive.unwrap_or(true);
+        let max_block_range = seed.max_block_range;
+        let max_batch_size = seed.max_batch_size;
+
         let result = sqlx::query(
             r#"
-            INSERT INTO eventlake_rpc_endpoints (id, chain_id, url, weight, status)
-            VALUES ($1, $2, $3, $4, 'enabled')
-            ON CONFLICT (chain_id, url) DO NOTHING
+            INSERT INTO eventlake_rpc_endpoints (
+                id, chain_id, url, weight, status, is_archive, max_block_range, max_batch_size
+            )
+            VALUES ($1, $2, $3, $4, 'enabled', $5, $6, $7)
+            ON CONFLICT (chain_id, url) DO UPDATE SET
+                weight = EXCLUDED.weight,
+                is_archive = EXCLUDED.is_archive,
+                max_block_range = EXCLUDED.max_block_range,
+                max_batch_size = EXCLUDED.max_batch_size
             "#,
         )
         .bind(Uuid::new_v4())
         .bind(seed.chain_id)
         .bind(url)
         .bind(weight)
+        .bind(is_archive)
+        .bind(max_block_range)
+        .bind(max_batch_size)
         .execute(pool)
         .await;
 

@@ -9,6 +9,15 @@
       "default_min_block_window": 1,
       "default_max_block_window": 500,
       "rpc_notes": "Base Mainnet OP Stack"
+    },
+    {
+      "chain_id": 1868,
+      "name": "Soneium",
+      "native_token_symbol": "ETH",
+      "safe_confirmation_depth": 60,
+      "default_min_block_window": 1,
+      "default_max_block_window": 500,
+      "rpc_notes": "Soneium Mainnet OP Stack"
     }
   ],
   "rpc_endpoints": [
@@ -21,6 +30,70 @@
       "chain_id": 8453,
       "url": "https://base.llamarpc.com",
       "weight": 80
+    },
+    {
+      "chain_id": 1868,
+      "url": "https://rpc.soneium.org",
+      "weight": 100,
+      "is_archive": true,
+      "max_block_range": 100000,
+      "max_batch_size": 50
+    },
+    {
+      "chain_id": 1868,
+      "url": "https://soneium-mainnet.rpc.sentio.xyz",
+      "weight": 95,
+      "is_archive": true,
+      "max_block_range": 10000,
+      "max_batch_size": 50
+    },
+    {
+      "chain_id": 1868,
+      "url": "https://1868.rpc.thirdweb.com",
+      "weight": 90,
+      "is_archive": true,
+      "max_block_range": 1000,
+      "max_batch_size": 20
+    },
+    {
+      "chain_id": 1868,
+      "url": "https://nodes.sequence.app/soneium",
+      "weight": 85,
+      "is_archive": true,
+      "max_block_range": 10000,
+      "max_batch_size": 20
+    },
+    {
+      "chain_id": 1868,
+      "url": "https://soneium.gateway.tenderly.co",
+      "weight": 85,
+      "is_archive": true,
+      "max_block_range": 10000,
+      "max_batch_size": 20
+    },
+    {
+      "chain_id": 1868,
+      "url": "https://rpc.nodeflare.app/soneium/public",
+      "weight": 80,
+      "is_archive": false,
+      "max_block_range": 1000,
+      "max_batch_size": 20
+    },
+    {
+      "chain_id": 1868,
+      "url": "https://rpc.swiftnodes.io/rpc/soneium",
+      "weight": 80,
+      "is_archive": false,
+      "max_block_range": 0,
+      "max_batch_size": 50
+    },
+    {
+      "chain_id": 1868,
+      "url": "https://soneium.drpc.org",
+      "weight": 70,
+      "is_archive": true,
+      "max_block_range": 100,
+      "max_batch_size": 10
     }
   ],
   "subscriptions": [

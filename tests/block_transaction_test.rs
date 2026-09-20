@@ -329,3 +329,161 @@ fn test_transaction_row_receipt_fields() {
     assert_eq!(row.effective_gas_price.as_deref(), Some("1000000000"));
     assert_eq!(row.l1_fee.as_deref(), Some("4660"));
 }
+
+#[test]
+fn test_partition_block_range_into_slices_historical_and_tip() {
+    use eventlake::block_transaction::collector::partition_block_range_into_slices;
+    use eventlake::rpc_pool::RpcEndpointRecord;
+
+    fn mock_endpoint(id_u8: u8, max_batch_size: Option<i32>) -> RpcEndpointRecord {
+        RpcEndpointRecord {
+            id: uuid::Uuid::from_bytes([id_u8; 16]),
+            chain_id: 1868,
+            url: format!("https://rpc-{id_u8}.soneium.org"),
+            status: "healthy".to_owned(),
+            weight: 100,
+            latency_ms: Some(50),
+            last_check_at: None,
+            failure_count: 0,
+            last_error: None,
+            is_archive: true,
+            max_block_range: Some(10000),
+            max_batch_size,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            cooldown_until: None,
+            cooldown_remaining_seconds: None,
+        }
+    }
+
+    let endpoints = vec![
+        mock_endpoint(1, Some(50)), // Official high-throughput
+        mock_endpoint(2, Some(20)), // Thirdweb
+        mock_endpoint(3, Some(20)), // Sequence
+        mock_endpoint(4, Some(20)), // NodeFlare (Full/Pruned)
+        mock_endpoint(5, Some(10)), // dRPC
+    ];
+
+    // 1. from_block > safe_head -> empty
+    let empty = partition_block_range_into_slices(100, 90, &endpoints, 20, false);
+    assert!(empty.is_empty());
+
+    // 2. is_tip = true -> always 1 slice with the first endpoint's capacity (50)
+    let tip_slices = partition_block_range_into_slices(100, 500, &endpoints, 20, true);
+    assert_eq!(tip_slices.len(), 1);
+    assert_eq!(tip_slices[0].0.id, endpoints[0].id);
+    assert_eq!(tip_slices[0].1.len(), 50);
+    assert_eq!(tip_slices[0].1[0], 100);
+    assert_eq!(tip_slices[0].1[49], 149);
+
+    // 3. Historical mode with large remaining -> partitions according to each endpoint's capacity
+    // 50 + 20 + 20 + 20 + 10 = 120 blocks total
+    let large_hist = partition_block_range_into_slices(100, 1000, &endpoints, 20, false);
+    assert_eq!(large_hist.len(), 5);
+
+    // Slice 0: Node 1 (cap: 50) -> [100..=149]
+    assert_eq!(large_hist[0].0.id, endpoints[0].id);
+    assert_eq!(large_hist[0].1.len(), 50);
+    assert_eq!(large_hist[0].1[0], 100);
+    assert_eq!(large_hist[0].1[49], 149);
+
+    // Slice 1: Node 2 (cap: 20) -> [150..=169]
+    assert_eq!(large_hist[1].0.id, endpoints[1].id);
+    assert_eq!(large_hist[1].1.len(), 20);
+    assert_eq!(large_hist[1].1[0], 150);
+    assert_eq!(large_hist[1].1[19], 169);
+
+    // Slice 2: Node 3 (cap: 20) -> [170..=189]
+    assert_eq!(large_hist[2].0.id, endpoints[2].id);
+    assert_eq!(large_hist[2].1.len(), 20);
+    assert_eq!(large_hist[2].1[0], 170);
+    assert_eq!(large_hist[2].1[19], 189);
+
+    // Slice 3: Node 4 (cap: 20) -> [190..=209]
+    assert_eq!(large_hist[3].0.id, endpoints[3].id);
+    assert_eq!(large_hist[3].1.len(), 20);
+    assert_eq!(large_hist[3].1[0], 190);
+    assert_eq!(large_hist[3].1[19], 209);
+
+    // Slice 4: Node 5 (cap: 10) -> [210..=219]
+    assert_eq!(large_hist[4].0.id, endpoints[4].id);
+    assert_eq!(large_hist[4].1.len(), 10);
+    assert_eq!(large_hist[4].1[0], 210);
+    assert_eq!(large_hist[4].1[9], 219);
+
+    // 4. Historical mode when safe_head is reached early (e.g. safe_head = 160)
+    // Node 1 gets 50 (100..=149), Node 2 gets remaining 11 (150..=160), Nodes 3-5 omitted
+    let early_stop = partition_block_range_into_slices(100, 160, &endpoints, 20, false);
+    assert_eq!(early_stop.len(), 2);
+    assert_eq!(early_stop[0].1.len(), 50);
+    assert_eq!(early_stop[1].1.len(), 11);
+    assert_eq!(early_stop[1].1[0], 150);
+    assert_eq!(early_stop[1].1[10], 160);
+}
+
+#[test]
+fn test_validate_block_sequence_multi_slice_continuity_and_gap_detection() {
+    use eventlake::rpc_pool::evm_rpc_client::validate_block_sequence;
+
+    fn mock_block(chain_id: i64, block_number: i64, hash: &str, parent_hash: &str) -> DecodedBlock {
+        DecodedBlock {
+            chain_id,
+            block_number,
+            block_hash: hash.to_owned(),
+            parent_hash: parent_hash.to_owned(),
+            timestamp: 1700000000 + block_number,
+            gas_limit: "30000000".to_owned(),
+            gas_used: "21000".to_owned(),
+            base_fee_per_gas: None,
+            beneficiary: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            size: None,
+            withdrawals_root: None,
+            blob_gas_used: None,
+            excess_blob_gas: None,
+            parent_beacon_block_root: None,
+            transaction_count: 0,
+            transactions: vec![],
+        }
+    }
+
+    // Slice 1: blocks 10, 11
+    let slice1 = vec![
+        mock_block(1, 10, "0x0000000000000000000000000000000000000000000000000000000000000010", "0x0000000000000000000000000000000000000000000000000000000000000009"),
+        mock_block(1, 11, "0x0000000000000000000000000000000000000000000000000000000000000011", "0x0000000000000000000000000000000000000000000000000000000000000010"),
+    ];
+
+    // Slice 2: blocks 12, 13
+    let slice2 = vec![
+        mock_block(1, 12, "0x0000000000000000000000000000000000000000000000000000000000000012", "0x0000000000000000000000000000000000000000000000000000000000000011"),
+        mock_block(1, 13, "0x0000000000000000000000000000000000000000000000000000000000000013", "0x0000000000000000000000000000000000000000000000000000000000000012"),
+    ];
+
+    // Concatenated: seamless sequence
+    let mut all_blocks = slice1.clone();
+    all_blocks.extend(slice2);
+    assert!(validate_block_sequence(&all_blocks).is_ok());
+
+    // Gap detection: missing block 12 (10, 11, 13)
+    let gapped_blocks = vec![
+        slice1[0].clone(),
+        slice1[1].clone(),
+        mock_block(1, 13, "0x0000000000000000000000000000000000000000000000000000000000000013", "0x0000000000000000000000000000000000000000000000000000000000000012"),
+    ];
+    let gap_err = validate_block_sequence(&gapped_blocks);
+    assert!(gap_err.is_err());
+    assert!(gap_err.unwrap_err().to_string().contains("block height gap detected"));
+
+    // Hash mismatch detection: block 12 parent_hash does not match block 11 block_hash
+    let fork_blocks = vec![
+        slice1[0].clone(),
+        slice1[1].clone(),
+        mock_block(1, 12, "0x0000000000000000000000000000000000000000000000000000000000000012", "0x0000000000000000000000000000000000000000000000000000000000000099"),
+    ];
+    let fork_err = validate_block_sequence(&fork_blocks);
+    assert!(fork_err.is_err());
+    assert!(fork_err.unwrap_err().to_string().contains("parent hash mismatch"));
+}
+

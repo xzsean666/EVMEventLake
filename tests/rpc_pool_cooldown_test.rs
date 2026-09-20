@@ -82,6 +82,9 @@ fn test_rpc_endpoint_record_serialization_with_cooldown() {
         last_check_at: Some(now),
         failure_count: 2,
         last_error: Some("gateway timeout".to_owned()),
+        is_archive: true,
+        max_block_range: Some(5000),
+        max_batch_size: Some(25),
         created_at: now,
         updated_at: now,
         cooldown_until: Some(cd_until),
@@ -94,6 +97,9 @@ fn test_rpc_endpoint_record_serialization_with_cooldown() {
     assert_eq!(val["status"], "healthy");
     assert_eq!(val["failure_count"], 2);
     assert_eq!(val["cooldown_remaining_seconds"], 300);
+    assert_eq!(val["is_archive"], true);
+    assert_eq!(val["max_block_range"], 5000);
+    assert_eq!(val["max_batch_size"], 25);
     assert!(val["cooldown_until"].is_string());
 }
 
@@ -109,6 +115,9 @@ fn create_mock_endpoint(id: Uuid, weight: i32) -> RpcEndpointRecord {
         last_check_at: Some(now),
         failure_count: 0,
         last_error: None,
+        is_archive: true,
+        max_block_range: None,
+        max_batch_size: None,
         created_at: now,
         updated_at: now,
         cooldown_until: None,
@@ -252,4 +261,89 @@ async fn test_select_rpc_endpoint_swrr_with_sqlite_and_cooldown() -> anyhow::Res
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_select_rpc_endpoint_with_archive_and_range_requirements() -> anyhow::Result<()> {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await?;
+
+    eventlake::database::migrate(&pool).await?;
+
+    let chain_id = 1868;
+    sqlx::query(
+        r#"
+        INSERT INTO eventlake_chains (chain_id, name, native_token_symbol, safe_confirmation_depth, default_min_block_window, default_max_block_window)
+        VALUES ($1, 'Soneium Test', 'ETH', 12, 1, 1000)
+        "#
+    )
+    .bind(chain_id)
+    .execute(&pool)
+    .await?;
+
+    let id_archive = Uuid::new_v4();
+    let id_pruned = Uuid::new_v4();
+
+    // Node 1: Archive node with 20000 max block range, weight 100
+    sqlx::query(
+        r#"
+        INSERT INTO eventlake_rpc_endpoints (id, chain_id, url, status, weight, is_archive, max_block_range, max_batch_size)
+        VALUES ($1, $2, 'https://archive-node.test', 'healthy', 100, 1, 20000, 50)
+        "#
+    )
+    .bind(id_archive)
+    .bind(chain_id)
+    .execute(&pool)
+    .await?;
+
+    // Node 2: Pruned node (is_archive = 0) with 1000 max block range, weight 100
+    sqlx::query(
+        r#"
+        INSERT INTO eventlake_rpc_endpoints (id, chain_id, url, status, weight, is_archive, max_block_range, max_batch_size)
+        VALUES ($1, $2, 'https://pruned-node.test', 'healthy', 100, 0, 1000, 20)
+        "#
+    )
+    .bind(id_pruned)
+    .bind(chain_id)
+    .execute(&pool)
+    .await?;
+
+    // Test 1: Historical sync requires archive -> MUST strictly select Node 1 (Archive)
+    let archive_req = eventlake::rpc_pool::EndpointRequirements {
+        needs_archive: true,
+        preferred_block_range: None,
+    };
+    for _ in 0..5 {
+        let ep = eventlake::rpc_pool::select_rpc_endpoint_with_requirements(&pool, chain_id, &archive_req).await?;
+        assert_eq!(ep.id, id_archive, "Historical queries must only route to archive nodes");
+        assert!(ep.is_archive);
+    }
+
+    // Test 2: Realtime sync does not require archive -> Both nodes share traffic
+    let realtime_req = eventlake::rpc_pool::EndpointRequirements {
+        needs_archive: false,
+        preferred_block_range: None,
+    };
+    let mut realtime_counts = std::collections::HashMap::new();
+    for _ in 0..10 {
+        let ep = eventlake::rpc_pool::select_rpc_endpoint_with_requirements(&pool, chain_id, &realtime_req).await?;
+        *realtime_counts.entry(ep.id).or_insert(0) += 1;
+    }
+    assert!(realtime_counts.get(&id_archive).copied().unwrap_or(0) > 0);
+    assert!(realtime_counts.get(&id_pruned).copied().unwrap_or(0) > 0);
+
+    // Test 3: Large block range requested (5000) -> Prioritizes archive node (since pruned only supports 1000)
+    let large_range_req = eventlake::rpc_pool::EndpointRequirements {
+        needs_archive: false,
+        preferred_block_range: Some(5000),
+    };
+    for _ in 0..5 {
+        let ep = eventlake::rpc_pool::select_rpc_endpoint_with_requirements(&pool, chain_id, &large_range_req).await?;
+        assert_eq!(ep.id, id_archive, "Large block range queries must prioritize nodes supporting large range");
+    }
+
+    Ok(())
+}
+
 
