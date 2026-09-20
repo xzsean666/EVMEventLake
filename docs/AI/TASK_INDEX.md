@@ -30,6 +30,7 @@ TODO -> IN_PROGRESS -> REVIEW -> DONE
 - （暂无待规划任务）
 
 ### 已完成任务 (DONE)
+- **TASK-017**: [核心安全加固与高危性能缺陷治理（RPC SSRF/重定向防御、Dashboard FINAL 慢查询消除、raw_logs 合约地址跳数索引补齐、收据异常重试保护与恢复脚本防坏治理）](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-017.md)
 - **TASK-016**: [优化 Dockerfile 与 Docker Compose 支持 GitHub Release 二进制拉取构建并剥离 Git 大文件追踪](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-016.md)
 - **TASK-015**: [ClickHouse 系统日志轻量化抑制与写入碎片（Parts）合并防堵调优](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-015.md)
 - **TASK-014**: [收敛合并为单一 Dockerfile（基于 Target 支持 prebuilt 与 source 模式），清理残存构建文件并恢复 Git 忽略规则](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-014.md)

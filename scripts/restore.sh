@@ -155,6 +155,11 @@ fi
 # ------------------------------------------------------------------------------
 echo "==> [1/2] Restoring SQLite operational metadata..."
 
+if pgrep -x "eventlake" > /dev/null 2>&1; then
+    echo "Error: eventlake service is currently running. Stop the service first before restoring SQLite database to prevent WAL corruption." >&2
+    exit 1
+fi
+
 mkdir -p "$(dirname "${SQLITE_DB_PATH}")"
 
 # Backup existing database as safety fallback
@@ -166,15 +171,17 @@ fi
 
 RESTORE_SQLITE="${SOURCE_DIR}/eventlake.db"
 if [ -f "${RESTORE_SQLITE}" ]; then
+    # Clear any residual WAL and shared memory files before overwriting
+    rm -f "${SQLITE_DB_PATH}-wal" "${SQLITE_DB_PATH}-shm"
     cp "${RESTORE_SQLITE}" "${SQLITE_DB_PATH}"
     # Verify integrity
     INTEGRITY="$(python3 -c "
-import sqlite3
-con = sqlite3.connect('${SQLITE_DB_PATH}')
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
 res = con.execute('PRAGMA integrity_check').fetchone()[0]
 con.close()
 print(res)
-")"
+" "${SQLITE_DB_PATH}")"
     if [ "${INTEGRITY}" != "ok" ]; then
         echo "Error: SQLite integrity check failed: ${INTEGRITY}" >&2
         exit 1

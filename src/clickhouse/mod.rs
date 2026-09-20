@@ -351,8 +351,11 @@ pub async fn search_raw_logs(
 }
 
 pub async fn raw_log_count(client: &Client) -> anyhow::Result<i64> {
+    // Read total active row count from ClickHouse system.parts metadata (zero-disk-scan, O(1)).
+    // This completely eliminates cross-partition full-table ReplacingMergeTree FINAL scans,
+    // protecting ClickHouse from high CPU/memory spikes and OOM under heavy loads.
     let count = client
-        .query("SELECT count() FROM raw_logs FINAL WHERE is_removed = false")
+        .query("SELECT coalesce(sum(rows), 0) FROM system.parts WHERE table = 'raw_logs' AND active = 1")
         .fetch_one::<u64>()
         .await?;
     i64::try_from(count).context("ClickHouse raw-log count exceeds i64")

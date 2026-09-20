@@ -130,15 +130,15 @@ else
     TARGET_SQLITE="${DEST_DIR}/eventlake.db"
     python3 -c "
 import sqlite3, sys
-src = '${SQLITE_DB_PATH}'
-dst = '${TARGET_SQLITE}'
+src = sys.argv[1]
+dst = sys.argv[2]
 try:
     con = sqlite3.connect(src)
-    con.execute(f\"VACUUM INTO '{dst}'\")
+    con.execute('VACUUM INTO ?', (dst,))
     con.close()
 except Exception as e:
     sys.exit(f'SQLite VACUUM INTO failed: {e}')
-"
+" "${SQLITE_DB_PATH}" "${TARGET_SQLITE}"
     SQLITE_SHA="$(sha256sum "${TARGET_SQLITE}" | awk '{print $1}')"
     SQLITE_SIZE="$(stat -c%s "${TARGET_SQLITE}")"
     echo "    SQLite snapshot completed: $(du -h "${TARGET_SQLITE}" | awk '{print $1}') (SHA256: ${SQLITE_SHA:0:16}...)"

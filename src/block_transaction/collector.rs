@@ -264,12 +264,15 @@ async fn collect_chain(
                     );
                 }
                 Err(error) => {
+                    let error_message = error.public_message();
+                    let _ = rpc_pool::mark_rpc_failure(&state.pool, endpoint.id, &error_message).await;
                     tracing::warn!(
                         chain_id = sync_state.chain_id,
                         endpoint_id = %endpoint.id,
-                        error = %error,
-                        "failed to fetch block receipts batch; falling back without receipts"
+                        error = %error_message,
+                        "failed to fetch block receipts batch; aborting batch to prevent permanent data loss"
                     );
+                    return Err(error);
                 }
             }
         }

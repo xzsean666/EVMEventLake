@@ -26,6 +26,7 @@ impl ApplicationState {
             pool,
             http_client: Client::builder()
                 .timeout(Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("HTTP client builds"),
             api_key_last_used: Arc::new(RwLock::new(HashMap::new())),

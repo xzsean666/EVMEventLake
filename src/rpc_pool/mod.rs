@@ -628,11 +628,25 @@ fn validate_rpc_url_ssrf(parsed_url: &reqwest::Url) -> Result<(), ApplicationErr
             ));
         }
 
-        if let Ok(ip) = host_str.parse::<std::net::IpAddr>() {
+        let clean_host = host_str.trim_start_matches('[').trim_end_matches(']');
+        if let Ok(ip) = clean_host.parse::<std::net::IpAddr>() {
             if is_private_ip(ip) {
                 return Err(ApplicationError::BadRequest(
                     "private, loopback, or link-local RPC endpoint IP is not allowed".to_owned(),
                 ));
+            }
+        } else {
+            // It is a domain name. Resolve DNS to ensure none of the resolved IPs are private/loopback
+            let port = parsed_url.port_or_known_default().unwrap_or(80);
+            if let Ok(addresses) = std::net::ToSocketAddrs::to_socket_addrs(&(clean_host, port)) {
+                for addr in addresses {
+                    if is_private_ip(addr.ip()) {
+                        return Err(ApplicationError::BadRequest(format!(
+                            "RPC domain '{host_str}' resolves to private, loopback, or link-local IP {} which is not allowed",
+                            addr.ip()
+                        )));
+                    }
+                }
             }
         }
     }
@@ -648,7 +662,19 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
                 || v4.is_broadcast()
                 || v4.is_unspecified()
         }
-        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // Unique Local Addresses (fc00::/7)
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // Link-local unicast (fe80::/10)
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // IPv4-mapped IPv6 addresses (::ffff:127.0.0.1)
+                || match v6.to_ipv4_mapped() {
+                    Some(v4) => is_private_ip(std::net::IpAddr::V4(v4)),
+                    None => false,
+                }
+        }
     }
 }
 
@@ -833,5 +859,29 @@ mod tests {
         assert!(validate_rpc_endpoint_request(1, "https://eth.llamarpc.com", 0).is_err());
         assert!(validate_rpc_endpoint_request(1, "ftp://eth.llamarpc.com", 100).is_err());
         assert!(validate_rpc_endpoint_request(1, "not-a-url", 100).is_err());
+    }
+
+    #[test]
+    fn test_validate_rpc_url_ssrf_blocking() {
+        let localhost = reqwest::Url::parse("http://localhost:8545").unwrap();
+        assert!(validate_rpc_url_ssrf(&localhost).is_err());
+
+        let internal_domain = reqwest::Url::parse("http://service.internal:8545").unwrap();
+        assert!(validate_rpc_url_ssrf(&internal_domain).is_err());
+
+        let loopback_ip = reqwest::Url::parse("http://127.0.0.1:8545").unwrap();
+        assert!(validate_rpc_url_ssrf(&loopback_ip).is_err());
+
+        let private_ip = reqwest::Url::parse("http://192.168.1.100:8545").unwrap();
+        assert!(validate_rpc_url_ssrf(&private_ip).is_err());
+
+        let cloud_metadata = reqwest::Url::parse("http://169.254.169.254/latest").unwrap();
+        assert!(validate_rpc_url_ssrf(&cloud_metadata).is_err());
+
+        let ipv6_loopback = reqwest::Url::parse("http://[::1]:8545").unwrap();
+        assert!(validate_rpc_url_ssrf(&ipv6_loopback).is_err());
+
+        let ipv6_mapped = reqwest::Url::parse("http://[::ffff:127.0.0.1]:8545").unwrap();
+        assert!(validate_rpc_url_ssrf(&ipv6_mapped).is_err());
     }
 }

@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS raw_logs (
     is_removed Bool DEFAULT false,
     ingested_at DateTime64(3, 'UTC'),
     stored_at DateTime64(3, 'UTC'),
+    INDEX raw_logs_address_idx contract_address TYPE bloom_filter(0.01) GRANULARITY 4,
     INDEX raw_logs_topic0_idx topic0 TYPE bloom_filter(0.01) GRANULARITY 4,
     INDEX raw_logs_topic1_idx topic1 TYPE bloom_filter(0.01) GRANULARITY 4,
     INDEX raw_logs_topic2_idx topic2 TYPE bloom_filter(0.01) GRANULARITY 4,
