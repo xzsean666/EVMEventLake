@@ -337,7 +337,7 @@ impl ApplicationConfiguration {
         };
 
         let block_transaction = BlockTransactionConfiguration {
-            enabled: read_env("EVENTLAKE_BLOCK_TRANSACTION_ENABLED", "false").parse()?,
+            enabled: read_env("EVENTLAKE_BLOCK_TRANSACTION_ENABLED", "true").parse()?,
             batch_size: read_positive_i32_env("EVENTLAKE_BLOCK_TRANSACTION_BATCH_SIZE", "10")?,
             max_concurrency: read_positive_i32_env(
                 "EVENTLAKE_BLOCK_TRANSACTION_MAX_CONCURRENCY",

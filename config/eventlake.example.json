@@ -1,0 +1,47 @@
+{
+  "version": "1.0",
+  "chains": [
+    {
+      "chain_id": 8453,
+      "name": "Base",
+      "native_token_symbol": "ETH",
+      "safe_confirmation_depth": 60,
+      "default_min_block_window": 1,
+      "default_max_block_window": 500,
+      "rpc_notes": "Base Mainnet OP Stack"
+    }
+  ],
+  "rpc_endpoints": [
+    {
+      "chain_id": 8453,
+      "url": "https://mainnet.base.org",
+      "weight": 100
+    },
+    {
+      "chain_id": 8453,
+      "url": "https://base.llamarpc.com",
+      "weight": 80
+    }
+  ],
+  "subscriptions": [
+    {
+      "chain_id": 8453,
+      "collection_scope": "contract",
+      "contract_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "start_block": 19000000,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 200
+    }
+  ],
+  "block_transaction_sync": [
+    {
+      "chain_id": 8453,
+      "enabled": true,
+      "start_block": 19000000,
+      "batch_size": 20,
+      "reorg_window": 32,
+      "realtime_enabled": true
+    }
+  ]
+}

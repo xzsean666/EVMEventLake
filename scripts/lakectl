@@ -1,0 +1,987 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# lakectl - EVMEventLake 独立客户端控制台 (Standalone Control CLI)
+#
+# 功能：
+#   1. 跨平台全功能客户端：单文件独立运行，无需 Python / Rust 编译环境。
+#   2. 自动 SSH 穿透：当服务器 8080 端口未对外暴露时，自动通过 SSH 建立安全通信隧道。
+#   3. 交互式动态监控大盘 (lakectl top)：实时监控 Overview、RPC 节点池、raw_logs、blocks 与 transactions 同步进度。
+#   4. 动态采集生命周期控制：
+#      - 区块与交易同步：start / pause / resume / status (解耦 .env，热启停)
+#      - 事件日志采集：list / add / pause / resume / delete
+#      - RPC 节点管理与探活测速：list / check / add
+#      - 链信息管理：list / add
+# ==============================================================================
+
+set -uo pipefail
+
+# 默认全局配置
+LAKECTL_URL="${LAKECTL_URL:-${EVENTLAKE_URL:-http://127.0.0.1:8080}}"
+LAKECTL_API_KEY="${LAKECTL_API_KEY:-${EVENTLAKE_API_KEY:-}}"
+SSH_TARGET=""
+SSH_PORT=""
+SSH_IDENTITY=""
+REMOTE_PORT="8080"
+SSH_SOCKET=""
+LOCAL_TUNNEL_PORT=""
+
+# ANSI 颜色定义
+BOLD="\033[1m"
+DIM="\033[2m"
+RED="\033[0;31m"
+GREEN="\033[0;32m"
+YELLOW="\033[0;33m"
+BLUE="\033[0;34m"
+MAGENTA="\033[0;35m"
+CYAN="\033[0;36m"
+WHITE="\033[0;37m"
+RESET="\033[0m"
+
+# 优雅退出与清理 SSH 隧道
+cleanup() {
+    if [ -n "$SSH_SOCKET" ] && [ -S "$SSH_SOCKET" ]; then
+        ssh -S "$SSH_SOCKET" -O exit "$SSH_TARGET" 2>/dev/null || true
+        rm -f "$SSH_SOCKET" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+# 打印帮助信息
+print_help() {
+    cat << 'EOF'
+lakectl - EVMEventLake 独立控制台客户端
+
+使用方式:
+  lakectl [全局选项] <子命令> [参数...]
+
+全局选项:
+  -u, --url <URL>           EventLake 服务端 HTTP 地址 (默认: http://127.0.0.1:8080 或 $LAKECTL_URL)
+  -k, --key, --token <KEY>  认证 API Key (X-API-Key 头，或设置 $LAKECTL_API_KEY)
+  -s, --ssh <user@host>     SSH 远程服务器地址 (若服务器端口未对公网暴露，将自动建立安全隧道)
+  -p, --ssh-port <port>     SSH 连接端口 (默认: 22)
+  -i, --identity <key_file> SSH 私钥凭据文件路径
+  --remote-port <port>      远端内部服务监听端口 (默认: 8080)
+  -h, --help                显示帮助信息
+
+凭据持久化与登录态管理 (先登录后操作，免重复输参):
+  login                     验证连通性并将当前连接凭据保存至 ~/.lakectl/config (后续命令免输参)
+                            支持参数: --url, --key, -s, -p, -i, --remote-port
+  whoami                    查看当前生效的连接上下文、穿透模式与连通性
+  logout                    注销登录并清除 ~/.lakectl/config 保存的凭据
+
+核心命令:
+  top                       启动交互式终端全屏动态监控大盘 (类似 htop / k9s)
+  status                    一键查看 Lake 全局概况及各模块状态摘要
+
+区块与交易同步管理 (blocks & transactions):
+  block status [chain_id]   查看整链区块与交易同步状态
+  block start <chain_id>    启动整链区块与交易同步 (可选: --from <N> --batch <N> --reorg <N>)
+  block pause <chain_id>    暂停某条链的区块与交易同步
+  block resume <chain_id>   恢复某条链的区块与交易同步 (自动断点续传)
+
+事件日志采集管理 (raw_logs):
+  log list                  查看所有事件日志采集订阅及 Checkpoint 进度
+  log add <chain_id>        创建事件日志订阅:
+                            --contract <0x...>   按合约地址采集
+                            --all-events         全链所有合约事件采集
+                            --from <start_block> 起始区块高度 (默认: 0)
+                            --realtime <bool>    追平后是否实时追踪 (默认: true)
+  log pause <sub_id>        暂停指定事件日志采集任务
+  log resume <sub_id>       恢复指定事件日志采集任务
+  log delete <sub_id>       删除指定事件日志采集任务
+
+节点池与链管理 (rpc & chains):
+  rpc list                  查看各链 RPC 节点列表、平滑权重、延迟与冷却状态
+  rpc check [endpoint_id]   对节点执行探活与测速检查
+  rpc add <chain_id> <url>  添加新 RPC 节点 (可选: --weight <100>)
+  chain list                查看系统支持的所有链配置
+  chain add <id> <name> <sym> 注册新 EVM 链
+
+声明式配置管理 (config import / export):
+  config export [file]      导出当前全量声明式配置 (chains, rpcs, subscriptions, block_sync)
+  config import <file>      幂等导入声明式配置文件 (增量更新，绝不重置已有 Checkpoint 进度)
+  export [file]             (简写别名) 导出配置
+  import <file>             (简写别名) 导入配置
+
+示例:
+  # 1. 本地或已暴露端口直连
+  lakectl top --url http://127.0.0.1:8080
+  lakectl block start 8453 --from 19000000
+
+  # 2. 声明式配置导入导出 (全集群一键同步)
+  lakectl config export lake_backup_config.json
+  lakectl config import config/eventlake.example.json
+
+  # 3. 远程无公网端口服务器 (通过 SSH 隧道透明安全访问)
+  lakectl top -s root@47.98.xxx.xxx
+  lakectl import config/eventlake.example.json -s root@47.98.xxx.xxx
+EOF
+}
+
+# 寻找本地空闲端口
+find_free_port() {
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()' 2>/dev/null && return
+    fi
+    # 备选范围随机端口
+    echo $(( 18000 + RANDOM % 10000 ))
+}
+
+# 建立 SSH 隧道
+ensure_connection() {
+    if [ -n "$SSH_TARGET" ]; then
+        if [ -n "$SSH_SOCKET" ] && [ -S "$SSH_SOCKET" ]; then
+            return 0
+        fi
+        LOCAL_TUNNEL_PORT=$(find_free_port)
+        SSH_SOCKET="/tmp/lakectl-ssh-$$.sock"
+        
+        local ssh_args=("-M" "-S" "$SSH_SOCKET" "-f" "-N" "-L" "${LOCAL_TUNNEL_PORT}:127.0.0.1:${REMOTE_PORT}")
+        if [ -n "$SSH_PORT" ]; then
+            ssh_args+=("-p" "$SSH_PORT")
+        fi
+        if [ -n "$SSH_IDENTITY" ]; then
+            ssh_args+=("-i" "$SSH_IDENTITY")
+        fi
+        ssh_args+=("-o" "ExitOnForwardFailure=yes" "-o" "StrictHostKeyChecking=accept-new" "$SSH_TARGET")
+        
+        if ! ssh "${ssh_args[@]}" 2>/dev/null; then
+            echo -e "${RED}[ERROR]${RESET} 无法通过 SSH 建立安全隧道至: $SSH_TARGET" >&2
+            exit 1
+        fi
+        LAKECTL_URL="http://127.0.0.1:${LOCAL_TUNNEL_PORT}"
+    fi
+}
+
+# 核心 HTTP API 请求封装
+api_request() {
+    local method="$1"
+    local endpoint="$2"
+    local data="${3:-}"
+    ensure_connection
+
+    local url="${LAKECTL_URL%/}${endpoint}"
+    local curl_cmd=(curl -sS -X "$method" "$url" -H "Accept: application/json")
+    
+    if [ -n "$LAKECTL_API_KEY" ]; then
+        curl_cmd+=(-H "X-API-Key: $LAKECTL_API_KEY")
+    fi
+    
+    if [ -n "$data" ]; then
+        curl_cmd+=(-H "Content-Type: application/json" -d "$data")
+    fi
+
+    local response
+    if ! response=$("${curl_cmd[@]}" 2>&1); then
+        echo -e "${RED}[API 请求失败]${RESET} 无法连接至 $url: $response" >&2
+        return 1
+    fi
+
+    echo "$response"
+}
+
+# JSON 辅助处理
+json_get() {
+    local json="$1"
+    local query="$2"
+    if command -v jq >/dev/null 2>&1; then
+        echo "$json" | jq -r "$query" 2>/dev/null || true
+    elif command -v python3 >/dev/null 2>&1; then
+        echo "$json" | python3 -c "import sys, json; data=json.load(sys.stdin); $query" 2>/dev/null || true
+    fi
+}
+
+# ==============================================================================
+# 命令实现
+# ==============================================================================
+
+cmd_status() {
+    local dash_res
+    dash_res=$(api_request GET "/api/dashboard")
+    local ready_res
+    ready_res=$(api_request GET "/health/ready")
+
+    echo -e "${BOLD}${CYAN}=== EVMEventLake 运行状态报告 ===${RESET}"
+    echo -e "目标节点: ${BOLD}${LAKECTL_URL}${RESET} $([ -n "$SSH_TARGET" ] && echo -e "(${GREEN}SSH 隧道穿透: $SSH_TARGET${RESET})")"
+    
+    local ready_status
+    ready_status=$(json_get "$ready_res" '.data.status // .status // "unknown"')
+    if [ "$ready_status" = "ready" ]; then
+        echo -e "服务就绪: ${GREEN}● READY${RESET}"
+    else
+        echo -e "服务就绪: ${RED}● NOT READY${RESET}"
+    fi
+
+    if command -v jq >/dev/null 2>&1; then
+        echo "$dash_res" | jq -r '
+            .data | 
+            "日志总量 (raw_logs):        " + (.total_raw_logs | tostring) + "\n" +
+            "活跃日志订阅数 (active):   " + (.active_jobs | tostring) + "\n" +
+            "暂停日志订阅数 (paused):   " + (.paused_jobs | tostring) + "\n" +
+            "异常日志订阅数 (error):    " + (.errored_jobs | tostring) + "\n" +
+            "健康 RPC 节点数:           " + (.healthy_rpc_endpoints | tostring) + "\n" +
+            "异常 RPC 节点数:           " + (.unhealthy_rpc_endpoints | tostring) + "\n" +
+            "活跃区块同步任务:          " + (.active_block_sync_jobs | tostring) + "\n" +
+            "异常区块同步任务:          " + (.errored_block_sync_jobs | tostring)
+        '
+    else
+        echo "$dash_res"
+    fi
+}
+
+cmd_top() {
+    ensure_connection
+    # 清屏并隐藏光标
+    printf "\033[?25l"
+    trap 'printf "\033[?25h"; cleanup; exit 0' INT TERM EXIT
+
+    local interval=3
+    while true; do
+        local dash_res subs_res rpc_res chains_res
+        dash_res=$(api_request GET "/api/dashboard" || echo "{}")
+        subs_res=$(api_request GET "/api/subscriptions" || echo "{}")
+        rpc_res=$(api_request GET "/api/rpc-endpoints" || echo "{}")
+        chains_res=$(api_request GET "/api/chains" || echo "{}")
+
+        # 移动光标到左上角并清屏
+        printf "\033[2J\033[H"
+        
+        # 顶栏
+        echo -e "${BOLD}${CYAN}┌────────────────────────────────────────────────────────────────────────────────────────┐${RESET}"
+        printf "${BOLD}${CYAN}│${RESET} ${BOLD}%-52s${RESET} ${DIM}%32s${RESET} ${BOLD}${CYAN}│${RESET}\n" \
+            "🌊 EVMEventLake 实时监控面板 (lakectl top)" \
+            "Target: ${LAKECTL_URL#http://} $([ -n "$SSH_TARGET" ] && echo '[SSH]')"
+        echo -e "${BOLD}${CYAN}├────────────────────────────────────────────────────────────────────────────────────────┤${RESET}"
+
+        # 1. 概况
+        local raw_logs active_subs healthy_rpc active_bs errored_subs
+        raw_logs=$(json_get "$dash_res" '.data.total_raw_logs // 0')
+        active_subs=$(json_get "$dash_res" '.data.active_jobs // 0')
+        errored_subs=$(json_get "$dash_res" '.data.errored_jobs // 0')
+        healthy_rpc=$(json_get "$dash_res" '.data.healthy_rpc_endpoints // 0')
+        active_bs=$(json_get "$dash_res" '.data.active_block_sync_jobs // 0')
+
+        echo -e "${BOLD}${CYAN}│${RESET} ${BOLD}[1] 全局指标概览 (Overview)${RESET}"
+        printf "${BOLD}${CYAN}│${RESET}   • 原始日志总量 (raw_logs): ${BOLD}%-12s${RESET} • 健康 RPC 节点: ${GREEN}%-8s${RESET} • 异常订阅: ${RED}%-6s${RESET}\n" \
+            "$raw_logs" "$healthy_rpc" "$errored_subs"
+        printf "${BOLD}${CYAN}│${RESET}   • 活跃日志订阅:            ${CYAN}%-12s${RESET} • 活跃区块同步:  ${YELLOW}%-8s${RESET}\n" \
+            "$active_subs" "$active_bs"
+        echo -e "${BOLD}${CYAN}├────────────────────────────────────────────────────────────────────────────────────────┤${RESET}"
+
+        # 2. RPC 节点池
+        echo -e "${BOLD}${CYAN}│${RESET} ${BOLD}[2] RPC 节点池监控 (RPC Pool - SWRR 平滑加权轮询)${RESET}"
+        printf "${BOLD}${CYAN}│${RESET}   ${DIM}%-8s %-32s %-8s %-10s %-12s %-10s${RESET}\n" "ChainID" "RPC URL" "Weight" "Latency" "Cooldown" "Status"
+        
+        if command -v jq >/dev/null 2>&1; then
+            echo "$rpc_res" | jq -r '.data[]? | [
+                (.chain_id | tostring),
+                (.url | if length > 30 then .[0:27] + "..." else . end),
+                (.weight | tostring),
+                (if .latency_ms != null then (.latency_ms | tostring) + "ms" else "-" end),
+                (if .cooldown_remaining_seconds != null and .cooldown_remaining_seconds > 0 then (.cooldown_remaining_seconds | tostring) + "s" else "-" end),
+                .status
+            ] | @tsv' | while IFS=$'\t' read -r cid url weight lat cd status; do
+                local st_color="$GREEN"
+                [ "$status" != "healthy" ] && [ "$status" != "enabled" ] && st_color="$RED"
+                [ "$cd" != "-" ] && st_color="$YELLOW"
+                printf "${BOLD}${CYAN}│${RESET}   %-8s %-32s %-8s %-10s %-12s ${st_color}%-10s${RESET}\n" \
+                    "$cid" "$url" "$weight" "$lat" "$cd" "$status"
+            done
+        fi
+        echo -e "${BOLD}${CYAN}├────────────────────────────────────────────────────────────────────────────────────────┤${RESET}"
+
+        # 3. 日志采集订阅 (raw_logs)
+        echo -e "${BOLD}${CYAN}│${RESET} ${BOLD}[3] 事件日志采集订阅 (raw_logs)${RESET}"
+        printf "${BOLD}${CYAN}│${RESET}   ${DIM}%-8s %-10s %-34s %-12s %-8s %-10s${RESET}\n" "ChainID" "Scope" "Target / Contract" "Checkpoint" "Window" "Status"
+        
+        if command -v jq >/dev/null 2>&1; then
+            echo "$subs_res" | jq -r '.data[]? | [
+                (.chain_id | tostring),
+                .collection_scope,
+                (if .collection_scope == "all_events" then "[全链所有事件]" elif .contract_address != null then (.contract_address | if length > 32 then .[0:16] + "..." + .[-12:] else . end) else "-" end),
+                (.current_block | tostring),
+                (.current_block_window | tostring),
+                .status
+            ] | @tsv' | while IFS=$'\t' read -r cid scope target cp win status; do
+                local st_color="$GREEN"
+                [ "$status" = "paused" ] && st_color="$YELLOW"
+                [ "$status" = "error" ] && st_color="$RED"
+                [ "$status" = "historical_syncing" ] && st_color="$CYAN"
+                printf "${BOLD}${CYAN}│${RESET}   %-8s %-10s %-34s %-12s %-8s ${st_color}%-10s${RESET}\n" \
+                    "$cid" "$scope" "$target" "$cp" "$win" "$status"
+            done
+        fi
+        echo -e "${BOLD}${CYAN}├────────────────────────────────────────────────────────────────────────────────────────┤${RESET}"
+
+        # 4. 区块与交易同步 (blocks & transactions)
+        echo -e "${BOLD}${CYAN}│${RESET} ${BOLD}[4] 整链区块与交易全量同步 (blocks & transactions)${RESET}"
+        printf "${BOLD}${CYAN}│${RESET}   ${DIM}%-8s %-12s %-12s %-12s %-20s %-10s${RESET}\n" "ChainID" "Next Block" "Safe Head" "Latest Seen" "Progress" "Status"
+
+        if command -v jq >/dev/null 2>&1; then
+            echo "$chains_res" | jq -r '.data[]?.chain_id' | while read -r cid; do
+                [ -z "$cid" ] && continue
+                local sync_res
+                sync_res=$(api_request GET "/api/chains/$cid/sync-status" 2>/dev/null || echo "{}")
+                local nb sh ls st
+                nb=$(json_get "$sync_res" '.data.next_block // "-"')
+                sh=$(json_get "$sync_res" '.data.safe_head // "-"')
+                ls=$(json_get "$sync_res" '.data.latest_seen_block // "-"')
+                st=$(json_get "$sync_res" '.data.status // "unconfigured"')
+
+                if [ "$st" != "unconfigured" ]; then
+                    local pbar="[ 未知 ]"
+                    if [ "$sh" != "-" ] && [ "$sh" -gt 0 ] && [ "$nb" != "-" ]; then
+                        local pct=$(( nb * 100 / sh ))
+                        [ $pct -gt 100 ] && pct=100
+                        local filled=$(( pct / 10 ))
+                        local empty=$(( 10 - filled ))
+                        local fstr="" estr=""
+                        for ((i=0; i<filled; i++)); do fstr="${fstr}█"; done
+                        for ((i=0; i<empty; i++)); do estr="${estr}░"; done
+                        pbar="[${fstr}${estr}] ${pct}%"
+                    fi
+
+                    local st_color="$GREEN"
+                    [ "$st" = "paused" ] && st_color="$YELLOW"
+                    [ "$st" = "error" ] && st_color="$RED"
+                    [ "$st" = "syncing" ] && st_color="$CYAN"
+                    printf "${BOLD}${CYAN}│${RESET}   %-8s %-12s %-12s %-12s %-20s ${st_color}%-10s${RESET}\n" \
+                        "$cid" "$nb" "$sh" "$ls" "$pbar" "$st"
+                fi
+            done
+        fi
+
+        echo -e "${BOLD}${CYAN}└────────────────────────────────────────────────────────────────────────────────────────┘${RESET}"
+        echo -e " ${DIM}快捷键: [q] 退出  |  [r] 立即刷新  |  刷新周期: ${interval}s${RESET}"
+
+        # 监听单字符输入，超时自动刷新
+        read -t "$interval" -n 1 key || true
+        if [ "$key" = "q" ] || [ "$key" = "Q" ]; then
+            break
+        fi
+    done
+}
+
+# ------------------------------------------------------------------------------
+# 子命令: block
+# ------------------------------------------------------------------------------
+cmd_block() {
+    local action="${1:-status}"
+    shift || true
+
+    case "$action" in
+        status)
+            local chain_id="${1:-}"
+            if [ -n "$chain_id" ]; then
+                api_request GET "/api/chains/$chain_id/sync-status"
+            else
+                local chains_res
+                chains_res=$(api_request GET "/api/chains")
+                echo "$chains_res" | jq -r '.data[]?.chain_id' | while read -r cid; do
+                    [ -z "$cid" ] && continue
+                    echo -e "\n${BOLD}${CYAN}--- Chain ID: $cid ---${RESET}"
+                    api_request GET "/api/chains/$cid/sync-status" | jq '.data' 2>/dev/null || true
+                done
+            fi
+            ;;
+        start)
+            local chain_id="${1:-}"
+            [ -z "$chain_id" ] && { echo -e "${RED}[ERROR]${RESET} 请提供 chain_id, 例如: lakectl block start 8453"; exit 1; }
+            shift || true
+            
+            local from_block=0 batch_size=10 reorg_window=32
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --from|--start-block) from_block="$2"; shift 2 ;;
+                    --batch|--batch-size) batch_size="$2"; shift 2 ;;
+                    --reorg|--reorg-window) reorg_window="$2"; shift 2 ;;
+                    *) shift ;;
+                esac
+            done
+
+            local payload
+            payload=$(printf '{"start_block":%d,"end_block":null,"batch_size":%d,"reorg_window":%d,"realtime_enabled":true,"status":"pending"}' \
+                "$from_block" "$batch_size" "$reorg_window")
+            
+            echo -e "${GREEN}正在为 Chain $chain_id 启动区块交易全量同步...${RESET}"
+            api_request PUT "/api/chains/$chain_id/block-transaction-sync" "$payload"
+            ;;
+        pause)
+            local chain_id="${1:-}"
+            [ -z "$chain_id" ] && { echo -e "${RED}[ERROR]${RESET} 请提供 chain_id"; exit 1; }
+            echo -e "${YELLOW}正在暂停 Chain $chain_id 的区块交易同步...${RESET}"
+            api_request POST "/api/chains/$chain_id/block-transaction-sync/pause"
+            ;;
+        resume)
+            local chain_id="${1:-}"
+            [ -z "$chain_id" ] && { echo -e "${RED}[ERROR]${RESET} 请提供 chain_id"; exit 1; }
+            echo -e "${GREEN}正在恢复 Chain $chain_id 的区块交易同步 (断点续传)...${RESET}"
+            api_request POST "/api/chains/$chain_id/block-transaction-sync/resume"
+            ;;
+        *)
+            echo "未知 block 操作: $action。可用: status, start, pause, resume"
+            exit 1
+            ;;
+    esac
+}
+
+# ------------------------------------------------------------------------------
+# 子命令: log
+# ------------------------------------------------------------------------------
+cmd_log() {
+    local action="${1:-list}"
+    shift || true
+
+    case "$action" in
+        list)
+            local res
+            res=$(api_request GET "/api/subscriptions")
+            if command -v jq >/dev/null 2>&1; then
+                echo "$res" | jq '.data'
+            else
+                echo "$res"
+            fi
+            ;;
+        add)
+            local chain_id="${1:-}"
+            [ -z "$chain_id" ] && { echo -e "${RED}[ERROR]${RESET} 请提供 chain_id, 例如: lakectl log add 8453 --contract 0x..."; exit 1; }
+            shift || true
+
+            local contract="" scope="contract" from_block=0 realtime="true"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --contract) contract="$2"; scope="contract"; shift 2 ;;
+                    --all-events) scope="all_events"; contract=""; shift ;;
+                    --from|--start-block) from_block="$2"; shift 2 ;;
+                    --realtime) realtime="$2"; shift 2 ;;
+                    *) shift ;;
+                esac
+            done
+
+            local payload
+            if [ "$scope" = "all_events" ]; then
+                payload=$(printf '{"chain_id":%d,"collection_scope":"all_events","start_block":%d,"realtime_enabled":%s}' \
+                    "$chain_id" "$from_block" "$realtime")
+            else
+                [ -z "$contract" ] && { echo -e "${RED}[ERROR]${RESET} 请指定 --contract <0x...> 或 --all-events"; exit 1; }
+                payload=$(printf '{"chain_id":%d,"collection_scope":"contract","contract_address":"%s","start_block":%d,"realtime_enabled":%s}' \
+                    "$chain_id" "$contract" "$from_block" "$realtime")
+            fi
+
+            echo -e "${GREEN}正在创建事件采集订阅任务...${RESET}"
+            api_request POST "/api/subscriptions" "$payload"
+            ;;
+        pause)
+            local id="${1:-}"
+            [ -z "$id" ] && { echo -e "${RED}[ERROR]${RESET} 请提供 subscription_id"; exit 1; }
+            api_request POST "/api/subscriptions/$id/pause"
+            ;;
+        resume)
+            local id="${1:-}"
+            [ -z "$id" ] && { echo -e "${RED}[ERROR]${RESET} 请提供 subscription_id"; exit 1; }
+            api_request POST "/api/subscriptions/$id/resume"
+            ;;
+        delete)
+            local id="${1:-}"
+            [ -z "$id" ] && { echo -e "${RED}[ERROR]${RESET} 请提供 subscription_id"; exit 1; }
+            api_request DELETE "/api/subscriptions/$id"
+            ;;
+        *)
+            echo "未知 log 操作: $action。可用: list, add, pause, resume, delete"
+            exit 1
+            ;;
+    esac
+}
+
+# ------------------------------------------------------------------------------
+# 子命令: rpc
+# ------------------------------------------------------------------------------
+cmd_rpc() {
+    local action="${1:-list}"
+    shift || true
+
+    case "$action" in
+        list)
+            local res
+            res=$(api_request GET "/api/rpc-endpoints")
+            if command -v jq >/dev/null 2>&1; then
+                echo "$res" | jq '.data'
+            else
+                echo "$res"
+            fi
+            ;;
+        check)
+            local id="${1:-}"
+            if [ -n "$id" ]; then
+                echo -e "${CYAN}正在检查 RPC 节点 $id ...${RESET}"
+                api_request POST "/api/rpc-endpoints/$id/check"
+            else
+                local rpc_res
+                rpc_res=$(api_request GET "/api/rpc-endpoints")
+                echo "$rpc_res" | jq -r '.data[]?.id' | while read -r epid; do
+                    [ -z "$epid" ] && continue
+                    echo -e "\n${CYAN}--- Checking RPC Endpoint: $epid ---${RESET}"
+                    api_request POST "/api/rpc-endpoints/$epid/check" | jq '.data' 2>/dev/null || true
+                done
+            fi
+            ;;
+        add)
+            local chain_id="${1:-}"
+            local url="${2:-}"
+            [ -z "$chain_id" ] || [ -z "$url" ] && { echo -e "${RED}[ERROR]${RESET} 用法: lakectl rpc add <chain_id> <url> [--weight 100]"; exit 1; }
+            shift 2 || true
+
+            local weight=100
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --weight) weight="$2"; shift 2 ;;
+                    *) shift ;;
+                esac
+            done
+
+            local payload
+            payload=$(printf '{"chain_id":%d,"url":"%s","weight":%d}' "$chain_id" "$url" "$weight")
+            api_request POST "/api/rpc-endpoints" "$payload"
+            ;;
+        *)
+            echo "未知 rpc 操作: $action。可用: list, check, add"
+            exit 1
+            ;;
+    esac
+}
+
+# ------------------------------------------------------------------------------
+# 子命令: chain
+# ------------------------------------------------------------------------------
+cmd_chain() {
+    local action="${1:-list}"
+    shift || true
+
+    case "$action" in
+        list)
+            local res
+            res=$(api_request GET "/api/chains")
+            if command -v jq >/dev/null 2>&1; then
+                echo "$res" | jq '.data'
+            else
+                echo "$res"
+            fi
+            ;;
+        add)
+            local chain_id="${1:-}"
+            local name="${2:-}"
+            local symbol="${3:-}"
+            [ -z "$chain_id" ] || [ -z "$name" ] || [ -z "$symbol" ] && { echo -e "${RED}[ERROR]${RESET} 用法: lakectl chain add <chain_id> <name> <symbol> [--depth 12]"; exit 1; }
+            shift 3 || true
+
+            local depth=12
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --depth) depth="$2"; shift 2 ;;
+                    *) shift ;;
+                esac
+            done
+
+            local payload
+            payload=$(printf '{"chain_id":%d,"name":"%s","native_token_symbol":"%s","safe_confirmation_depth":%d}' \
+                "$chain_id" "$name" "$symbol" "$depth")
+            api_request POST "/api/chains" "$payload"
+            ;;
+        *)
+            echo "未知 chain 操作: $action。可用: list, add"
+            exit 1
+            ;;
+    esac
+}
+
+# ------------------------------------------------------------------------------
+# 子命令: config (声明式配置导入与导出)
+# ------------------------------------------------------------------------------
+cmd_config_export() {
+    local outfile="${1:-}"
+    ensure_connection
+
+    local chains_res rpc_res subs_res
+    chains_res=$(api_request GET "/api/chains" || echo '{"data":[]}')
+    rpc_res=$(api_request GET "/api/rpc-endpoints" || echo '{"data":[]}')
+    subs_res=$(api_request GET "/api/subscriptions" || echo '{"data":[]}')
+
+    local exported_json=""
+    if command -v jq >/dev/null 2>&1; then
+        local chain_ids
+        chain_ids=$(echo "$chains_res" | jq -r '.data[]?.chain_id' 2>/dev/null || true)
+        local sync_items=()
+        for cid in $chain_ids; do
+            [ -z "$cid" ] && continue
+            local s_res
+            s_res=$(api_request GET "/api/chains/$cid/sync-status" 2>/dev/null || echo "{}")
+            local st
+            st=$(echo "$s_res" | jq -r '.data.status // empty' 2>/dev/null || true)
+            if [ -n "$st" ] && [ "$st" != "null" ]; then
+                local item
+                item=$(echo "$s_res" | jq -c --argjson cid "$cid" '
+                    .data | {
+                        chain_id: $cid,
+                        enabled: (if .status == "paused" then false else true end),
+                        start_block: (.start_block // 0),
+                        batch_size: (.batch_size // 10),
+                        reorg_window: (.reorg_window // 32),
+                        realtime_enabled: (.realtime_enabled == 1)
+                    }
+                ' 2>/dev/null || true)
+                [ -n "$item" ] && sync_items+=("$item")
+            fi
+        done
+
+        local sync_json="[]"
+        if [ ${#sync_items[@]} -gt 0 ]; then
+            sync_json=$(printf '%s\n' "${sync_items[@]}" | jq -s '.')
+        fi
+
+        exported_json=$(jq -n \
+            --arg time "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+            --argjson chains "$(echo "$chains_res" | jq '.data // [] | map({chain_id, name, native_token_symbol, safe_confirmation_depth, default_min_block_window, default_max_block_window, rpc_notes})')" \
+            --argjson rpcs "$(echo "$rpc_res" | jq '.data // [] | map({chain_id, url, weight})')" \
+            --argjson subs "$(echo "$subs_res" | jq '.data // [] | map({chain_id, collection_scope, contract_address, start_block, realtime_enabled: (.realtime_enabled == 1), min_block_window, max_block_window})')" \
+            --argjson bsync "$sync_json" \
+            '{
+                version: "1.0",
+                exported_at: $time,
+                chains: $chains,
+                rpc_endpoints: $rpcs,
+                subscriptions: $subs,
+                block_transaction_sync: $bsync
+            }'
+        )
+    elif command -v python3 >/dev/null 2>&1; then
+        exported_json=$(python3 -c '
+import sys, json, datetime
+chains = json.loads(sys.argv[1]).get("data", [])
+rpcs = json.loads(sys.argv[2]).get("data", [])
+subs = json.loads(sys.argv[3]).get("data", [])
+
+data = {
+    "version": "1.0",
+    "exported_at": datetime.datetime.utcnow().isoformat() + "Z",
+    "chains": [{"chain_id": c["chain_id"], "name": c["name"], "native_token_symbol": c["native_token_symbol"], "safe_confirmation_depth": c.get("safe_confirmation_depth", 12), "default_min_block_window": c.get("default_min_block_window", 1), "default_max_block_window": c.get("default_max_block_window", 1000), "rpc_notes": c.get("rpc_notes")} for c in chains],
+    "rpc_endpoints": [{"chain_id": r["chain_id"], "url": r["url"], "weight": r.get("weight", 100)} for r in rpcs],
+    "subscriptions": [{"chain_id": s["chain_id"], "collection_scope": s["collection_scope"], "contract_address": s.get("contract_address"), "start_block": s.get("start_block", 0), "realtime_enabled": s.get("realtime_enabled", 1) == 1, "min_block_window": s.get("min_block_window", 1), "max_block_window": s.get("max_block_window", 1000)} for s in subs],
+    "block_transaction_sync": []
+}
+print(json.dumps(data, indent=2))
+' "$chains_res" "$rpc_res" "$subs_res")
+    else
+        echo -e "${RED}[ERROR]${RESET} 导出配置需要系统安装 jq 或 python3" >&2
+        exit 1
+    fi
+
+    if [ -n "$outfile" ]; then
+        echo "$exported_json" > "$outfile"
+        echo -e "${GREEN}[SUCCESS]${RESET} 全量声明式配置已导出至: ${BOLD}$outfile${RESET}"
+    else
+        echo "$exported_json"
+    fi
+}
+
+cmd_config_import() {
+    local infile="${1:-}"
+    if [ -z "$infile" ] || [ ! -f "$infile" ]; then
+        echo -e "${RED}[ERROR]${RESET} 请提供有效的配置文件路径, 例如: lakectl config import config.json" >&2
+        exit 1
+    fi
+    ensure_connection
+
+    echo -e "${CYAN}=== 正在执行声明式配置幂等导入: ${BOLD}$infile${CYAN} ===${RESET}"
+
+    local content
+    content=$(cat "$infile")
+
+    local count_chains=0
+    local count_rpcs=0
+    local count_subs=0
+    local count_syncs=0
+
+    if command -v jq >/dev/null 2>&1; then
+        # 1. Chains
+        local chains
+        chains=$(echo "$content" | jq -c '.chains[]?' 2>/dev/null || true)
+        while IFS= read -r c; do
+            [ -z "$c" ] && continue
+            api_request POST "/api/chains" "$c" >/dev/null 2>&1 || true
+            count_chains=$((count_chains + 1))
+        done <<< "$chains"
+
+        # 2. RPC Endpoints (Idempotent ON CONFLICT DO UPDATE)
+        local rpcs
+        rpcs=$(echo "$content" | jq -c '.rpc_endpoints[]?' 2>/dev/null || true)
+        while IFS= read -r r; do
+            [ -z "$r" ] && continue
+            api_request POST "/api/rpc-endpoints" "$r" >/dev/null 2>&1 || true
+            count_rpcs=$((count_rpcs + 1))
+        done <<< "$rpcs"
+
+        # 3. Subscriptions (Idempotent ON CONFLICT DO NOTHING - Checkpoints preserved!)
+        local subs
+        subs=$(echo "$content" | jq -c '.subscriptions[]?' 2>/dev/null || true)
+        while IFS= read -r s; do
+            [ -z "$s" ] && continue
+            api_request POST "/api/subscriptions" "$s" >/dev/null 2>&1 || true
+            count_subs=$((count_subs + 1))
+        done <<< "$subs"
+
+        # 4. Block & Transaction Sync (Idempotent - next_block preserved!)
+        local bsyncs
+        bsyncs=$(echo "$content" | jq -c '.block_transaction_sync[]?' 2>/dev/null || true)
+        while IFS= read -r b; do
+            [ -z "$b" ] && continue
+            local cid enabled start_b batch reorg rt
+            cid=$(echo "$b" | jq -r '.chain_id')
+            enabled=$(echo "$b" | jq -r '.enabled // true')
+            start_b=$(echo "$b" | jq -r '.start_block // 0')
+            batch=$(echo "$b" | jq -r '.batch_size // 10')
+            reorg=$(echo "$b" | jq -r '.reorg_window // 32')
+            rt=$(echo "$b" | jq -r '.realtime_enabled // true')
+
+            local payload
+            payload=$(printf '{"start_block":%s,"end_block":null,"batch_size":%s,"reorg_window":%s,"realtime_enabled":%s,"status":"pending"}' \
+                "$start_b" "$batch" "$reorg" "$rt")
+            
+            api_request PUT "/api/chains/$cid/block-transaction-sync" "$payload" >/dev/null 2>&1 || true
+            
+            if [ "$enabled" = "false" ]; then
+                api_request POST "/api/chains/$cid/block-transaction-sync/pause" >/dev/null 2>&1 || true
+            else
+                api_request POST "/api/chains/$cid/block-transaction-sync/resume" >/dev/null 2>&1 || true
+            fi
+            count_syncs=$((count_syncs + 1))
+        done <<< "$bsyncs"
+    fi
+
+    echo -e "${GREEN}[SUCCESS] 声明式配置导入成功！${RESET}"
+    echo -e "  • 注册/更新链配置:    ${BOLD}$count_chains${RESET} 条"
+    echo -e "  • 注入/更新 RPC 节点: ${BOLD}$count_rpcs${RESET} 个"
+    echo -e "  • 确认事件日志订阅:   ${BOLD}$count_subs${RESET} 个 (已有任务 Checkpoint 进度完整保留，不重复拉取)"
+    echo -e "  • 调优区块与交易同步: ${BOLD}$count_syncs${RESET} 条链 (已有同步进度未回退)"
+}
+
+cmd_config() {
+    local action="${1:-}"
+    shift || true
+    case "$action" in
+        export) cmd_config_export "$@" ;;
+        import) cmd_config_import "$@" ;;
+        *)
+            echo "用法: lakectl config <export|import> [参数...]"
+            exit 1
+            ;;
+    esac
+}
+
+# ------------------------------------------------------------------------------
+# 子命令: login / logout / whoami (持久化登录与上下文)
+# ------------------------------------------------------------------------------
+cmd_login() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -u|--url)         LAKECTL_URL="$2"; shift 2 ;;
+            -k|--key|--token) LAKECTL_API_KEY="$2"; shift 2 ;;
+            -s|--ssh)         SSH_TARGET="$2"; shift 2 ;;
+            -p|--ssh-port)    SSH_PORT="$2"; shift 2 ;;
+            -i|--identity)    SSH_IDENTITY="$2"; shift 2 ;;
+            --remote-port)    REMOTE_PORT="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    echo -e "${CYAN}正在验证目标服务连通性...${RESET}"
+    local check_res
+    if ! check_res=$(api_request GET "/health/live" 2>&1); then
+        echo -e "${RED}[ERROR] 连通性测试失败！${RESET}" >&2
+        echo -e "错误原因: $check_res" >&2
+        echo -e "请检查你的 URL、SSH 地址或端口设置。" >&2
+        exit 1
+    fi
+
+    local config_dir="${HOME}/.lakectl"
+    mkdir -p "$config_dir"
+    chmod 700 "$config_dir"
+    local config_file="${config_dir}/config"
+
+    cat > "$config_file" << EOF
+# EVMEventLake lakectl 登录凭据与上下文配置
+LAKECTL_URL="${LAKECTL_URL}"
+LAKECTL_API_KEY="${LAKECTL_API_KEY}"
+SSH_TARGET="${SSH_TARGET}"
+SSH_PORT="${SSH_PORT}"
+SSH_IDENTITY="${SSH_IDENTITY}"
+REMOTE_PORT="${REMOTE_PORT}"
+EOF
+    chmod 600 "$config_file"
+
+    echo -e "${GREEN}[SUCCESS] 登录成功！凭据与连接上下文已保存。${RESET}"
+    if [ -n "$SSH_TARGET" ]; then
+        echo -e "  • 连接模式:   ${BOLD}SSH 隧道安全穿透${RESET}"
+        echo -e "  • SSH 目标:   ${BOLD}${SSH_TARGET}${RESET}"
+        echo -e "  • 内部服务端口: ${BOLD}${REMOTE_PORT}${RESET}"
+    else
+        echo -e "  • 连接模式:   ${BOLD}直接 HTTP(S) 访问${RESET}"
+        echo -e "  • 目标 URL:   ${BOLD}${LAKECTL_URL}${RESET}"
+    fi
+    if [ -n "$LAKECTL_API_KEY" ]; then
+        echo -e "  • API Key:    ${GREEN}已配置 (${LAKECTL_API_KEY:0:7}...)${RESET}"
+    else
+        echo -e "  • API Key:    ${YELLOW}未配置 (无鉴权模式)${RESET}"
+    fi
+    echo -e "  • 配置文件:   ${DIM}${config_file}${RESET}"
+    echo -e "\n${BOLD}🎉 后续在此终端执行 lakectl top、lakectl status 等命令无需再输入连接参数！${RESET}"
+}
+
+cmd_logout() {
+    local config_file="${HOME}/.lakectl/config"
+    if [ -f "$config_file" ]; then
+        rm -f "$config_file"
+        echo -e "${GREEN}[SUCCESS]${RESET} 已退出登录，成功清除本地保存凭据 (~/.lakectl/config)。"
+    else
+        echo -e "${YELLOW}[NOTE]${RESET} 当前未登录，无可清除的凭据。"
+    fi
+}
+
+cmd_whoami() {
+    local config_file="${HOME}/.lakectl/config"
+    echo -e "${BOLD}${CYAN}=== EVMEventLake 当前客户端配置与登录状态 (lakectl whoami) ===${RESET}"
+    if [ -f "$config_file" ]; then
+        echo -e "登录状态:     ${GREEN}● 已登录 (持久化配置)${RESET} (${DIM}${config_file}${RESET})"
+    else
+        echo -e "登录状态:     ${YELLOW}○ 未持久化登录 (使用即时参数或本地默认)${RESET}"
+    fi
+
+    if [ -n "$SSH_TARGET" ]; then
+        echo -e "连接模式:     ${BOLD}SSH 隧道穿透${RESET}"
+        echo -e "SSH 目标:     ${BOLD}${SSH_TARGET}${RESET} (SSH 端口: ${SSH_PORT:-22})"
+        echo -e "远端服务端口: ${BOLD}${REMOTE_PORT}${RESET}"
+        [ -n "$SSH_IDENTITY" ] && echo -e "SSH 私钥:     ${DIM}${SSH_IDENTITY}${RESET}"
+    else
+        echo -e "连接模式:     ${BOLD}直接 HTTP(S) 直连${RESET}"
+        echo -e "目标 URL:     ${BOLD}${LAKECTL_URL}${RESET}"
+    fi
+
+    if [ -n "$LAKECTL_API_KEY" ]; then
+        echo -e "API Key:      ${GREEN}已配置 (${LAKECTL_API_KEY:0:7}***)${RESET}"
+    else
+        echo -e "API Key:      ${DIM}未配置 (无鉴权模式)${RESET}"
+    fi
+
+    echo -e "\n正在检测服务连通性..."
+    if api_request GET "/health/live" >/dev/null 2>&1; then
+        echo -e "服务连通测试: ${GREEN}● 连通正常 (ALIVE)${RESET}"
+    else
+        echo -e "服务连通测试: ${RED}● 无法连接${RESET}"
+    fi
+}
+
+# 加载已持久化的上下文
+load_saved_context() {
+    local config_file="${HOME}/.lakectl/config"
+    if [ -f "$config_file" ]; then
+        while IFS='=' read -r key val; do
+            [[ "$key" =~ ^#.*$ ]] && continue
+            [ -z "$key" ] && continue
+            val="${val%\"}"
+            val="${val#\"}"
+            val="${val%\'}"
+            val="${val#\'}"
+            case "$key" in
+                LAKECTL_URL)      [ -z "${CLI_GIVEN_URL:-}" ] && LAKECTL_URL="$val" ;;
+                LAKECTL_API_KEY)  [ -z "${CLI_GIVEN_KEY:-}" ] && LAKECTL_API_KEY="$val" ;;
+                SSH_TARGET)       [ -z "${CLI_GIVEN_SSH:-}" ] && SSH_TARGET="$val" ;;
+                SSH_PORT)         [ -z "${CLI_GIVEN_SSH_PORT:-}" ] && SSH_PORT="$val" ;;
+                SSH_IDENTITY)     [ -z "${CLI_GIVEN_IDENTITY:-}" ] && SSH_IDENTITY="$val" ;;
+                REMOTE_PORT)      [ -z "${CLI_GIVEN_REMOTE_PORT:-}" ] && REMOTE_PORT="$val" ;;
+            esac
+        done < "$config_file"
+    fi
+}
+
+# ==============================================================================
+# CLI 入口与全局参数解析
+# ==============================================================================
+main() {
+    local subcommand=""
+    local sub_args=()
+    local CLI_GIVEN_URL="" CLI_GIVEN_KEY="" CLI_GIVEN_SSH="" CLI_GIVEN_SSH_PORT="" CLI_GIVEN_IDENTITY="" CLI_GIVEN_REMOTE_PORT=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -u|--url)
+                LAKECTL_URL="$2"
+                CLI_GIVEN_URL="1"
+                shift 2
+                ;;
+            -k|--key|--token)
+                LAKECTL_API_KEY="$2"
+                CLI_GIVEN_KEY="1"
+                shift 2
+                ;;
+            -s|--ssh)
+                SSH_TARGET="$2"
+                CLI_GIVEN_SSH="1"
+                shift 2
+                ;;
+            -p|--ssh-port)
+                SSH_PORT="$2"
+                CLI_GIVEN_SSH_PORT="1"
+                shift 2
+                ;;
+            -i|--identity)
+                SSH_IDENTITY="$2"
+                CLI_GIVEN_IDENTITY="1"
+                shift 2
+                ;;
+            --remote-port)
+                REMOTE_PORT="$2"
+                CLI_GIVEN_REMOTE_PORT="1"
+                shift 2
+                ;;
+            -h|--help)
+                print_help
+                exit 0
+                ;;
+            top|status|block|log|rpc|chain|config|export|import|login|logout|whoami)
+                subcommand="$1"
+                shift
+                sub_args=("$@")
+                break
+                ;;
+            *)
+                echo -e "${RED}[ERROR]${RESET} 未知参数或命令: $1"
+                print_help
+                exit 1
+                ;;
+        esac
+    done
+
+    # 若未在命令行显式覆盖，加载保存的登录上下文
+    load_saved_context
+
+    if [ -z "$subcommand" ]; then
+        print_help
+        exit 0
+    fi
+
+    case "$subcommand" in
+        top)    cmd_top "${sub_args[@]:-}" ;;
+        status) cmd_status "${sub_args[@]:-}" ;;
+        block)  cmd_block "${sub_args[@]:-}" ;;
+        log)    cmd_log "${sub_args[@]:-}" ;;
+        rpc)    cmd_rpc "${sub_args[@]:-}" ;;
+        chain)  cmd_chain "${sub_args[@]:-}" ;;
+        config) cmd_config "${sub_args[@]:-}" ;;
+        export) cmd_config_export "${sub_args[@]:-}" ;;
+        import) cmd_config_import "${sub_args[@]:-}" ;;
+        login)  cmd_login "${sub_args[@]:-}" ;;
+        logout) cmd_logout "${sub_args[@]:-}" ;;
+        whoami) cmd_whoami "${sub_args[@]:-}" ;;
+    esac
+}
+
+main "$@"

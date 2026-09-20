@@ -30,6 +30,11 @@ TODO -> IN_PROGRESS -> REVIEW -> DONE
 - （暂无待规划任务）
 
 ### 已完成任务 (DONE)
+- **TASK-024**: [lakectl 支持先登录后操作 (login/logout/whoami) 与自定义远程端口](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-024.md)
+- **TASK-023**: [lakectl 支持声明式配置幂等导入与导出 (import/export config)](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-023.md)
+- **TASK-022**: [服务端区块交易常驻解耦与独立纯 Shell 客户端 (lakectl)](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-022.md)
+- **TASK-021**: [完善部署后全流程业务使用与下游集成指南 (USAGE.md)](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-021.md)
+- **TASK-020**: [远程一键部署自动化脚本 (deploy-remote.sh) 与部署文档支持](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-020.md)
 - **TASK-019**: [实现 RPC 节点池真实平滑加权轮询 (Smooth Weighted Round-Robin) 负载均衡并保留故障熔断与冷却自愈](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-019.md)
 - **TASK-018**: [全面修复 ClickHouse 容器启动故障与端到端 (E2E) 测试缺陷并补齐完整端到端测试链路](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-018.md)
 - **TASK-017**: [核心安全加固与高危性能缺陷治理（RPC SSRF/重定向防御、Dashboard FINAL 慢查询消除、raw_logs 合约地址跳数索引补齐、收据异常重试保护与恢复脚本防坏治理）](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-017.md)

@@ -121,6 +121,40 @@ docker compose pull && docker compose up -d
 docker compose down
 ```
 
+### 3.3 远程一键部署自动化脚本 (本地执行，秒级远端部署)
+
+如果你在本地工作机或开发机上，需要将项目一键部署/升级到远程 Linux 服务器，可以使用内置的 [`scripts/deploy-remote.sh`](file:///ssd0/git/EVMEventLake/scripts/deploy-remote.sh)。
+
+该脚本自动完成：
+1. **远程环境检测**：验证 SSH 连通性、检测远端 Docker 和 Docker Compose；
+2. **数据防丢失保护**：自动初始化宿主机持久化目录（`data/sqlite`、`data/clickhouse`），**平滑更新绝不删除已有数据**；
+3. **安全增量同步**：自动排除 `.git`、`target/`、本地 `data/`、`logs/` 等大文件与缓存，支持 rsync 及 tar 流式降级；
+4. **配置安全注入**：将指定的本地 `.env` 配置文件传输至远端并设定 `600` 安全权限；
+5. **秒级构建与健康轮询**：在远端触发容器构建启动并轮询 `/health/ready` 就绪端点。
+
+#### 使用范例
+
+```bash
+# 方式 1: 命令行指定参数（最常用）
+./scripts/deploy-remote.sh \
+  -s root@192.168.1.100 \
+  -d /opt/eventlake \
+  -e .env.production
+
+# 方式 2: 自定义端口与私钥，并启用国内下载加速代理 (--cn)
+./scripts/deploy-remote.sh \
+  -s ubuntu@47.100.1.2 \
+  -p 2222 \
+  -i ~/.ssh/my_vps_key \
+  -d /data/eventlake \
+  -e .env.prod \
+  --cn
+
+# 方式 3: 交互式引导（不加任何参数直接回车，依交互提示逐步输入）
+./scripts/deploy-remote.sh
+```
+
+
 ---
 
 ## 4. 模式 C：本地源码构建部署 (开发调试)
