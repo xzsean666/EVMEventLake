@@ -260,7 +260,7 @@ fi
 # 步骤 2: 远端目录初始化与数据持久化保护
 # ------------------------------------------------------------------------------
 log_info "==> [2/5] 初始化远端目录结构 (保留历史数据)..."
-run_ssh "mkdir -p '$REMOTE_DIR' '$REMOTE_DIR/data/sqlite' '$REMOTE_DIR/data/clickhouse' '$REMOTE_DIR/logs/clickhouse' '$REMOTE_DIR/backups'"
+run_ssh "mkdir -p '$REMOTE_DIR' '$REMOTE_DIR/data/sqlite' '$REMOTE_DIR/data/clickhouse' '$REMOTE_DIR/logs/clickhouse' '$REMOTE_DIR/backups' && chmod -R 777 '$REMOTE_DIR/data/sqlite'"
 log_succ "远端持久化目录已就绪 (宿主机路径: $REMOTE_DIR/data)。"
 
 # ------------------------------------------------------------------------------
@@ -268,7 +268,7 @@ log_succ "远端持久化目录已就绪 (宿主机路径: $REMOTE_DIR/data)。"
 # ------------------------------------------------------------------------------
 log_info "==> [3/5] 同步项目部署文件至远端..."
 
-# 排除本地大文件、数据目录、日志和本地环境配置
+# 排除本地大文件、数据目录、日志和本地环境配置，但保留 .env.example
 EXCLUDES=(
     --exclude='.git'
     --exclude='target'
@@ -276,6 +276,7 @@ EXCLUDES=(
     --exclude='data'
     --exclude='logs'
     --exclude='backups'
+    --include='.env.example'
     --exclude='.env'
     --exclude='.env.*'
     --exclude='*.log'
@@ -324,6 +325,7 @@ fi
 
 DEPLOY_CMD="cd '$REMOTE_DIR' && \
     export EVENTLAKE_CN_PROXY='$USE_CN_PROXY' && \
+    export EVENTLAKE_ENV_FILE='.env' && \
     $COMPOSE_BIN -f $COMPOSE_FILE up -d --build"
 
 run_ssh "$DEPLOY_CMD"

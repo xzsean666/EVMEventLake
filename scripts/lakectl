@@ -73,11 +73,15 @@ lakectl - EVMEventLake 独立控制台客户端
   top                       启动交互式终端全屏动态监控大盘 (类似 htop / k9s)
   status                    一键查看 Lake 全局概况及各模块状态摘要
 
-区块与交易同步管理 (blocks & transactions):
+区块与交易数据检索与管理 (blocks & transactions):
   block status [chain_id]   查看整链区块与交易同步状态
+  block get <id> <num|hash> 获取指定高度或哈希的完整区块元数据
+  block txs <id> <num|hash> 获取指定区块下的所有交易详情列表
   block start <chain_id>    启动整链区块与交易同步 (可选: --from <N> --batch <N> --reorg <N>)
   block pause <chain_id>    暂停某条链的区块与交易同步
   block resume <chain_id>   恢复某条链的区块与交易同步 (自动断点续传)
+  tx <chain_id> <tx_hash>   根据交易哈希精准检索交易详情与执行状态
+  address txs <id> <addr>   检索指定钱包/合约地址的全部历史交易记录 (可选: --limit 20)
 
 事件日志采集管理 (raw_logs):
   log list                  查看所有事件日志采集订阅及 Checkpoint 进度
@@ -418,11 +422,74 @@ cmd_block() {
             echo -e "${GREEN}正在恢复 Chain $chain_id 的区块交易同步 (断点续传)...${RESET}"
             api_request POST "/api/chains/$chain_id/block-transaction-sync/resume"
             ;;
+        get)
+            local chain_id="${1:-}"
+            local block_ref="${2:-}"
+            [ -z "$chain_id" ] || [ -z "$block_ref" ] && { echo -e "${RED}[ERROR]${RESET} 用法: lakectl block get <chain_id> <block_number|hash>"; exit 1; }
+            local res
+            res=$(api_request GET "/api/chains/$chain_id/blocks/$block_ref")
+            if command -v jq >/dev/null 2>&1; then
+                echo "$res" | jq '.data'
+            else
+                echo "$res"
+            fi
+            ;;
+        txs)
+            local chain_id="${1:-}"
+            local block_ref="${2:-}"
+            [ -z "$chain_id" ] || [ -z "$block_ref" ] && { echo -e "${RED}[ERROR]${RESET} 用法: lakectl block txs <chain_id> <block_number|hash>"; exit 1; }
+            local res
+            res=$(api_request GET "/api/chains/$chain_id/blocks/$block_ref/transactions")
+            if command -v jq >/dev/null 2>&1; then
+                echo "$res" | jq '.data'
+            else
+                echo "$res"
+            fi
+            ;;
         *)
-            echo "未知 block 操作: $action。可用: status, start, pause, resume"
+            echo "未知 block 操作: $action。可用: status, start, pause, resume, get, txs"
             exit 1
             ;;
     esac
+}
+
+# ------------------------------------------------------------------------------
+# 子命令: tx & address (交易与地址检索)
+# ------------------------------------------------------------------------------
+cmd_tx() {
+    local chain_id="${1:-}"
+    local tx_hash="${2:-}"
+    [ -z "$chain_id" ] || [ -z "$tx_hash" ] && { echo -e "${RED}[ERROR]${RESET} 用法: lakectl tx <chain_id> <tx_hash>"; exit 1; }
+    local res
+    res=$(api_request GET "/api/chains/$chain_id/transactions/$tx_hash")
+    if command -v jq >/dev/null 2>&1; then
+        echo "$res" | jq '.data'
+    else
+        echo "$res"
+    fi
+}
+
+cmd_address() {
+    local action="${1:-txs}"
+    shift || true
+    local chain_id="${1:-}"
+    local address="${2:-}"
+    [ -z "$chain_id" ] || [ -z "$address" ] && { echo -e "${RED}[ERROR]${RESET} 用法: lakectl address txs <chain_id> <address> [--limit 20]"; exit 1; }
+    shift 2 || true
+    local limit=20
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --limit) limit="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    local res
+    res=$(api_request GET "/api/chains/$chain_id/addresses/$address/transactions?limit=$limit")
+    if command -v jq >/dev/null 2>&1; then
+        echo "$res" | jq '.'
+    else
+        echo "$res"
+    fi
 }
 
 # ------------------------------------------------------------------------------
@@ -641,7 +708,7 @@ cmd_config_export() {
         exported_json=$(jq -n \
             --arg time "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
             --argjson chains "$(echo "$chains_res" | jq '.data // [] | map({chain_id, name, native_token_symbol, safe_confirmation_depth, default_min_block_window, default_max_block_window, rpc_notes})')" \
-            --argjson rpcs "$(echo "$rpc_res" | jq '.data // [] | map({chain_id, url, weight})')" \
+            --argjson rpcs "$(echo "$rpc_res" | jq '.data // [] | map({chain_id, url, weight, is_archive, max_block_range, max_batch_size})')" \
             --argjson subs "$(echo "$subs_res" | jq '.data // [] | map({chain_id, collection_scope, contract_address, start_block, realtime_enabled: (.realtime_enabled == 1), min_block_window, max_block_window})')" \
             --argjson bsync "$sync_json" \
             '{
@@ -664,7 +731,7 @@ data = {
     "version": "1.0",
     "exported_at": datetime.datetime.utcnow().isoformat() + "Z",
     "chains": [{"chain_id": c["chain_id"], "name": c["name"], "native_token_symbol": c["native_token_symbol"], "safe_confirmation_depth": c.get("safe_confirmation_depth", 12), "default_min_block_window": c.get("default_min_block_window", 1), "default_max_block_window": c.get("default_max_block_window", 1000), "rpc_notes": c.get("rpc_notes")} for c in chains],
-    "rpc_endpoints": [{"chain_id": r["chain_id"], "url": r["url"], "weight": r.get("weight", 100)} for r in rpcs],
+    "rpc_endpoints": [{"chain_id": r["chain_id"], "url": r["url"], "weight": r.get("weight", 100), "is_archive": r.get("is_archive", True), "max_block_range": r.get("max_block_range"), "max_batch_size": r.get("max_batch_size")} for r in rpcs],
     "subscriptions": [{"chain_id": s["chain_id"], "collection_scope": s["collection_scope"], "contract_address": s.get("contract_address"), "start_block": s.get("start_block", 0), "realtime_enabled": s.get("realtime_enabled", 1) == 1, "min_block_window": s.get("min_block_window", 1), "max_block_window": s.get("max_block_window", 1000)} for s in subs],
     "block_transaction_sync": []
 }
@@ -946,16 +1013,17 @@ main() {
                 print_help
                 exit 0
                 ;;
-            top|status|block|log|rpc|chain|config|export|import|login|logout|whoami)
-                subcommand="$1"
+            top|status|block|log|rpc|chain|config|export|import|login|logout|whoami|tx|address)
+                if [ -z "$subcommand" ]; then
+                    subcommand="$1"
+                else
+                    sub_args+=("$1")
+                fi
                 shift
-                sub_args=("$@")
-                break
                 ;;
             *)
-                echo -e "${RED}[ERROR]${RESET} 未知参数或命令: $1"
-                print_help
-                exit 1
+                sub_args+=("$1")
+                shift
                 ;;
         esac
     done
@@ -969,18 +1037,20 @@ main() {
     fi
 
     case "$subcommand" in
-        top)    cmd_top "${sub_args[@]:-}" ;;
-        status) cmd_status "${sub_args[@]:-}" ;;
-        block)  cmd_block "${sub_args[@]:-}" ;;
-        log)    cmd_log "${sub_args[@]:-}" ;;
-        rpc)    cmd_rpc "${sub_args[@]:-}" ;;
-        chain)  cmd_chain "${sub_args[@]:-}" ;;
-        config) cmd_config "${sub_args[@]:-}" ;;
-        export) cmd_config_export "${sub_args[@]:-}" ;;
-        import) cmd_config_import "${sub_args[@]:-}" ;;
-        login)  cmd_login "${sub_args[@]:-}" ;;
-        logout) cmd_logout "${sub_args[@]:-}" ;;
-        whoami) cmd_whoami "${sub_args[@]:-}" ;;
+        top)     cmd_top "${sub_args[@]:-}" ;;
+        status)  cmd_status "${sub_args[@]:-}" ;;
+        block)   cmd_block "${sub_args[@]:-}" ;;
+        tx)      cmd_tx "${sub_args[@]:-}" ;;
+        address) cmd_address "${sub_args[@]:-}" ;;
+        log)     cmd_log "${sub_args[@]:-}" ;;
+        rpc)     cmd_rpc "${sub_args[@]:-}" ;;
+        chain)   cmd_chain "${sub_args[@]:-}" ;;
+        config)  cmd_config "${sub_args[@]:-}" ;;
+        export)  cmd_config_export "${sub_args[@]:-}" ;;
+        import)  cmd_config_import "${sub_args[@]:-}" ;;
+        login)   cmd_login "${sub_args[@]:-}" ;;
+        logout)  cmd_logout "${sub_args[@]:-}" ;;
+        whoami)  cmd_whoami "${sub_args[@]:-}" ;;
     esac
 }
 

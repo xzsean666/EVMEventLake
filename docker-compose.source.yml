@@ -34,7 +34,7 @@ services:
     image: eventlake:local
     restart: unless-stopped
     env_file:
-      - ${EVENTLAKE_ENV_FILE:-.env.example}
+      - ${EVENTLAKE_ENV_FILE:-.env}
     environment:
       EVENTLAKE_HTTP_HOST: 0.0.0.0
       EVENTLAKE_HTTP_PORT: ${EVENTLAKE_HTTP_PORT:-8080}
