@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use eventlake::rpc_pool::{
     calculate_cooldown_seconds, get_cooldown_info, get_endpoint_runtime_status,
-    reset_endpoint_cooldown_for_test, RpcEndpointRecord,
+    select_rpc_endpoint, select_weighted_round_robin, RpcEndpointRecord,
 };
 
 #[test]
@@ -20,7 +20,6 @@ fn test_calculate_cooldown_seconds_progression() {
 
 #[tokio::test]
 async fn test_in_memory_cooldown_lifecycle_with_recovery() {
-    reset_endpoint_cooldown_for_test();
     let endpoint_id = Uuid::new_v4();
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .acquire_timeout(std::time::Duration::from_millis(50))
@@ -97,3 +96,160 @@ fn test_rpc_endpoint_record_serialization_with_cooldown() {
     assert_eq!(val["cooldown_remaining_seconds"], 300);
     assert!(val["cooldown_until"].is_string());
 }
+
+fn create_mock_endpoint(id: Uuid, weight: i32) -> RpcEndpointRecord {
+    let now = Utc::now();
+    RpcEndpointRecord {
+        id,
+        chain_id: 1,
+        url: format!("https://rpc-{id}.example.com"),
+        status: "healthy".to_owned(),
+        weight,
+        latency_ms: Some(20),
+        last_check_at: Some(now),
+        failure_count: 0,
+        last_error: None,
+        created_at: now,
+        updated_at: now,
+        cooldown_until: None,
+        cooldown_remaining_seconds: None,
+    }
+}
+
+#[test]
+fn test_smooth_weighted_round_robin_equal_weights() {
+    let id_a = Uuid::new_v4();
+    let id_b = Uuid::new_v4();
+    let ep_a = create_mock_endpoint(id_a, 100);
+    let ep_b = create_mock_endpoint(id_b, 100);
+    let candidates = vec![ep_a, ep_b];
+
+    let mut selected_ids = Vec::new();
+    for _ in 0..10 {
+        let selected = select_weighted_round_robin(&candidates);
+        selected_ids.push(selected.id);
+    }
+
+    // Must alternate cleanly: A, B, A, B, A, B, A, B, A, B
+    for i in 0..10 {
+        if i % 2 == 0 {
+            assert_eq!(selected_ids[i], id_a);
+        } else {
+            assert_eq!(selected_ids[i], id_b);
+        }
+    }
+}
+
+#[test]
+fn test_smooth_weighted_round_robin_unequal_weights() {
+    let id_a = Uuid::new_v4();
+    let id_b = Uuid::new_v4();
+    let ep_a = create_mock_endpoint(id_a, 4);
+    let ep_b = create_mock_endpoint(id_b, 1);
+    let candidates = vec![ep_a, ep_b];
+
+    let mut selected_ids = Vec::new();
+    for _ in 0..5 {
+        let selected = select_weighted_round_robin(&candidates);
+        selected_ids.push(selected.id);
+    }
+
+    // Classic SWRR for 4:1 produces: A, A, B, A, A
+    assert_eq!(selected_ids, vec![id_a, id_a, id_b, id_a, id_a]);
+
+    // Count after 50 selections should be exactly 40 for A and 10 for B
+    let mut count_a = 0;
+    let mut count_b = 0;
+    for _ in 0..45 {
+        let selected = select_weighted_round_robin(&candidates);
+        if selected.id == id_a {
+            count_a += 1;
+        } else if selected.id == id_b {
+            count_b += 1;
+        }
+    }
+    // Total 50: count_a = 4 (from first 5) + 36, count_b = 1 + 9
+    assert_eq!(count_a + 4, 40);
+    assert_eq!(count_b + 1, 10);
+}
+
+#[tokio::test]
+async fn test_select_rpc_endpoint_swrr_with_sqlite_and_cooldown() -> anyhow::Result<()> {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await?;
+    eventlake::database::migrate(&pool).await?;
+
+    let chain_id = 12345;
+    sqlx::query(
+        "INSERT INTO eventlake_chains (chain_id, name, native_token_symbol) VALUES ($1, $2, $3)"
+    )
+    .bind(chain_id)
+    .bind("TestChain")
+    .bind("TEST")
+    .execute(&pool)
+    .await?;
+
+    let id_a = Uuid::new_v4();
+    let id_b = Uuid::new_v4();
+
+    // Node A: weight 80
+    sqlx::query(
+        r#"
+        INSERT INTO eventlake_rpc_endpoints (id, chain_id, url, status, weight)
+        VALUES ($1, $2, $3, 'healthy', 80)
+        "#
+    )
+    .bind(id_a)
+    .bind(chain_id)
+    .bind("https://node-a.test")
+    .execute(&pool)
+    .await?;
+
+    // Node B: weight 20
+    sqlx::query(
+        r#"
+        INSERT INTO eventlake_rpc_endpoints (id, chain_id, url, status, weight)
+        VALUES ($1, $2, $3, 'healthy', 20)
+        "#
+    )
+    .bind(id_b)
+    .bind(chain_id)
+    .bind("https://node-b.test")
+    .execute(&pool)
+    .await?;
+
+    // Test 1: Both nodes healthy -> 10 requests should distribute 8 to A and 2 to B (ratio 4:1)
+    let mut counts = std::collections::HashMap::new();
+    for _ in 0..10 {
+        let ep = select_rpc_endpoint(&pool, chain_id).await?;
+        *counts.entry(ep.id).or_insert(0) += 1;
+    }
+    assert_eq!(counts.get(&id_a).copied().unwrap_or(0), 8);
+    assert_eq!(counts.get(&id_b).copied().unwrap_or(0), 2);
+
+    // Test 2: Node A fails -> enters cooldown
+    eventlake::rpc_pool::mark_rpc_failure(&pool, id_a, "timeout error").await?;
+
+    // Next 5 requests must all be served by Node B
+    for _ in 0..5 {
+        let ep = select_rpc_endpoint(&pool, chain_id).await?;
+        assert_eq!(ep.id, id_b);
+    }
+
+    // Test 3: Node A recovers -> clears cooldown
+    eventlake::rpc_pool::mark_rpc_success(&pool, id_a).await?;
+
+    // Next 10 requests should resume SWRR sharing between A and B
+    let mut resumed_counts = std::collections::HashMap::new();
+    for _ in 0..10 {
+        let ep = select_rpc_endpoint(&pool, chain_id).await?;
+        *resumed_counts.entry(ep.id).or_insert(0) += 1;
+    }
+    assert!(resumed_counts.get(&id_a).copied().unwrap_or(0) > 0);
+    assert!(resumed_counts.get(&id_b).copied().unwrap_or(0) > 0);
+
+    Ok(())
+}
+

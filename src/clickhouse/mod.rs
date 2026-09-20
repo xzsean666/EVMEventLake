@@ -1,6 +1,7 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use clickhouse::{Client, Row};
+pub use clickhouse::Client;
+use clickhouse::Row;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;

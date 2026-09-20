@@ -11,10 +11,6 @@
             <async_insert_max_data_size>10485760</async_insert_max_data_size>
             <!-- 在数据采集管道中关闭微批查询日志记录，从源头切断 query_log 写入放大 -->
             <log_queries>0</log_queries>
-            <!-- 针对会话放宽单个分区未合并 parts 容忍度 -->
-            <parts_to_delay_insert>300</parts_to_delay_insert>
-            <parts_to_throw_insert>600</parts_to_throw_insert>
-            <max_delay_to_insert>1</max_delay_to_insert>
         </default>
     </profiles>
 </clickhouse>

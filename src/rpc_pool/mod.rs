@@ -50,10 +50,62 @@ pub struct EndpointRuntimeStatus {
     pub cooldown_until: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
     pub last_success_at: Option<DateTime<Utc>>,
+    pub current_weight: i32,
 }
 
 static ENDPOINT_RUNTIME_STATES: LazyLock<RwLock<HashMap<Uuid, EndpointRuntimeStatus>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Selects an RPC endpoint from a non-empty list of candidate records using
+/// the Smooth Weighted Round-Robin (SWRR) algorithm.
+///
+/// Each step:
+/// 1. For each candidate i: current_weight[i] += effective_weight[i]
+/// 2. Pick candidate k with the maximum current_weight[k]
+/// 3. current_weight[k] -= total_weight
+///
+/// This provides a perfectly smooth, interleaved distribution without clustering
+/// and ensures all healthy endpoints receive traffic proportional to their configured weight.
+pub fn select_weighted_round_robin(candidates: &[RpcEndpointRecord]) -> RpcEndpointRecord {
+    if candidates.is_empty() {
+        panic!("select_weighted_round_robin called with empty candidates");
+    }
+    if candidates.len() == 1 {
+        return candidates[0].clone();
+    }
+
+    let mut cache = ENDPOINT_RUNTIME_STATES
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let total_weight: i32 = candidates
+        .iter()
+        .map(|ep| ep.weight.max(1))
+        .fold(0i32, |acc, w| acc.saturating_add(w));
+
+    let mut best_id = candidates[0].id;
+    let mut best_weight = i32::MIN;
+
+    for ep in candidates {
+        let entry = cache.entry(ep.id).or_default();
+        let effective_weight = ep.weight.max(1);
+        entry.current_weight = entry.current_weight.saturating_add(effective_weight);
+        if entry.current_weight > best_weight {
+            best_weight = entry.current_weight;
+            best_id = ep.id;
+        }
+    }
+
+    if let Some(selected_entry) = cache.get_mut(&best_id) {
+        selected_entry.current_weight = selected_entry.current_weight.saturating_sub(total_weight);
+    }
+
+    candidates
+        .iter()
+        .find(|ep| ep.id == best_id)
+        .cloned()
+        .unwrap_or_else(|| candidates[0].clone())
+}
 
 pub fn get_cooldown_info(
     endpoint_id: &Uuid,
@@ -380,26 +432,26 @@ pub async fn select_rpc_endpoint(
         ep.cooldown_remaining_seconds = remaining;
     }
 
-    // 1. Healthy / enabled endpoints that are NOT in CD
-    let mut available: Vec<_> = endpoints
+    // 1. Healthy / enabled endpoints that are NOT in CD: dispatch proportionally via SWRR
+    let available: Vec<_> = endpoints
         .iter()
         .filter(|ep| ep.cooldown_remaining_seconds.is_none() && (ep.status == "enabled" || ep.status == "healthy"))
         .cloned()
         .collect();
 
     if !available.is_empty() {
-        return Ok(available.remove(0));
+        return Ok(select_weighted_round_robin(&available));
     }
 
-    // 2. Any non-disabled endpoint that is NOT in CD (e.g. status was marked 'unhealthy' in DB but CD passed)
-    let mut non_cd: Vec<_> = endpoints
+    // 2. Any non-disabled endpoint that is NOT in CD: dispatch proportionally via SWRR
+    let non_cd: Vec<_> = endpoints
         .iter()
         .filter(|ep| ep.cooldown_remaining_seconds.is_none())
         .cloned()
         .collect();
 
     if !non_cd.is_empty() {
-        return Ok(non_cd.remove(0));
+        return Ok(select_weighted_round_robin(&non_cd));
     }
 
     // 3. Fallback: all candidate endpoints are in CD. Choose the one with the shortest remaining CD

@@ -7,10 +7,12 @@ set -euo pipefail
 
 TEST_DIR="$(mktemp -d -t eventlake_backup_test_XXXXXX)"
 trap 'rm -rf "${TEST_DIR}"' EXIT
+chmod 777 "${TEST_DIR}"
 
 DB_FILE="${TEST_DIR}/test_eventlake.db"
 BACKUP_DIR="${TEST_DIR}/backups"
 mkdir -p "${BACKUP_DIR}"
+chmod 777 "${BACKUP_DIR}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -27,7 +29,12 @@ con.close()
 
 export EVENTLAKE_DATABASE_URL="sqlite://${DB_FILE}?mode=rwc"
 export BACKUP_DIR="${BACKUP_DIR}"
-export EVENTLAKE_CLICKHOUSE_ENABLED="false"
+if curl -s -m 2 "http://127.0.0.1:8123/ping" | grep -q "Ok"; then
+    export EVENTLAKE_CLICKHOUSE_ENABLED="true"
+    export EVENTLAKE_CLICKHOUSE_URL="${EVENTLAKE_CLICKHOUSE_URL:-http://eventlake:eventlake@127.0.0.1:8123/eventlake}"
+else
+    export EVENTLAKE_CLICKHOUSE_ENABLED="false"
+fi
 export BACKUP_RETENTION_DAYS=7
 
 echo "==> Step 1: Performing full local backup..."

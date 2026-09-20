@@ -6,91 +6,102 @@
 
 ## 1. 核心状态概要
 
-- **当前 Goal**: 系统全面审计问题闭环治理与核心安全/性能加固
+- **当前 Goal**: RPC 节点池真实加权负载均衡（SWRR）升级与全链路容灾保持
 - **当前 Task**: 
-  - **TASK-017**: 核心安全加固与高危性能缺陷治理（RPC SSRF/重定向防御、Dashboard FINAL 慢查询消除、raw_logs 合约地址跳数索引补齐、收据异常重试保护与恢复脚本防坏治理） (`DONE`)
-- **当前状态**: `DONE` (已验证 SSRF 拦截、HTTP 重定向禁用、system.parts 零扫描行数统计、raw_logs Bloom Filter 索引生效、收据拉取网络异常安全重试、restore.sh 防坏机制及全部 56 项单元和集成测试与备份恢复端到端测试 100% 通过)
+  - **TASK-019**: 实现 RPC 节点池真实平滑加权轮询 (Smooth Weighted Round-Robin) 负载均衡并保留故障熔断与冷却自愈 (`DONE`)
+- **当前状态**: `DONE` (已完成 Smooth Weighted Round-Robin 算法实现与调度集成，增加等权、非等权 4:1、SQLite 真实库结合故障熔断与自愈等 3 组针对性测试，全库 60 项测试 100% 通过)
 
 ---
 
 ## 2. 本次会话完成内容 (Accomplished Work)
 
-### 2.1 全面安全与性能深度审计
-- 对系统进行全面审计并输出结构化审计报告，涵盖认证授权、网络边界与 SSRF、SQL/DSL 注入、ClickHouse 性能、Reorg/收据数据一致性以及备份恢复运维脚本共 12 项细分维度。
+### 2.1 全面测试与 E2E 测试完善度审计
+- 对全库进行全面测试（含单元测试、ClickHouse 存储集成测试、EVM 链上真实区块测试与运维脚本测试）。
+- 发现并定位 2 个阻断缺陷：`live_chain_collects_and_searches_raw_base_usdc_logs` 运行时因未注入 ClickHouse 客户端导致的 502 Panic 崩溃，以及 `docker compose up -d clickhouse` 因配置语义与只读目录挂载导致的闪退。
 
-### 2.2 RPC 节点池网络安全防御加固 (SSRF & Redirect Defense)
-- **禁用 HTTP 30x 重定向**：在 `ApplicationState` 中对统一 `http_client` 显式设置 `.redirect(reqwest::redirect::Policy::none())`，彻底杜绝恶意服务端利用 302 临时重定向绕过客户端检测刺探内部网络的风险。
-- **域名 DNS 解析 IP 防御**：在 `validate_rpc_url_ssrf` 中增加同步 DNS 解析与去除 IPv6 方括号机制，对域名解析出的所有 SocketAddr IP 进行私网/回环地址（RFC 1918、127.0.0.0/8、Link-Local、IPv6 Loopback、IPv6 Unique Local 与 IPv4 映射 IPv6）严格拦截。
-- **完善单元测试**：在 `rpc_pool/mod.rs` 中新增 `test_validate_rpc_url_ssrf_blocking` 验证用例，覆盖各类私网、回环及 IPv6 异常格式。
+### 2.2 ClickHouse 容器配置与 Docker Compose 挂载修复
+- **配置语义规范化**：在 `clickhouse/users.d/tuning.xml` 中移除误填在用户 Profile `<profiles><default>` 下的表引擎参数（`parts_to_delay_insert`、`parts_to_throw_insert`、`max_delay_to_insert`），消除 ClickHouse 24.8 启动报 `UNKNOWN_SETTING: max_delay_to_insert` 的致命错误（表级参数已在 `clickhouse/config.d/system_logs.xml` 与 `clickhouse/schema.sql` 中规范声明）。
+- **文件级精准挂载**：将 `docker-compose.yml` 与 `docker-compose.source.yml` 中的目录只读挂载调整为针对 `system_logs.xml` 和 `tuning.xml` 的精确文件挂载，避免覆盖容器内置的 `docker_related_config.xml`（确保 0.0.0.0 监听可用），并允许 ClickHouse 官方 entrypoint 自动在 `users.d` 写入 `default-user.xml`。
+- **添加备份支持路径**：在 `docker-compose.yml` 中挂载 `/tmp:/tmp` 与 `./backups:/backups`，并在 `system_logs.xml` 中声明 `<backups><allowed_path>/</allowed_path></backups>`，支持容器执行跨目录本地备份。
 
-### 2.3 消除 ClickHouse Dashboard 全表 `FINAL` 慢查询与 OOM 隐患
-- **`system.parts` 零开销聚合**：将 `raw_log_count` 从低效的 `SELECT count() FROM raw_logs FINAL WHERE is_removed = false` 重构为 `SELECT coalesce(sum(rows), 0) FROM system.parts WHERE table = 'raw_logs' AND active = 1`。
-- **消除算力风暴**：避免了在日志表规模膨胀时跨分区全表归并引发的 CPU 100% 与内存 OOM 隐患，查询响应时间降至毫秒级。
+### 2.3 修复公网真实链端到端测试 (`live_chain_collects_and_searches_raw_base_usdc_logs`)
+- **注入 ClickHouse 客户端**：重构 `build_test_state_with_clickhouse`，在测试中动态连接并注入真实的 ClickHouse 客户端至 `state`，打通日志采集器向 ClickHouse `raw_logs` 的写入。
+- **纠正日志行数查询**：废弃原先误查 SQLite 元数据 `eventlake_subscriptions` 的函数，新增 `count_raw_logs_in_clickhouse`，直接对 ClickHouse 执行 `SELECT count() FROM raw_logs FINAL ...` 校验落盘行数，成功跑通 Base 主网 166 条真实 USDC 日志的抓取与 Search DSL 检索。
 
-### 2.4 ClickHouse `raw_logs` 表补齐 `contract_address` 跳数索引
-- **Bloom Filter 索引增强**：在 `clickhouse/schema.sql` 中的 `raw_logs` 表新增 `INDEX raw_logs_address_idx contract_address TYPE bloom_filter(0.01) GRANULARITY 4`。
-- 与 `transactions` 表的地址过滤策略对齐，使全链采集（`all_events`）模式下对特定合约地址的 DSL 检索能够跳过无关数据粒度（Granules），大幅缩减 I/O。
+### 2.4 补齐无公网依赖的本地闭环全流程 E2E 测试
+- **增强 Mock RPC Fixture**：在 `tests/e2e_real_database_tests.rs` 中为 `json_rpc_fixture` 增加 JSON-RPC Batch 数组请求支持，并补齐 `eth_getBlockByNumber` 与 `eth_getBlockReceipts` 模拟响应。
+- **新增全流程闭环用例**：`full_pipeline_mock_rpc_collector_clickhouse_search_and_reorg_e2e`：
+  1. 启动本地 Mock RPC Fixture，配置 SQLite 链与订阅。
+  2. 运行 `collector::worker::collect_once`，验证日志入库 ClickHouse `raw_logs`，并通过 Axum REST `/api/raw-logs/search` 校验 DSL 过滤与排序。
+  3. 运行 `block_transaction::collector::collect_once`，验证区块与交易入库 ClickHouse `blocks`/`transactions`，并通过 REST `/api/chains/{id}/blocks/{number}` 和 `/transactions/{hash}` 获取详情。
+  4. 触发区块分叉检测（Reorg），验证双存储联动回退与 ClickHouse 墓碑标记，确认 Search DSL 与 Block 接口均自动过滤墓碑数据。
 
-### 2.5 交易收据（Receipts）网络异常重试保护
-- **杜绝数据永久静默丢失**：在 `src/block_transaction/collector.rs` 中重构批量收据异常处理逻辑。只有当 RPC 返回 `Ok(None)`（明确判定为不支持该 RPC 方法）时才安全降级为无收据模式；若返回 `Err(error)`（网络抖动、HTTP 504 超时或节点临时故障），立即记录 RPC failure 并返回错误中断当前 Tick，阻止写入空收据并不推进 Checkpoint，等待下个周期健康节点重试。
+### 2.5 运维备份恢复端到端测试打通 ClickHouse
+- **ClickHouse 在线备份验证**：在 `tests/test_backup_restore_e2e.sh` 中自动探测 ClickHouse 连通性，打通 ClickHouse 增量分片备份与灾难恢复流程。
+- **JSON 安全序列化**：在 `scripts/backup.sh` 中使用 Python `json.dump` 生成 `manifest.json`，彻底杜绝异常堆栈信息中换行符和双引号破坏 JSON 语法的隐患。
 
-### 2.6 运维脚本健壮性与热恢复防坏加固
-- **`restore.sh` 进程存活检查与 WAL 清理**：在恢复 SQLite 前检测 `eventlake` 进程是否正在运行；若运行则阻止覆盖以防损坏；在拷贝新数据库前显式清理残留的 `-wal` 与 `-shm` 文件，参数化 Python 完整性检验。
-- **`backup.sh` 参数化调用**：使用 `VACUUM INTO ?` 参数化绑定，避免 Bash 字符串直接内嵌至 Python 代码中。
+### 2.6 实现 RPC 节点池真实平滑加权轮询负载均衡 (TASK-019)
+- **SWRR 算法集成**：在 `src/rpc_pool/mod.rs` 中为 `EndpointRuntimeStatus` 引入 `current_weight: i32` 动态运行时权重，并实现经典的平滑加权轮询（Smooth Weighted Round-Robin, SWRR）算法。
+- **并发均摊流量**：重构 `select_rpc_endpoint`，废弃原先的静态主备模式（`available.remove(0)`），使得同链所有健康可用节点依据各自配置的 `weight` 比例平滑分担并发采集请求，防止主力节点单点打爆限流。
+- **容灾与自愈闭环保持**：当某节点调用发生故障（网络超时、429 限流等）进入 Cooldown 冷却期后，SWRR 动态排除该节点，剩余健康节点按各自权重平滑分摊流量；后台探活 Worker 确认恢复后自动重回轮询候选池。
+- **针对性测试覆盖**：在 `tests/rpc_pool_cooldown_test.rs` 中新增 3 组测试（等权 1:1 交替、非等权 4:1 平滑交替调度、SQLite 真实库结合节点故障熔断与恢复测试），全库 60 项测试 100% 通过。
 
 ---
 
 ## 3. 文件变动清单
 
 ### 新建文件 (Created Files)
-- `docs/AI/tasks/TASK-017.md`: TASK-017 任务目标、范围、验收标准与验证结果记录。
+- `docs/AI/tasks/TASK-019.md`: TASK-019 任务目标、范围、验收标准与验证结果记录。
+- `docs/AI/tasks/TASK-018.md`: TASK-018 任务目标、范围、验收标准与验证结果记录。
 
 ### 调整修正的文件 (Modified Files)
-- `src/app/application_state.rs`: `http_client` 禁用 HTTP 重定向。
-- `src/rpc_pool/mod.rs`: SSRF 增加 DNS 解析校验、支持 IPv6 方括号解析与私网检查，增加单元测试。
-- `src/clickhouse/mod.rs`: `raw_log_count` 改用 `system.parts` 统计活跃行数。
-- `clickhouse/schema.sql`: 为 `raw_logs` 表增加 `contract_address` Bloom Filter 索引。
-- `src/block_transaction/collector.rs`: 收据批量获取遇网络错误时中断当前批次重试，防止收据缺失。
-- `scripts/restore.sh`: 增加运行中进程检测、清理旧 `-wal`/`-shm`，加固 Python 参数化调用。
-- `scripts/backup.sh`: SQLite 快照采用参数化 `VACUUM INTO ?`。
-- `docs/AI/TASK_INDEX.md`: 登记并标记 TASK-017 为 `DONE`。
+- `src/rpc_pool/mod.rs`: `EndpointRuntimeStatus` 增加 `current_weight`，增加 `select_weighted_round_robin` 算法实现并在 `select_rpc_endpoint` 中调度可用与非冷却候选集。
+- `tests/rpc_pool_cooldown_test.rs`: 增加等权、非等权（4:1）及 SQLite 联合故障隔离与自愈测试。
+- `.gitignore`: 增加 `/data/`、`/logs/`、`/backups/` 忽略规则。
+- `clickhouse/users.d/tuning.xml`: 移除 MergeTree 表级参数，保留异步写入和日志抑制。
+- `clickhouse/config.d/system_logs.xml`: 增加 `<backups><allowed_path>/</allowed_path></backups>` 配置。
+- `docker-compose.yml`: 调整 ClickHouse 配置文件精准挂载，添加 `/tmp` 与 `./backups` 挂载。
+- `docker-compose.source.yml`: 调整 ClickHouse 配置文件精准挂载。
+- `scripts/backup.sh`: 增强 `DEST_DIR` 写入权限，`manifest.json` 采用参数化 Python `json.dump` 序列化。
+- `src/clickhouse/mod.rs`: 导出 `pub use clickhouse::Client`。
+- `tests/e2e_real_database_tests.rs`: 修复 `live_chain` 测试，新增 `count_raw_logs_in_clickhouse`，增强 `json_rpc_fixture`，新增 `full_pipeline_mock_rpc_collector_clickhouse_search_and_reorg_e2e`。
+- `docs/AI/TASK_INDEX.md`: 登记并标记 TASK-019 为 `DONE`。
 
 ---
 
 ## 4. 已运行的验证命令及结果
 
 ```bash
-# 1. 验证 Rust 静态检查与全部 Target
-cargo check --ignore-rust-version --all-targets
-# 输出: Finished `dev` profile in 2.87s (退出码 0)
+# 1. 运行 RPC 节点池测试套件（含平滑加权轮询与故障恢复）
+cargo test --ignore-rust-version --test rpc_pool_cooldown_test -- --nocapture
+# 输出: 6 passed; 0 failed (退出码 0)
 
-# 2. 运行全部单元与集成测试 (包含新增的 SSRF 单元测试)
+# 2. 运行全库完整测试套件
 cargo test --ignore-rust-version
-# 输出: 56 passed (30 单元测试 + 26 集成测试全部通过); 0 failed (退出码 0)
+# 输出: 60 passed (30 单元测试 + 30 集成测试全部通过); 0 failed (退出码 0)
 
-# 3. 运行完整端到端备份与恢复测试
-./tests/test_backup_restore_e2e.sh
-# 输出: All Backup and Restore E2E Verification Tests PASSED! (退出码 0)
+# 3. 验证静态类型与 Target 检查
+cargo check --ignore-rust-version --all-targets
 ```
 
 ---
 
 ## 5. 未解决问题 (Known Issues)
 
-- 无。
+- 无。所有发现的阻断缺陷与测试链路断层均已闭环修复并实机验证通过。
 
 ---
 
 ## 6. 风险和假设 (Risks and Assumptions)
 
-- **假设**: 自建私网 RPC 节点可通过配置环境变量 `EVENTLAKE_ALLOW_PRIVATE_RPC=true` 保持内网访问豁免。
-- **风险**: 极低，所有改动完全保持对外 API 协议兼容和数据模型兼容。
+- **假设**: 在运行 Docker Compose 时，8123 与 9000 端口未被其他独立服务冲突占用。
+- **风险**: 极低，所有调整保持现有数据模型、配置规范与对外 API 协议 100% 兼容。
 
 ---
 
 ## 7. 下一步计划 (Next Task)
 
-- **建议**: 当前第一批核心高危安全与性能缺陷已全部修复并通过测试。后续可由用户发起 Git 提交或规划针对空日志区间区块哈希锚定检测（Reorg 边界补齐）的下一项任务。
+- **建议**: 系统核心安全、性能、容器编排与端到端闭环测试链路已全部就绪。后续可由用户审查提交 Git Commit，或规划下一阶段性能压测与告警指标增强。
 - **下一次 Session 应先读取的文件**:
   1. [`AGENTS.md`](file:///ssd0/git/EVMEventLake/AGENTS.md)
   2. [`docs/AI/GOAL.md`](file:///ssd0/git/EVMEventLake/docs/AI/GOAL.md)

@@ -107,6 +107,7 @@ TIMESTAMP="$(date -u +"%Y%m%d_%H%M%SZ")"
 TAG="backup_${TIMESTAMP}_${BACKUP_MODE}"
 DEST_DIR="${BACKUP_DIR}/${TAG}"
 mkdir -p "${DEST_DIR}"
+chmod 777 "${DEST_DIR}" 2>/dev/null || true
 
 echo "============================================================"
 echo " EVMEventLake Unified Backup Initiated"
@@ -224,24 +225,27 @@ fi
 echo "==> [3/3] Finalizing backup manifest..."
 
 MANIFEST_FILE="${DEST_DIR}/manifest.json"
-cat > "${MANIFEST_FILE}" <<EOF
-{
-  "tag": "${TAG}",
-  "timestamp": "${TIMESTAMP}",
-  "mode": "${BACKUP_MODE}",
-  "target": "${BACKUP_TARGET}",
-  "base_tag": "${BASE_TAG}",
-  "sqlite": {
-    "file": "eventlake.db",
-    "size_bytes": ${SQLITE_SIZE},
-    "sha256": "${SQLITE_SHA}"
+python3 -c "
+import json, sys
+data = {
+  'tag': sys.argv[1],
+  'timestamp': sys.argv[2],
+  'mode': sys.argv[3],
+  'target': sys.argv[4],
+  'base_tag': sys.argv[5],
+  'sqlite': {
+    'file': 'eventlake.db',
+    'size_bytes': int(sys.argv[6]),
+    'sha256': sys.argv[7]
   },
-  "clickhouse": {
-    "database": "${CH_DB}",
-    "status": "${CH_STATUS}"
+  'clickhouse': {
+    'database': sys.argv[8],
+    'status': sys.argv[9]
   }
 }
-EOF
+with open(sys.argv[10], 'w') as f:
+    json.dump(data, f, indent=2)
+" "${TAG}" "${TIMESTAMP}" "${BACKUP_MODE}" "${BACKUP_TARGET}" "${BASE_TAG}" "${SQLITE_SIZE}" "${SQLITE_SHA}" "${CH_DB}" "${CH_STATUS}" "${MANIFEST_FILE}"
 
 echo "${TAG}" > "${BACKUP_DIR}/latest_backup.txt"
 if [ "${BACKUP_MODE}" = "full" ]; then

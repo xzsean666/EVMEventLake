@@ -43,4 +43,9 @@
         <parts_to_throw_insert>600</parts_to_throw_insert>
         <max_delay_to_insert>1</max_delay_to_insert>
     </merge_tree>
+
+    <!-- 允许本地备份写入任意目标挂载路径 -->
+    <backups>
+        <allowed_path>/</allowed_path>
+    </backups>
 </clickhouse>
