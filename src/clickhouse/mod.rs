@@ -23,8 +23,13 @@ const SCHEMA: &str = include_str!("../../clickhouse/schema.sql");
 
 pub mod block_transaction;
 pub use block_transaction::{
-    BlockRow, TransactionRow, get_address_transactions, get_block_by_hash, get_block_by_number,
-    get_block_transactions, get_transaction_by_hash, invalidate_blocks_and_transactions_from_block,
+    AddressProfileRow, BaseFeeRow, BlockGasConsumerRow, BlockRow, BlockTimeRangeRow,
+    GasOraclePriorityFeesRow, NetworkStatsAggRow, TopContractRow, TransactionRow, TxStatusRow,
+    get_address_profile, get_address_transactions, get_block_by_hash, get_block_by_number,
+    get_block_by_timestamp, get_block_gas_consumers, get_block_transactions,
+    get_blocks_time_range, get_contract_deployments, get_failed_transactions, get_gas_oracle,
+    get_network_stats, get_top_contracts, get_transaction_by_hash, get_transaction_status,
+    get_whale_transfers, invalidate_blocks_and_transactions_from_block,
     write_blocks_and_transactions,
 };
 

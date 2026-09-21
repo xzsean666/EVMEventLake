@@ -8,6 +8,8 @@
 
 - **当前 Goal**: 建设与完善生产运维与业务落地全流程支持体系
 - **当前 Task**: 
+  - **TASK-030**: 扩展高级链上分析 API (区块用户 Gas 排行、Gas Oracle、网络统计、巨鲸转账、热门合约与失败交易) (`DONE`)
+  - **TASK-029**: 扩展实用区块与交易分析 API (时间查块、时间区间、交易确认数、地址画像与合约部署) (`DONE`)
   - **TASK-028**: 基于可用 RPC 动态并发与节点能力自适应切片流水线 (`DONE`)
   - **TASK-027**: 区块与交易多节点并发分片抓取流水线与切片故障自愈顶替机制 (`DONE`)
   - **TASK-026**: RPC 节点能力感知、Archive/普通节点分流调度与合约 Logs 动态切片策略 (`DONE`)
@@ -17,7 +19,7 @@
   - **TASK-022**: 服务端区块交易常驻解耦与独立纯 Shell 客户端 (lakectl) (`DONE`)
   - **TASK-021**: 完善部署后全流程业务使用与下游集成指南 (USAGE.md) (`DONE`)
   - **TASK-020**: 远程一键部署自动化脚本 (deploy-remote.sh) 与部署文档支持 (`DONE`)
-- **当前状态**: `DONE` (已完成基于可用 RPC 动态并发、节点吞吐能力自适应切片流水线与全节点算力释放)
+- **当前状态**: `DONE` (已完成 6 个高级链上分析与监控 API 的实现、OpenAPI 声明与 ClickHouse 集成测试验证，全库 65 个测试 100% 通过)
 
 ---
 
@@ -205,11 +207,69 @@
     - **故障隔离自愈验证**：公共节点 `https://rpc.nodeflare.app/soneium/public` 返回 403 Forbidden，系统自动探活检测并标记 `unhealthy` 实施阶梯冷却；其余 7 个节点平滑分摊算力，切片故障自愈顶替机制无感生效，业务无漏块、无报错中断。
     - **运维控制实测**：`lakectl block pause 1868` 与 `lakectl block resume 1868` 断点续传平滑无缝；`lakectl rpc check` 正确测试所有端点并输出毫秒级延迟；`lakectl export` 完整逆向导出集群全量状态。
 
+### 2.19 ClickHouse 深度日志收敛与磁盘防爆治理 (Warning 级别调优、20M 轮转、1 天 TTL 与历史释放)
+- **文件日志极致收敛 (`<logger>`)**：在 `clickhouse/config.d/system_logs.xml` 中显式配置 `<logger>`，将文件日志级别提升至 `warning`（彻底去除 `trace`/`debug`/`information` 等常规信息，仅记录警告与错误），并将单文件上限压缩至 `20M`，仅保留 `1` 份轮转。
+- **系统表保留期统一缩短为 1 天**：
+  - 将 `query_log`、`part_log`、`text_log`、`metric_log`、`asynchronous_metric_log`、`asynchronous_insert_log` 的 TTL 统一配置为 `event_date + INTERVAL 1 DAY DELETE`。
+  - 在 `<text_log>` 中同样配置 `<level>warning</level>`，杜绝内部常规信息注入系统审计表。
+- **彻底移除冗余高频审计日志**：
+  - 增加 `<processors_profile_log remove="1"/>` 与 `<opentelemetry_span_log remove="1"/>`，连同已有的 `<trace_log remove="1"/>`，根除高频写入下的无用内部采样开销。
+- **远程服务器实机落地与历史空间释放**：
+  - 同步配置文件至 `192.168.31.33`，截断历史 391MB 的 `clickhouse-server.log`，清空历史积压系统表并重启生效。
+  - **优化成效**：
+    - 项目整体磁盘占用由 **1016 MB** 骤降至 **504 MB**（降幅达 **50.4%**）；
+    - `logs/clickhouse` 目录占用由 **391 MB** 降至 **216 KB**（其中活跃日志仅 **31 KB**，降幅 **>99.9%**）；
+    - `system.text_log` 由 188 万行 (67 MB) 压缩表骤降至数十行警告信息；
+    - ClickHouse 容器与服务秒级恢复 `healthy`，API 连通与区块采集无缝持续运行。
+- **规范与指南文档同步更新**：
+  - 全面更新 [`docs/AI_CLICKHOUSE_DIRECTIVE.md`](file:///ssd0/git/EVMEventLake/docs/AI_CLICKHOUSE_DIRECTIVE.md) 与 [`docs/CLICKHOUSE_OPTIMIZATION_GUIDE.md`](file:///ssd0/git/EVMEventLake/docs/CLICKHOUSE_OPTIMIZATION_GUIDE.md)。
+
+### 2.20 扩展实用区块与交易分析 API (TASK-029)
+- **落地 5 个高价值实用 REST API**：
+  1. **按时间戳查最近区块 (`GET /api/chains/{chain_id}/block-by-time`)**：
+     - 支持 `timestamp` 与 `closest` (`before` / `after`)，秒级在 ClickHouse 中根据时间戳定位就近规范区块，自动过滤 Reorg 产生的分叉区块。
+  2. **时间区间转区块高度 (`GET /api/chains/{chain_id}/blocks-time-range`)**：
+     - 支持输入秒级起止时间戳 `start_time` 与 `end_time`，利用 `minOrNull`/`maxOrNull` 聚合返回对应区间的最小高度、最大高度以及总出块数 `block_count`。
+  3. **轻量交易确认数与状态 (`GET /api/chains/{chain_id}/transactions/{tx_hash}/status`)**：
+     - 单次查询返回交易执行状态 `status` (1/0)、Gas 消耗、所在区块高度、当前链顶高度 `current_head` 与精确确认数 `confirmations`。
+  4. **地址轻量画像 (`GET /api/chains/{chain_id}/addresses/{address}/profile`)**：
+     - 一条 SQL 高效聚合地址的首次活跃高度 `first_block`、最近活跃高度 `last_block`、作为发送方交易数 `sent_tx_count`、作为接收方交易数 `received_tx_count` 以及最后使用的 `last_nonce`。
+  5. **合约部署（打新）交易发现 (`GET /api/chains/{chain_id}/deployments`)**：
+     - 基于 EVM 合约部署特征（`to_address IS NULL`），高效检索全网或指定创建者 `creator` 的合约创建交易列表，支持完整 keyset 游标分页。
+- **SQLite RPC 节点幂等种子化修复 (`src/rpc_pool/mod.rs`)**：
+  - 在 `ON CONFLICT (chain_id, url) DO UPDATE SET` 增加 `WHERE` 变更对比条件，消除重复执行种子化时非必要的行更新，确保幂等重复种子化返回 0 影响行数。
+- **全量测试与实时 ClickHouse 集成测试验证**：
+  - 在 `tests/block_transaction_test.rs` 增加模型序列化与参数校验单元测试；
+  - 在 `tests/clickhouse_integration_tests.rs` 增加 5 个新端点基于真实 ClickHouse 容器的端到端集成测试；
+  - 全库 64 个测试 100% 通过（含单元测试、ClickHouse 存储测试、E2E 测试、真实链测试与 RPC 节点池调度测试）。
+
+### 2.21 扩展高级链上分析与监控 API (TASK-030)
+- **落地 6 个高级链上分析与监控 REST API**：
+  1. **区块内用户 Gas 消耗排行榜 (`GET /api/chains/{chain_id}/blocks/{block_ref}/gas-consumers`)**：
+     - 单次查询聚合区块内所有交易，按 `from_address` 汇总各用户总消耗的 Gas（`total_gas_used`）及交易笔数（`tx_count`），降序排列，直观洞察区块 Gas 巨鲸。
+  2. **实时 Gas 预测器 (`GET /api/chains/{chain_id}/gas-oracle`)**：
+     - 基于最新区块 `base_fee_per_gas` 及最近 20 个区块交易的优先费分位数（20th 慢速、50th 正常、80th 快速），自动估算建议的 `max_priority_fee_per_gas` 与 `max_fee_per_gas`。
+  3. **实时网络健康统计 (`GET /api/chains/{chain_id}/network-stats`)**：
+     - 单条高效聚合查询返回当前链最新高度、时间戳、最近 1 小时 TPS（`tps_last_1h`）、最近 100 块平均 Gas 饱和度（`avg_gas_utilization_percent`）以及平均出块耗时（`avg_block_time_seconds`）。
+  4. **大额巨鲸转账监控 (`GET /api/chains/{chain_id}/whale-transfers`)**：
+     - 基于 ClickHouse `toUInt256OrZero(value)` 大数运算筛选转账金额 $\ge$ `min_value`（默认 1 ETH）的交易流，支持完全防篡改的不透明游标 keyset 分页。
+  5. **热门合约排行榜 (`GET /api/chains/{chain_id}/top-contracts`)**：
+     - 在指定滑窗区块数（`window_blocks`，默认 1000）内，按被调用合约地址聚合统计调用量（`tx_count`）、独立交互用户数（`user_count`）及总消耗 Gas（`total_gas_used`）。
+  6. **失败交易排查流 (`GET /api/chains/{chain_id}/failed-transactions`)**：
+     - 筛选 `status = 0` 的执行失败交易流，支持游标 keyset 分页，便于监控异常合约或网络拥堵引发的 revert 峰值。
+- **全量测试与实时 ClickHouse 集成测试验证**：
+  - 在 `tests/block_transaction_test.rs` 增加高级模型单元测试；
+  - 在 `tests/clickhouse_integration_tests.rs` 增加 6 个新端点基于真实 ClickHouse 容器的端到端集成测试，严格校验排行顺序、百分比与游标分页；
+  - 全库 65 个测试 100% 通过；
+  - 编译更新本地 Release 优化版本至 `deploy/prebuilt/eventlake`。
+
 ---
 
 ## 3. 文件变动清单
 
 ### 新建文件 (Created Files)
+- `docs/AI/tasks/TASK-030.md`: TASK-030 任务目标、范围、验收标准与验证结果记录。
+- `docs/AI/tasks/TASK-029.md`: TASK-029 任务目标、范围、验收标准与验证结果记录。
 - `config/soneium_blocks_transactions.json`: Soneium 专属声明式导入配置（仅同步区块与交易）。
 - `docs/AI/tasks/TASK-028.md`: TASK-028 任务目标、范围、验收标准与验证结果记录。
 - `docs/AI/tasks/TASK-027.md`: TASK-027 任务目标、范围、验收标准与验证结果记录。
@@ -217,20 +277,13 @@
 - `docs/AI/tasks/TASK-025.md`: TASK-025 任务目标、范围、验收标准与验证结果记录。
 
 ### 调整修正的文件 (Modified Files)
-- `scripts/deploy-remote.sh`: 修复远端持久化 SQLite 目录权限 (`chmod -R 777`)，对齐 `.env` 环境变量导出与 rsync 文件规则。
-- `scripts/lakectl`: 升级全局选项任意位置解析能力，并在配置导出中补全节点能力字段。
-- `docker-compose.yml`: 将 `env_file` 默认值对齐为 `${EVENTLAKE_ENV_FILE:-.env}`。
-- `docker-compose.source.yml`: 将 `env_file` 默认值对齐为 `${EVENTLAKE_ENV_FILE:-.env}`。
-- `src/rpc_pool/mod.rs`: 提取并公开 `get_available_rpc_endpoints_with_requirements`，支持上层获取当前活跃健康节点列表。
-- `src/block_transaction/collector.rs`: 解除 `needs_archive` 限制，实现节点能力自适应切片 `partition_block_range_into_slices` 与精准初始指派/故障自愈 `fetch_slice_with_failover`。
-- `tests/block_transaction_test.rs`: 适配节点能力自适应切片测试用例（验证 5 节点 120 块与早停逻辑）。
-- `migrations/202609180001_initial_schema.sql`: 压平初始 Schema，直接声明 `is_archive`, `max_block_range`, `max_batch_size`。
-- `src/collector/worker.rs`: 在单合约与批量日志收集中接入 `EndpointRequirements`，并实现基于节点 `max_block_range` 的动态安全切片（Dynamic Clamping）。
-- `tests/rpc_pool_cooldown_test.rs`: 补充归档隔离与大跨度优先路由的针对性单元测试。
-- `config/rpc_endpoints.json`: 标注并更新 Soneium 8 个节点（含 SwiftNodes、NodeFlare 非 Archive 节点）的归档能力、区块跨度与 Batch 大小（总端点数 92）。
-- `config/rpc_endpoints.json.example`: 同步更新节点配置与能力标注（总端点数 92）。
-- `config/eventlake.example.json`: 增加 Soneium 链定义与 8 个 RPC 节点完整声明。
-- `docs/AI/TASK_INDEX.md`: 登记并标记 TASK-028 为 `DONE`。
+- `src/clickhouse/block_transaction.rs`: 新增 `get_block_gas_consumers`, `get_gas_oracle`, `get_network_stats`, `get_whale_transfers`, `get_top_contracts`, `get_failed_transactions` 6 个 ClickHouse 聚合与点查函数，完善 Nullable 与数值类型映射。
+- `src/clickhouse/mod.rs`: 重新导出新查询函数与 Row 结构体。
+- `src/block_transaction/api.rs`: 注册 6 个新 REST 端点、定义请求/响应结构体与 OpenAPI 规范。
+- `tests/block_transaction_test.rs`: 增加新 API 请求/响应模型与参数校验单元测试。
+- `tests/clickhouse_integration_tests.rs`: 补充 6 个新 API 基于真实 ClickHouse 容器的端到端集成测试。
+- `deploy/prebuilt/eventlake`: 重新编译更新最新的 Release 预构建二进制。
+- `docs/AI/TASK_INDEX.md`: 登记并标记 TASK-030 为 `DONE`。
 - `docs/AI/SESSION_STATE.md`: 更新核心状态与交接记录。
 
 ---
@@ -238,25 +291,25 @@
 ## 4. 已运行的验证命令及结果
 
 ```bash
-# 1. 远程部署脚本验证
-./scripts/deploy-remote.sh -s root@192.168.31.33 -p 22 -i /root/ssh/sean -d /home/apps/ems/EVMEventLake -e .env.remote
-# 退出码 0 (健康检查通过，服务与 ClickHouse 就绪)
+# 1. 编译与类型检查
+cargo check --ignore-rust-version --all-targets
+# 退出码 0
 
-# 2. lakectl 登录与连通性验证
-./scripts/lakectl login --url http://192.168.31.33:8080
-./scripts/lakectl whoami
-# 退出码 0 (登录成功，凭据持久化，连通测试 ALIVE)
+# 2. block_transaction 单元测试
+cargo test --ignore-rust-version --test block_transaction_test
+# 结果: 10 passed, 0 failed
 
-# 3. 声明式配置精准导入
-./scripts/lakectl import config/soneium_blocks_transactions.json
-# 退出码 0 (导入 1 条链, 8 个 RPC, 0 个日志订阅, 1 条区块交易同步)
+# 3. 真实 ClickHouse 容器集成测试（含全部 11 个新端点与 Reorg 墓碑）
+EVENTLAKE_RUN_CLICKHOUSE_INTEGRATION=true cargo test --ignore-rust-version --test clickhouse_integration_tests
+# 结果: 2 passed, 0 failed
 
-# 4. 生产同步状态与 ClickHouse 落盘验证
-./scripts/lakectl block status 1868
-curl -u eventlake:eventlake -s "http://192.168.31.33:8123/?query=SELECT count() FROM eventlake.blocks"
-curl -u eventlake:eventlake -s "http://192.168.31.33:8123/?query=SELECT count() FROM eventlake.transactions"
-curl -u eventlake:eventlake -s "http://192.168.31.33:8123/?query=SELECT count() FROM eventlake.raw_logs"
-# 结果: 1,280+ 区块已同步, 12,010+ 交易已入库, raw_logs 为 0 (严格符合要求)
+# 4. 全库回归测试
+cargo test --ignore-rust-version
+# 结果: 65 passed, 0 failed (100% 通过)
+
+# 5. Release 本地编译
+cargo build --release --ignore-rust-version && cp target/release/eventlake deploy/prebuilt/eventlake
+# 退出码 0
 ```
 
 ---
@@ -276,9 +329,10 @@ curl -u eventlake:eventlake -s "http://192.168.31.33:8123/?query=SELECT count() 
 
 ## 7. 下一步计划 (Next Task)
 
-- **建议**: 当前部署与 `lakectl` 全部功能验证完毕，区块与交易稳定高速同步中。可在终端运行 `./scripts/lakectl top` 进行大盘实时动态监控。
+- **建议**: 新增的 6 个高级 API 已全部通过 ClickHouse 真实容器集成测试与全库测试，本地 Release 预构建二进制已更新。可在远程服务器上执行一键部署更新。
 - **下一次 Session 应先读取的文件**:
   1. [`AGENTS.md`](file:///ssd0/git/EVMEventLake/AGENTS.md)
   2. [`docs/AI/GOAL.md`](file:///ssd0/git/EVMEventLake/docs/AI/GOAL.md)
   3. [`docs/AI/TASK_INDEX.md`](file:///ssd0/git/EVMEventLake/docs/AI/TASK_INDEX.md)
   4. [`docs/AI/SESSION_STATE.md`](file:///ssd0/git/EVMEventLake/docs/AI/SESSION_STATE.md)
+

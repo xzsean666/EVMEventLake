@@ -240,9 +240,47 @@ async fn blocks_and_transactions_write_and_query_and_reorg() -> anyhow::Result<(
             max_priority_fee_per_gas: Some("1000000000".to_owned()),
             tx_type: Some(2),
             method_id: Some("0xa9059cbb".to_owned()),
-            status: None,
-            gas_used: None,
-            effective_gas_price: None,
+            status: Some(1),
+            gas_used: Some("21000".to_owned()),
+            effective_gas_price: Some("20000000000".to_owned()),
+            l1_fee: None,
+        }, eventlake::rpc_pool::evm_rpc_client::DecodedTransaction {
+            chain_id,
+            tx_hash: "0x00000000000000000000000000000000000000000000000000000000000000a2".to_owned(),
+            block_number: 100,
+            transaction_index: 1,
+            from_address: FROM_ADDRESS.to_owned(),
+            to_address: None,
+            value: "0".to_owned(),
+            nonce: "2".to_owned(),
+            gas: "500000".to_owned(),
+            gas_price: Some("20000000000".to_owned()),
+            max_fee_per_gas: Some("30000000000".to_owned()),
+            max_priority_fee_per_gas: Some("1000000000".to_owned()),
+            tx_type: Some(2),
+            method_id: None,
+            status: Some(1),
+            gas_used: Some("350000".to_owned()),
+            effective_gas_price: Some("20000000000".to_owned()),
+            l1_fee: None,
+        }, eventlake::rpc_pool::evm_rpc_client::DecodedTransaction {
+            chain_id,
+            tx_hash: "0x00000000000000000000000000000000000000000000000000000000000000a3".to_owned(),
+            block_number: 100,
+            transaction_index: 2,
+            from_address: "0x2222222222222222222222222222222222222222".to_owned(),
+            to_address: Some(CONTRACT_ADDRESS.to_owned()),
+            value: "5000000000000000000".to_owned(),
+            nonce: "0".to_owned(),
+            gas: "100000".to_owned(),
+            gas_price: Some("20000000000".to_owned()),
+            max_fee_per_gas: Some("30000000000".to_owned()),
+            max_priority_fee_per_gas: Some("1000000000".to_owned()),
+            tx_type: Some(2),
+            method_id: Some("0x12345678".to_owned()),
+            status: Some(0),
+            gas_used: Some("50000".to_owned()),
+            effective_gas_price: Some("20000000000".to_owned()),
             l1_fee: None,
         }],
     };
@@ -264,7 +302,7 @@ async fn blocks_and_transactions_write_and_query_and_reorg() -> anyhow::Result<(
     assert!(found_by_hash.is_some());
 
     let txs = clickhouse::get_block_transactions(&client, chain_id, 100, 10, None).await?;
-    assert_eq!(txs.len(), 1);
+    assert_eq!(txs.len(), 3);
     assert_eq!(
         txs[0].tx_hash,
         "0x00000000000000000000000000000000000000000000000000000000000000a1"
@@ -313,7 +351,7 @@ async fn blocks_and_transactions_write_and_query_and_reorg() -> anyhow::Result<(
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = to_bytes(resp.into_body(), usize::MAX).await?;
     let json: Value = serde_json::from_slice(&bytes)?;
-    assert_eq!(json["data"].as_array().map(Vec::len), Some(1));
+    assert_eq!(json["data"].as_array().map(Vec::len), Some(3));
     assert_eq!(
         json["data"][0]["tx_hash"],
         "0x00000000000000000000000000000000000000000000000000000000000000a1"
@@ -341,7 +379,7 @@ async fn blocks_and_transactions_write_and_query_and_reorg() -> anyhow::Result<(
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = to_bytes(resp.into_body(), usize::MAX).await?;
     let json: Value = serde_json::from_slice(&bytes)?;
-    assert_eq!(json["data"].as_array().map(Vec::len), Some(1));
+    assert_eq!(json["data"].as_array().map(Vec::len), Some(2));
 
     let addr_txs = clickhouse::get_address_transactions(
         &client,
@@ -354,7 +392,188 @@ async fn blocks_and_transactions_write_and_query_and_reorg() -> anyhow::Result<(
         None,
     )
     .await?;
-    assert_eq!(addr_txs.len(), 1);
+    assert_eq!(addr_txs.len(), 2);
+
+    // 1. Query block by timestamp
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/api/chains/{chain_id}/block-by-time?timestamp=1700000000&closest=before"
+        ))
+        .body(Body::empty())?;
+    let resp = router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await?;
+    let json: Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(json["data"]["block_number"], 100);
+
+    // 2. Query blocks by time range
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/api/chains/{chain_id}/blocks-time-range?start_time=1699999900&end_time=1700000100"
+        ))
+        .body(Body::empty())?;
+    let resp = router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await?;
+    let json: Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(json["data"]["start_block"], 100);
+    assert_eq!(json["data"]["end_block"], 100);
+    assert_eq!(json["data"]["block_count"], 1);
+
+    // 3. Query transaction status & confirmations
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/api/chains/{chain_id}/transactions/0x00000000000000000000000000000000000000000000000000000000000000a1/status"
+        ))
+        .body(Body::empty())?;
+    let resp = router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await?;
+    let json: Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(json["data"]["status"], 1);
+    assert_eq!(json["data"]["confirmations"], 1);
+    assert_eq!(json["data"]["current_head"], 100);
+
+    // 4. Query address profile
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/api/chains/{chain_id}/addresses/{FROM_ADDRESS}/profile"
+        ))
+        .body(Body::empty())?;
+    let resp = router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await?;
+    let json: Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(json["data"]["first_block"], 100);
+    assert_eq!(json["data"]["last_block"], 100);
+    assert_eq!(json["data"]["sent_tx_count"], 2);
+    assert_eq!(json["data"]["last_nonce"], "2");
+
+    // 5. Query contract deployments
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/api/chains/{chain_id}/deployments?creator={FROM_ADDRESS}"
+        ))
+        .body(Body::empty())?;
+    let resp = router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await?;
+    let json: Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(json["data"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        json["data"][0]["tx_hash"],
+        "0x00000000000000000000000000000000000000000000000000000000000000a2"
+    );
+
+    // 6. Query block gas consumers ranking
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/api/chains/{chain_id}/blocks/100/gas-consumers"
+        ))
+        .body(Body::empty())?;
+    let resp = router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await?;
+    let json: Value = serde_json::from_slice(&bytes)?;
+    let consumers = json["data"].as_array().expect("consumers array");
+    assert_eq!(consumers.len(), 2);
+    // FROM_ADDRESS: 21000 + 350000 = 371000 gas
+    assert_eq!(consumers[0]["from_address"], FROM_ADDRESS);
+    assert_eq!(consumers[0]["total_gas_used"], "371000");
+    assert_eq!(consumers[0]["tx_count"], 2);
+    // 0x2222...: 50000 gas
+    assert_eq!(
+        consumers[1]["from_address"],
+        "0x2222222222222222222222222222222222222222"
+    );
+    assert_eq!(consumers[1]["total_gas_used"], "50000");
+    assert_eq!(consumers[1]["tx_count"], 1);
+
+    // 7. Query gas oracle
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/chains/{chain_id}/gas-oracle"))
+        .body(Body::empty())?;
+    let resp = router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await?;
+    let json: Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(json["data"]["base_fee"], "1000000000");
+    assert_eq!(json["data"]["slow"]["max_priority_fee_per_gas"], "1000000000");
+    assert_eq!(json["data"]["normal"]["max_priority_fee_per_gas"], "1000000000");
+    assert_eq!(json["data"]["fast"]["max_priority_fee_per_gas"], "1000000000");
+
+    // 8. Query network stats
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/chains/{chain_id}/network-stats"))
+        .body(Body::empty())?;
+    let resp = router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await?;
+    let json: Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(json["data"]["latest_block"], 100);
+    assert_eq!(json["data"]["latest_timestamp"], 1700000000);
+
+    // 9. Query whale transfers (min_value = 2 ETH: 2000000000000000000)
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/api/chains/{chain_id}/whale-transfers?min_value=2000000000000000000"
+        ))
+        .body(Body::empty())?;
+    let resp = router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await?;
+    let json: Value = serde_json::from_slice(&bytes)?;
+    let whales = json["data"].as_array().expect("whales array");
+    assert_eq!(whales.len(), 1);
+    assert_eq!(
+        whales[0]["tx_hash"],
+        "0x00000000000000000000000000000000000000000000000000000000000000a3"
+    );
+    assert_eq!(whales[0]["value"], "5000000000000000000");
+
+    // 10. Query top contracts (window_blocks = 10)
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/api/chains/{chain_id}/top-contracts?window_blocks=10"
+        ))
+        .body(Body::empty())?;
+    let resp = router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await?;
+    let json: Value = serde_json::from_slice(&bytes)?;
+    let top_contracts = json["data"].as_array().expect("top contracts array");
+    assert_eq!(top_contracts.len(), 1);
+    assert_eq!(top_contracts[0]["contract_address"], CONTRACT_ADDRESS);
+    assert_eq!(top_contracts[0]["tx_count"], 2);
+    assert_eq!(top_contracts[0]["user_count"], 2);
+    assert_eq!(top_contracts[0]["total_gas_used"], "71000");
+
+    // 11. Query failed transactions
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/chains/{chain_id}/failed-transactions"))
+        .body(Body::empty())?;
+    let resp = router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await?;
+    let json: Value = serde_json::from_slice(&bytes)?;
+    let failed_txs = json["data"].as_array().expect("failed txs array");
+    assert_eq!(failed_txs.len(), 1);
+    assert_eq!(
+        failed_txs[0]["tx_hash"],
+        "0x00000000000000000000000000000000000000000000000000000000000000a3"
+    );
+    assert_eq!(failed_txs[0]["status"], 0);
 
     // Reorg tombstone test
     clickhouse::invalidate_blocks_and_transactions_from_block(&client, chain_id, 100).await?;

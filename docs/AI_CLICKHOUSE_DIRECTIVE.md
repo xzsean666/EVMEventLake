@@ -74,18 +74,29 @@ AI 必须确保项目中的 `clickhouse/config.d/` 和 `clickhouse/users.d/` 存
 #### 1. `clickhouse/config.d/system_logs.xml` (系统日志截断与防爆)
 ```xml
 <clickhouse>
-    <!-- 1. 收敛 query_log：缩短保留期至 2 天，调大刷新周期以降低磁盘 IO -->
+    <!-- 0. 文件日志极致收敛：提升为 warning 级别（彻底忽略 trace/debug/information），单文件限制 20M，仅保留 1 份轮转 -->
+    <logger>
+        <level>warning</level>
+        <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+        <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+        <size>20M</size>
+        <count>1</count>
+    </logger>
+
+    <!-- 1. 收敛 query_log：保留期缩短至 1 天，调大刷新周期以降低磁盘 IO -->
     <query_log>
         <database>system</database>
         <table>query_log</table>
         <partition_by>toYYYYMM(event_date)</partition_by>
         <flush_interval_milliseconds>7500</flush_interval_milliseconds>
         <max_size_rows>1048576</max_size_rows>
-        <ttl>event_date + INTERVAL 2 DAY DELETE</ttl>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
     </query_log>
 
-    <!-- 2. 彻底移除采样追踪 trace_log，极大节约磁盘空间 -->
+    <!-- 2. 彻底移除采样追踪 trace_log 与分析日志 processors_profile_log，极大节约磁盘空间 -->
     <trace_log remove="1"/>
+    <processors_profile_log remove="1"/>
+    <opentelemetry_span_log remove="1"/>
 
     <!-- 3. 收敛 part_log（数据分片与合并审计）：保留 1 天自动淘汰 -->
     <part_log>
@@ -96,15 +107,21 @@ AI 必须确保项目中的 `clickhouse/config.d/` 和 `clickhouse/users.d/` 存
         <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
     </part_log>
 
-    <!-- 4. text_log / metric_log：设置 2 天自动淘汰 -->
-    <text_log><ttl>event_date + INTERVAL 2 DAY DELETE</ttl></text_log>
-    <metric_log><ttl>event_date + INTERVAL 2 DAY DELETE</ttl></metric_log>
-    <asynchronous_metric_log><ttl>event_date + INTERVAL 2 DAY DELETE</ttl></asynchronous_metric_log>
+    <!-- 4. text_log：仅保留 warning 及以上日志，统一 1 天淘汰 -->
+    <text_log>
+        <level>warning</level>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </text_log>
 
-    <!-- 5. 提升后台合并（MergeTree Merge）线程池并发，加快小分片合并 -->
+    <!-- 5. metric_log / asynchronous_metric_log / asynchronous_insert_log：统一 1 天淘汰 -->
+    <metric_log><ttl>event_date + INTERVAL 1 DAY DELETE</ttl></metric_log>
+    <asynchronous_metric_log><ttl>event_date + INTERVAL 1 DAY DELETE</ttl></asynchronous_metric_log>
+    <asynchronous_insert_log><ttl>event_date + INTERVAL 1 DAY DELETE</ttl></asynchronous_insert_log>
+
+    <!-- 6. 提升后台合并（MergeTree Merge）线程池并发，加快小分片合并 -->
     <background_pool_size>16</background_pool_size>
 
-    <!-- 6. 全局 MergeTree 写入防堵参数 -->
+    <!-- 7. 全局 MergeTree 写入防堵参数 -->
     <merge_tree>
         <parts_to_delay_insert>300</parts_to_delay_insert>
         <parts_to_throw_insert>600</parts_to_throw_insert>
@@ -215,7 +232,8 @@ AI 必须审查项目中的所有 ClickHouse 建表 SQL 文件（如 `schema.sql
 AI 在完成检查或代码生成后，必须按照以下清单向用户自检汇报：
 - [ ] Docker 配置文件中是否已补充 `ulimits.nofile: 262144`？
 - [ ] Docker 配置文件中是否已补充容器日志轮转 `max-size: 50m`？
-- [ ] 是否已创建并挂载 `clickhouse/config.d/system_logs.xml`（系统日志截断为 1~2 天）？
+- [ ] 是否已配置 `<logger>` 文件日志级别为 `warning` 并启用 20M 轮转截断？
+- [ ] 是否已创建并挂载 `clickhouse/config.d/system_logs.xml`（系统日志表截断为 1 天，text_log 限制为 warning 级别，移除 trace_log 与 processors_profile_log）？
 - [ ] 是否已创建并挂载 `clickhouse/users.d/tuning.xml`（服务端启用 `async_insert=1`）？
 - [ ] 应用程序客户端写入连接是否注入了 `async_insert=1`, `wait_for_async_insert=1`, `log_queries=0`？
 - [ ] DDL 建表语句是否配置了 `parts_to_delay_insert = 300` 和 `parts_to_throw_insert = 600`？

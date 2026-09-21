@@ -1,18 +1,29 @@
 <clickhouse>
-    <!-- 优化并收敛系统 query_log：保留期缩短至 2 天，调大刷新周期以减少磁盘 IO -->
+    <!-- 0. 文件日志极致收敛：日志级别提升为 warning（彻底忽略 trace/debug/information），单文件限制 20M，仅保留 1 份轮转 -->
+    <logger>
+        <level>warning</level>
+        <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+        <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+        <size>20M</size>
+        <count>1</count>
+    </logger>
+
+    <!-- 1. 优化并收敛系统 query_log：保留期缩短至 1 天，调大刷新周期以减少磁盘 IO -->
     <query_log>
         <database>system</database>
         <table>query_log</table>
         <partition_by>toYYYYMM(event_date)</partition_by>
         <flush_interval_milliseconds>7500</flush_interval_milliseconds>
         <max_size_rows>1048576</max_size_rows>
-        <ttl>event_date + INTERVAL 2 DAY DELETE</ttl>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
     </query_log>
 
-    <!-- 彻底移除采样追踪 trace_log，避免频繁采样调用栈撑爆磁盘 -->
+    <!-- 2. 彻底移除采样追踪 trace_log 与分析日志 processors_profile_log，避免高频写入撑爆磁盘 -->
     <trace_log remove="1"/>
+    <processors_profile_log remove="1"/>
+    <opentelemetry_span_log remove="1"/>
 
-    <!-- 限制 part_log 的保留时间为 1 天，防止每次 part 生成和 merge 产生海量审计记录 -->
+    <!-- 3. 限制 part_log 的保留时间为 1 天，防止每次 part 生成和 merge 产生海量审计记录 -->
     <part_log>
         <database>system</database>
         <table>part_log</table>
@@ -21,18 +32,22 @@
         <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
     </part_log>
 
-    <!-- text_log（服务内部日志表）：缩短至 2 天保留期 -->
+    <!-- 4. text_log（服务内部日志表）：仅记录 warning 及以上，且仅保留 1 天 -->
     <text_log>
-        <ttl>event_date + INTERVAL 2 DAY DELETE</ttl>
+        <level>warning</level>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
     </text_log>
 
-    <!-- metric_log / asynchronous_metric_log：缩短至 2 天保留期 -->
+    <!-- 5. metric_log / asynchronous_metric_log / asynchronous_insert_log：仅保留 1 天 -->
     <metric_log>
-        <ttl>event_date + INTERVAL 2 DAY DELETE</ttl>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
     </metric_log>
     <asynchronous_metric_log>
-        <ttl>event_date + INTERVAL 2 DAY DELETE</ttl>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
     </asynchronous_metric_log>
+    <asynchronous_insert_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </asynchronous_insert_log>
 
     <!-- 后台合并（MergeTree Merge）线程池调优，避免高并发写入时后台合并来不及处理 -->
     <background_pool_size>16</background_pool_size>

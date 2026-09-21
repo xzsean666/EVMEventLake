@@ -487,3 +487,118 @@ fn test_validate_block_sequence_multi_slice_continuity_and_gap_detection() {
     assert!(fork_err.unwrap_err().to_string().contains("parent hash mismatch"));
 }
 
+#[test]
+fn test_block_time_range_and_by_time_models() {
+    use eventlake::block_transaction::api::{
+        AddressProfileResponse, BlockByTimeQuery, BlockTimeRangeResponse, BlocksTimeRangeQuery,
+        TransactionStatusResponse,
+    };
+
+    let range = BlockTimeRangeResponse {
+        chain_id: 1,
+        start_time: 1700000000,
+        end_time: 1700003600,
+        start_block: Some(100),
+        end_block: Some(200),
+        block_count: 101,
+    };
+    assert_eq!(range.block_count, 101);
+
+    let status = TransactionStatusResponse {
+        chain_id: 1,
+        tx_hash: "0x123".to_owned(),
+        block_number: 100,
+        status: Some(1),
+        gas_used: Some("21000".to_owned()),
+        current_head: 150,
+        confirmations: 51,
+        is_canonical: true,
+    };
+    assert_eq!(status.confirmations, 51);
+
+    let profile = AddressProfileResponse {
+        chain_id: 1,
+        address: "0x0000000000000000000000000000000000000001".to_owned(),
+        first_block: Some(10),
+        last_block: Some(100),
+        sent_tx_count: 5,
+        received_tx_count: 10,
+        last_nonce: Some("4".to_owned()),
+    };
+    assert_eq!(profile.sent_tx_count, 5);
+
+    let q1: BlockByTimeQuery = serde_json::from_str(r#"{"timestamp": 1700000000}"#).unwrap();
+    assert_eq!(q1.timestamp, 1700000000);
+    assert_eq!(q1.closest, None);
+
+    let q2: BlocksTimeRangeQuery =
+        serde_json::from_str(r#"{"start_time": 100, "end_time": 200}"#).unwrap();
+    assert_eq!(q2.start_time, 100);
+    assert_eq!(q2.end_time, 200);
+}
+
+#[test]
+fn test_advanced_block_transaction_models() {
+    use eventlake::block_transaction::api::{
+        BlockGasConsumerResponse, BlockGasConsumersQuery, GasEstimate, GasOracleResponse,
+        NetworkStatsResponse, TopContractResponse, TopContractsQuery, WhaleTransfersQuery,
+    };
+
+    let consumer = BlockGasConsumerResponse {
+        from_address: "0x1111111111111111111111111111111111111111".to_owned(),
+        total_gas_used: "150000".to_owned(),
+        tx_count: 2,
+    };
+    assert_eq!(consumer.tx_count, 2);
+
+    let oracle = GasOracleResponse {
+        chain_id: 1,
+        base_fee: Some("100".to_owned()),
+        slow: GasEstimate {
+            max_priority_fee_per_gas: "10".to_owned(),
+            max_fee_per_gas: "110".to_owned(),
+        },
+        normal: GasEstimate {
+            max_priority_fee_per_gas: "20".to_owned(),
+            max_fee_per_gas: "132".to_owned(),
+        },
+        fast: GasEstimate {
+            max_priority_fee_per_gas: "30".to_owned(),
+            max_fee_per_gas: "155".to_owned(),
+        },
+    };
+    assert_eq!(oracle.normal.max_priority_fee_per_gas, "20");
+
+    let stats = NetworkStatsResponse {
+        chain_id: 1,
+        latest_block: 1000,
+        latest_timestamp: 1700000000,
+        tps_last_1h: 15.5,
+        avg_gas_utilization_percent: 55.2,
+        avg_block_time_seconds: 2.0,
+    };
+    assert_eq!(stats.latest_block, 1000);
+
+    let top = TopContractResponse {
+        contract_address: "0x2222222222222222222222222222222222222222".to_owned(),
+        tx_count: 50,
+        user_count: 10,
+        total_gas_used: "2500000".to_owned(),
+    };
+    assert_eq!(top.tx_count, 50);
+
+    let q_gas: BlockGasConsumersQuery = serde_json::from_str(r#"{"limit": 25}"#).unwrap();
+    assert_eq!(q_gas.limit, Some(25));
+
+    let q_top: TopContractsQuery =
+        serde_json::from_str(r#"{"window_blocks": 500, "limit": 10}"#).unwrap();
+    assert_eq!(q_top.window_blocks, Some(500));
+    assert_eq!(q_top.limit, Some(10));
+
+    let q_whale: WhaleTransfersQuery =
+        serde_json::from_str(r#"{"min_value": "5000000000000000000", "limit": 50}"#).unwrap();
+    assert_eq!(q_whale.min_value, Some("5000000000000000000".to_owned()));
+    assert_eq!(q_whale.limit, Some(50));
+}
+
+

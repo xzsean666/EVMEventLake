@@ -24,12 +24,14 @@ TODO -> IN_PROGRESS -> REVIEW -> DONE
 ## 2. 当前任务看板
 
 ### 活跃任务 (In Progress)
-- （暂无活跃任务）
+- （当前暂无活跃任务）
 
 ### 待规划 / 待执行 (TODO)
 - （暂无待规划任务）
 
 ### 已完成任务 (DONE)
+- **TASK-030**: [扩展高级链上分析 API (区块用户 Gas 排行、Gas Oracle、网络统计、巨鲸转账、热门合约与失败交易)](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-030.md)
+- **TASK-029**: [扩展实用区块与交易分析 API (时间查块、时间区间、交易确认数、地址画像与合约部署)](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-029.md)
 - **TASK-028**: [基于可用 RPC 动态并发与节点能力自适应切片流水线](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-028.md)
 - **TASK-027**: [区块与交易多节点并发分片抓取流水线与切片故障自愈顶替机制](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-027.md)
 - **TASK-026**: [RPC 节点能力感知、Archive/普通节点分流调度与合约 Logs 动态切片策略](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-026.md)

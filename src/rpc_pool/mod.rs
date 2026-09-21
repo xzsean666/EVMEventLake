@@ -918,6 +918,10 @@ pub async fn seed_rpc_endpoints_from_json(
                 is_archive = EXCLUDED.is_archive,
                 max_block_range = EXCLUDED.max_block_range,
                 max_batch_size = EXCLUDED.max_batch_size
+            WHERE weight IS NOT EXCLUDED.weight
+               OR is_archive IS NOT EXCLUDED.is_archive
+               OR max_block_range IS NOT EXCLUDED.max_block_range
+               OR max_batch_size IS NOT EXCLUDED.max_batch_size
             "#,
         )
         .bind(Uuid::new_v4())

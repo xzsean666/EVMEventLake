@@ -130,8 +130,9 @@ docker build -t my-company/clickhouse:24.8-optimized -f Dockerfile.clickhouse .
 ## 1. 系统操作日志与磁盘空间治理
 
 ### 1.1 经典痛点
-ClickHouse 默认在 `system` 数据库中记录所有系统行为（`query_log`, `part_log`, `trace_log`, `text_log`, `metric_log`）。在持续高频写入场景下：
-- **日志体积远超业务数据**：一条只有几十字节的 INSERT，在 `query_log` 和 `part_log` 中产生数 KB 的元数据。
+ClickHouse 默认在 `system` 数据库中记录所有系统行为（`query_log`, `part_log`, `trace_log`, `text_log`, `metric_log`），并且服务端输出到 `/var/log/clickhouse-server/clickhouse-server.log` 的日志级别默认为包含海量调试信息的 `<Trace>` / `<Debug>`。在持续高频写入场景下：
+- **文本日志体积飞涨**：单日可能产生数 GB 的文本 Trace 日志，高频记录 Part 合并与内存采样的细枝末节。
+- **系统审计表体积远超业务数据**：一条只有几十字节的 INSERT，在 `query_log`、`part_log` 和 `text_log` 中产生数 KB 的元数据。
 - **默认保留期长**：默认保留 30 天，无运维干预时会在数周内耗尽数十甚至数百 GB 磁盘。
 
 ### 1.2 生产优化配置文件模板
@@ -139,18 +140,29 @@ ClickHouse 默认在 `system` 数据库中记录所有系统行为（`query_log`
 
 ```xml
 <clickhouse>
-    <!-- 1. 收敛 query_log：缩短保留期至 2 天，调大刷新周期 -->
+    <!-- 0. 文件日志极致收敛：提升为 warning 级别（彻底过滤 trace/debug/information），限制单文件 20M，保留 1 份轮转 -->
+    <logger>
+        <level>warning</level>
+        <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+        <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+        <size>20M</size>
+        <count>1</count>
+    </logger>
+
+    <!-- 1. 收敛 query_log：保留期缩短至 1 天，调大刷新周期 -->
     <query_log>
         <database>system</database>
         <table>query_log</table>
         <partition_by>toYYYYMM(event_date)</partition_by>
         <flush_interval_milliseconds>7500</flush_interval_milliseconds>
         <max_size_rows>1048576</max_size_rows>
-        <ttl>event_date + INTERVAL 2 DAY DELETE</ttl>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
     </query_log>
 
-    <!-- 2. 移除 trace_log（采样堆栈日志），生产环境极大节约磁盘 -->
+    <!-- 2. 彻底移除采样追踪 trace_log 与分析日志 processors_profile_log，生产环境极大节约磁盘 -->
     <trace_log remove="1"/>
+    <processors_profile_log remove="1"/>
+    <opentelemetry_span_log remove="1"/>
 
     <!-- 3. 收敛 part_log（数据分片与合并审计）：仅保留 1 天 -->
     <part_log>
@@ -161,18 +173,24 @@ ClickHouse 默认在 `system` 数据库中记录所有系统行为（`query_log`
         <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
     </part_log>
 
-    <!-- 4. text_log / metric_log：设置 2 天自动淘汰 -->
+    <!-- 4. text_log：仅保留 warning 及以上级别，且仅保留 1 天 -->
     <text_log>
-        <ttl>event_date + INTERVAL 2 DAY DELETE</ttl>
+        <level>warning</level>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
     </text_log>
+
+    <!-- 5. metric_log / asynchronous_metric_log / asynchronous_insert_log：统一设为 1 天自动淘汰 -->
     <metric_log>
-        <ttl>event_date + INTERVAL 2 DAY DELETE</ttl>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
     </metric_log>
     <asynchronous_metric_log>
-        <ttl>event_date + INTERVAL 2 DAY DELETE</ttl>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
     </asynchronous_metric_log>
+    <asynchronous_insert_log>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </asynchronous_insert_log>
 
-    <!-- 5. 后台合并（MergeTree Merge）线程池调优 -->
+    <!-- 6. 后台合并（MergeTree Merge）线程池调优 -->
     <background_pool_size>16</background_pool_size>
 </clickhouse>
 ```
@@ -490,7 +508,7 @@ OPTIMIZE TABLE my_db.my_table FINAL;
 
 ## 7. 快速自查清单 (ClickHouse Production Checklist)
 
-- [ ] **系统日志收敛**：是否挂载了 `system_logs.xml` 限制 TTL ≤ 2 天并移除了 `trace_log`？
+- [ ] **系统日志与文件日志极致收敛**：是否配置了 `<logger>` 级别为 `warning` 并启用 20M 轮转截断？是否挂载了 `system_logs.xml` 限制系统表 TTL ≤ 1 天，text_log 限制为 warning 级别，并移除了 `trace_log`、`processors_profile_log`？
 - [ ] **高频写入免记**：采集连接是否开启了 `log_queries = 0`？
 - [ ] **异步批量写入**：微批写入是否启用了 `async_insert = 1` 与 `wait_for_async_insert = 1`？
 - [ ] **表级防堵配置**：MergeTree 表是否声明了 `parts_to_delay_insert = 300` 与 `parts_to_throw_insert = 600`？
