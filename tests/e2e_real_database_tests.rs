@@ -754,6 +754,7 @@ fn build_test_state_with_clickhouse(
                 partition_tick: Duration::from_secs(300),
                 max_batch_addresses: 50,
                 collector_concurrency: 4,
+                rpc_healthcheck_enabled: false,
             },
             block_transaction: configuration::BlockTransactionConfiguration {
                 enabled: block_transaction_enabled,

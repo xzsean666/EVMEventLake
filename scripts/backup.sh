@@ -182,9 +182,23 @@ if [ "${BACKUP_MODE}" = "incremental" ]; then
 fi
 
 CH_STATUS="skipped"
-if [ "${CLICKHOUSE_ENABLED}" = "true" ] && curl -s -m 3 "${CH_PING_URL}" | grep -q "Ok"; then
-    echo "    ClickHouse connection verified at ${CH_HOST}:${CH_PORT} (DB: ${CH_DB})"
+EXEC_MODE="none"
+CH_DOCKER_CID=""
 
+if [ "${CLICKHOUSE_ENABLED}" = "true" ]; then
+    if curl -s -m 3 "${CH_PING_URL}" | grep -q "Ok"; then
+        EXEC_MODE="direct"
+        echo "    ClickHouse connection verified at ${CH_HOST}:${CH_PORT} (DB: ${CH_DB})"
+    elif command -v docker >/dev/null 2>&1; then
+        CH_DOCKER_CID="$(docker ps -q --filter "name=clickhouse" --filter "status=running" | head -n 1 || true)"
+        if [ -n "${CH_DOCKER_CID}" ] && docker exec "${CH_DOCKER_CID}" wget -qO- http://127.0.0.1:8123/ping 2>/dev/null | grep -q "Ok"; then
+            EXEC_MODE="docker"
+            echo "    ClickHouse connection verified via Docker container (${CH_DOCKER_CID:0:12}, DB: ${CH_DB})"
+        fi
+    fi
+fi
+
+if [ "${EXEC_MODE}" != "none" ]; then
     if [ "${BACKUP_TARGET}" = "local" ]; then
         # ClickHouse File backup (relative or absolute on server)
         CH_BACKUP_DEST="File('${DEST_DIR}/clickhouse')"
@@ -206,7 +220,12 @@ if [ "${CLICKHOUSE_ENABLED}" = "true" ] && curl -s -m 3 "${CH_PING_URL}" | grep 
     fi
 
     # Issue SQL BACKUP command
-    CH_RESP="$(curl -sS -u "${CH_USER}:${CH_PWD}" "${CH_SQL_URL}" --data-binary "${BACKUP_SQL}" 2>&1 || true)"
+    if [ "${EXEC_MODE}" = "direct" ]; then
+        CH_RESP="$(curl -sS -u "${CH_USER}:${CH_PWD}" "${CH_SQL_URL}" --data-binary "${BACKUP_SQL}" 2>&1 || true)"
+    else
+        CH_RESP="$(docker exec -i "${CH_DOCKER_CID}" clickhouse-client -u "${CH_USER}" --password "${CH_PWD}" --database "${CH_DB}" --query "${BACKUP_SQL}" 2>&1 || true)"
+    fi
+
     if echo "${CH_RESP}" | grep -qi "error"; then
         echo "    ClickHouse backup warning: ${CH_RESP}"
         CH_STATUS="warning: ${CH_RESP}"

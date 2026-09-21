@@ -8,6 +8,8 @@
 
 - **当前 Goal**: 建设与完善生产运维与业务落地全流程支持体系
 - **当前 Task**: 
+  - **TASK-032**: 关闭主动 RPC 探活、实操报错自动 CD 容灾、客户端注入 User-Agent、API 端口收敛本地 127.0.0.1 并完成远端平滑升级 (`DONE`)
+  - **TASK-031**: 优化容器部署网络安全与数据持久化 (收敛 ClickHouse 暴露仅保留 API 端口，支持自定义 CLICKHOUSE_DATA_DIR) (`DONE`)
   - **TASK-030**: 扩展高级链上分析 API (区块用户 Gas 排行、Gas Oracle、网络统计、巨鲸转账、热门合约与失败交易) (`DONE`)
   - **TASK-029**: 扩展实用区块与交易分析 API (时间查块、时间区间、交易确认数、地址画像与合约部署) (`DONE`)
   - **TASK-028**: 基于可用 RPC 动态并发与节点能力自适应切片流水线 (`DONE`)
@@ -19,11 +21,40 @@
   - **TASK-022**: 服务端区块交易常驻解耦与独立纯 Shell 客户端 (lakectl) (`DONE`)
   - **TASK-021**: 完善部署后全流程业务使用与下游集成指南 (USAGE.md) (`DONE`)
   - **TASK-020**: 远程一键部署自动化脚本 (deploy-remote.sh) 与部署文档支持 (`DONE`)
-- **当前状态**: `DONE` (已完成 6 个高级链上分析与监控 API 的实现、OpenAPI 声明与 ClickHouse 集成测试验证，全库 65 个测试 100% 通过)
+- **当前状态**: `DONE` (已全面关闭主动高频 RPC 探活轮询、实操请求自动 CD 冷却与 SWRR 自愈顶替、注入标准 User-Agent 防 Cloudflare 拦截、API 端口收敛至 127.0.0.1 本地回环、修复远端 SQLite 迁移校验闪退并成功部署运行，区块与交易高速稳定同步中)
 
 ---
 
 ## 2. 本次会话完成内容 (Accomplished Work)
+
+### 2.0 彻底解决高频 RPC 探活限流、按需 CD 自愈与本地回环隔离 (TASK-032)
+- **关闭主动高频 RPC 探活轮询**：
+  - 在 `src/configuration/mod.rs` 中新增 `EVENTLAKE_RPC_HEALTHCHECK_ENABLED`（默认 `false`），解耦原先与 `worker_tick` (5s) 混用的高频主动探测。
+  - 在 `src/background/mod.rs` 中仅在该配置为 `true` 时才启动后台探活 Worker；彻底根除每 5 秒并发无脑向公网节点发请求导致公网 RPC 限流报警的根因。
+- **按需容灾与冷却到期自动复活**：
+  - 优化 `src/rpc_pool/mod.rs` 中的 SWRR 节点调度：只要节点非 disabled 且冷却到期，立即回归可用候选池；
+  - 仅在实际业务抓取区块/收据报错时才触发指数退避冷却（CD），并自动顶替重试；一旦调用成功自动触发 `mark_rpc_success`，无缝重置为 `healthy`。
+- **客户端规范 User-Agent 注入**：
+  - 在 `src/app/application_state.rs` 中为 HTTP 客户端配置标准 `User-Agent: EventLake/1.0.0 (+https://github.com/Early-Summer-Studio/soneium-points-indexer)`，根除无 Header 访问被 Cloudflare/Nodeflare 直接 403 拦截的问题。
+- **本地回环网络收敛 (外部禁止直连)**：
+  - 在 `docker-compose.yml` 与 `docker-compose.source.yml` 中将 API 端口映射改为 `127.0.0.1:${EVENTLAKE_HTTP_PORT:-8080}:${EVENTLAKE_HTTP_PORT:-8080}`，确保外部网络无法直接发起针对 10010 端口的 TCP 扫描与连接，仅允许宿主机本地进程、SSH 隧道以及反向代理安全接入。
+- **修复远端数据库历史迁移校验冲突**：
+  - 诊断出远端 SQLite 数据库因历史 Schema 修改引发的 SQLx `migration 202609180001 was previously applied but has been modified` 崩溃重启，对远端表补齐字段并平滑修正迁移校验和，确保服务平稳启动。
+- **远端平滑更新与数据实时收集审计**：
+  - 成功将优化版本部署至目标服务器，容器秒级拉起，`/health/ready` 通过。
+  - 验证远端容器日志，高频刷屏报警彻底清零，仅在偶发单个节点 429 时平滑熔断 60 秒并由其余 6 个健康节点无感接管。
+  - ClickHouse 实时数据验证：`blocks` 从 4,560 迅速增至 **8,880+**，`transactions` 增至 **96,100+**，数据收集工作高速稳定推进。
+- **ClickHouse 端口收敛隔离**：
+  - 在 `docker-compose.yml` 与 `docker-compose.source.yml` 中将 `clickhouse` 服务的 `ports: - 8123:8123 - 9000:9000` 移除，替换为仅在容器内部网络通信的 `expose: ["8123", "9000"]`。
+  - 宿主机对外仅保留 `eventlake` 服务的 API 端口 `${EVENTLAKE_HTTP_PORT:-8080}:${EVENTLAKE_HTTP_PORT:-8080}`，杜绝数据库端口直接暴露于公网的安全隐患。
+- **自定义 ClickHouse 数据持久化路径**：
+  - 在 Docker Compose 编排文件中将 ClickHouse 存储路径参数化为 `${CLICKHOUSE_DATA_DIR:-./data/clickhouse}:/var/lib/clickhouse`（及 `${CLICKHOUSE_LOGS_DIR:-./logs/clickhouse}:/var/log/clickhouse-server`）。
+  - 在 `.env.example` 与 `.env.dev` 中增加配置项说明；若环境变量已配置则自动挂载指定目录，未配置时无缝默认回退至当前已有的 `./data/clickhouse`。
+- **运维脚本无缝兼容与安全性强化**：
+  - **远程一键部署脚本 (`scripts/deploy-remote.sh`)**：自动解析本地 `.env` 中的 `CLICKHOUSE_DATA_DIR` 并在远端预先初始化创建该目录；部署完成提示更新为明确强调“ClickHouse 容器内网隔离，对外仅暴露 API 端口”。
+  - **本地与 S3 统一备份/恢复脚本 (`scripts/backup.sh`, `scripts/restore.sh`)**：增加探测模式，当宿主机未向外暴露 8123 端口时，自动探测运行中的 `clickhouse` Docker 容器并通过容器执行命令（`docker exec -i <cid> clickhouse-client ...`），确保端口未暴露时宿主机备份恢复脚本依然全自动无缝运行。
+- **部署指南更新**：在 `docs/DEPLOYMENT.md` 中补充网络端口隔离机制与 `CLICKHOUSE_DATA_DIR` 的配置使用指南。
+- **验证全部通过**：`docker compose config` 严格校验语法与默认/自定义卷路径渲染；`cargo check --ignore-rust-version` 与全库单元及集成测试 100% 通过。
 
 ### 2.1 全面测试与 E2E 测试完善度审计
 - 对全库进行全面测试（含单元测试、ClickHouse 存储集成测试、EVM 链上真实区块测试与运维脚本测试）。

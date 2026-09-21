@@ -30,6 +30,8 @@ TODO -> IN_PROGRESS -> REVIEW -> DONE
 - （暂无待规划任务）
 
 ### 已完成任务 (DONE)
+- **TASK-032**: [关闭主动 RPC 探活、实操报错自动 CD 容灾、客户端注入 User-Agent、API 端口收敛本地 127.0.0.1 并完成远端平滑升级](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-032.md)
+- **TASK-031**: [优化容器部署网络安全与数据持久化 (收敛 ClickHouse 暴露仅保留 API 端口，支持自定义 CLICKHOUSE_DATA_DIR)](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-031.md)
 - **TASK-030**: [扩展高级链上分析 API (区块用户 Gas 排行、Gas Oracle、网络统计、巨鲸转账、热门合约与失败交易)](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-030.md)
 - **TASK-029**: [扩展实用区块与交易分析 API (时间查块、时间区间、交易确认数、地址画像与合约部署)](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-029.md)
 - **TASK-028**: [基于可用 RPC 动态并发与节点能力自适应切片流水线](file:///ssd0/git/EVMEventLake/docs/AI/tasks/TASK-028.md)

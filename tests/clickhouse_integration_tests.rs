@@ -140,6 +140,7 @@ fn test_configuration(clickhouse: ClickHouseConfig) -> ApplicationConfiguration 
             partition_tick: Duration::from_secs(1),
             max_batch_addresses: 50,
             collector_concurrency: 4,
+            rpc_healthcheck_enabled: false,
         },
         block_transaction: BlockTransactionConfiguration {
             enabled: false,

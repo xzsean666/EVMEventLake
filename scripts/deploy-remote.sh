@@ -260,8 +260,23 @@ fi
 # 步骤 2: 远端目录初始化与数据持久化保护
 # ------------------------------------------------------------------------------
 log_info "==> [2/5] 初始化远端目录结构 (保留历史数据)..."
-run_ssh "mkdir -p '$REMOTE_DIR' '$REMOTE_DIR/data/sqlite' '$REMOTE_DIR/data/clickhouse' '$REMOTE_DIR/logs/clickhouse' '$REMOTE_DIR/backups' && chmod -R 777 '$REMOTE_DIR/data/sqlite'"
-log_succ "远端持久化目录已就绪 (宿主机路径: $REMOTE_DIR/data)。"
+
+CH_DATA_DIR=""
+if [ -f "$LOCAL_ENV" ]; then
+    CH_DATA_DIR=$(grep -E '^[[:space:]]*CLICKHOUSE_DATA_DIR=' "$LOCAL_ENV" 2>/dev/null | cut -d '=' -f2- | tr -d ' "\r' || echo "")
+fi
+
+REMOTE_MKDIRS="'$REMOTE_DIR' '$REMOTE_DIR/data/sqlite' '$REMOTE_DIR/data/clickhouse' '$REMOTE_DIR/logs/clickhouse' '$REMOTE_DIR/backups'"
+if [ -n "$CH_DATA_DIR" ]; then
+    if [[ "$CH_DATA_DIR" = /* ]]; then
+        REMOTE_MKDIRS="$REMOTE_MKDIRS '$CH_DATA_DIR'"
+    else
+        REMOTE_MKDIRS="$REMOTE_MKDIRS '$REMOTE_DIR/$CH_DATA_DIR'"
+    fi
+fi
+
+run_ssh "mkdir -p $REMOTE_MKDIRS && chmod -R 777 '$REMOTE_DIR/data/sqlite'"
+log_succ "远端持久化目录已就绪。"
 
 # ------------------------------------------------------------------------------
 # 步骤 3: 增量安全同步项目工程文件
@@ -366,9 +381,14 @@ if [[ "$HEALTH_OUTPUT" =~ HEALTHY:([0-9]+) ]]; then
     HTTP_PORT="${BASH_REMATCH[1]}"
     log_succ "=================================================="
     log_succ "🎉 EVMEventLake 远程部署成功并已通过健康检查！"
-    log_succ "健康检查端点: http://${SSH_TARGET#*@}:${HTTP_PORT}/health/ready"
-    log_succ "ClickHouse 端点: http://${SSH_TARGET#*@}:8123"
-    log_succ "持久化数据目录: $REMOTE_DIR/data (数据完整保留)"
+    log_succ "API 访问端点: 127.0.0.1:${HTTP_PORT} (本地回环保护，外部禁止直连)"
+    log_succ "健康检查端点: http://127.0.0.1:${HTTP_PORT}/health/ready (本地回环)"
+    log_succ "ClickHouse:   容器内网隔离 (不对外暴露端口，仅 API 容器可访问)"
+    if [ -n "$CH_DATA_DIR" ]; then
+        log_succ "持久化数据目录: $CH_DATA_DIR (ClickHouse) / $REMOTE_DIR/data/sqlite (SQLite)"
+    else
+        log_succ "持久化数据目录: $REMOTE_DIR/data (数据完整保留)"
+    fi
     log_succ "=================================================="
 else
     log_warn "服务已启动，但健康检查暂未就绪或超时。"

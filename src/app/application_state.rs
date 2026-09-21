@@ -27,6 +27,7 @@ impl ApplicationState {
             http_client: Client::builder()
                 .timeout(Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::none())
+                .user_agent("EventLake/1.0.0 (+https://github.com/Early-Summer-Studio/soneium-points-indexer)")
                 .build()
                 .expect("HTTP client builds"),
             api_key_last_used: Arc::new(RwLock::new(HashMap::new())),

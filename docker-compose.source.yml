@@ -6,9 +6,9 @@ services:
       CLICKHOUSE_DB: eventlake
       CLICKHOUSE_USER: eventlake
       CLICKHOUSE_PASSWORD: eventlake
-    ports:
-      - "8123:8123"
-      - "9000:9000"
+    expose:
+      - "8123"
+      - "9000"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping | grep -q Ok"]
       interval: 5s
@@ -19,8 +19,8 @@ services:
         soft: 262144
         hard: 262144
     volumes:
-      - ./data/clickhouse:/var/lib/clickhouse
-      - ./logs/clickhouse:/var/log/clickhouse-server
+      - ${CLICKHOUSE_DATA_DIR:-./data/clickhouse}:/var/lib/clickhouse
+      - ${CLICKHOUSE_LOGS_DIR:-./logs/clickhouse}:/var/log/clickhouse-server
       - ./clickhouse/config.d/system_logs.xml:/etc/clickhouse-server/config.d/system_logs.xml:ro
       - ./clickhouse/users.d/tuning.xml:/etc/clickhouse-server/users.d/tuning.xml:ro
       - /tmp:/tmp
@@ -42,7 +42,7 @@ services:
       EVENTLAKE_CLICKHOUSE_ENABLED: "true"
       EVENTLAKE_CLICKHOUSE_URL: ${EVENTLAKE_CLICKHOUSE_URL:-http://eventlake:eventlake@clickhouse:8123/eventlake}
     ports:
-      - "${EVENTLAKE_HTTP_PORT:-8080}:${EVENTLAKE_HTTP_PORT:-8080}"
+      - "127.0.0.1:${EVENTLAKE_HTTP_PORT:-8080}:${EVENTLAKE_HTTP_PORT:-8080}"
     volumes:
       - ./data/sqlite:/data
     depends_on:

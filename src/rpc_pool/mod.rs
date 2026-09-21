@@ -515,26 +515,18 @@ pub async fn get_available_rpc_endpoints_with_requirements(
         filtered_endpoints
     };
 
-    // 3. Healthy / enabled endpoints that are NOT in CD: dispatch proportionally via SWRR
+    // 3. Non-disabled endpoints that are NOT in CD: dispatch proportionally via SWRR
+    // Once an endpoint's cooldown expires, it is eligible to be tried again.
+    // If it succeeds during practical use, mark_rpc_success restores it to 'healthy'.
+    // If it fails, mark_rpc_failure applies a new exponential cooldown.
     let available: Vec<_> = candidate_pool
         .iter()
-        .filter(|ep| ep.cooldown_remaining_seconds.is_none() && (ep.status == "enabled" || ep.status == "healthy"))
+        .filter(|ep| ep.cooldown_remaining_seconds.is_none() && ep.status != "disabled")
         .cloned()
         .collect();
 
     if !available.is_empty() {
         return Ok(available);
-    }
-
-    // 4. Any non-disabled endpoint that is NOT in CD: dispatch proportionally via SWRR
-    let non_cd: Vec<_> = candidate_pool
-        .iter()
-        .filter(|ep| ep.cooldown_remaining_seconds.is_none())
-        .cloned()
-        .collect();
-
-    if !non_cd.is_empty() {
-        return Ok(non_cd);
     }
 
     // 5. Fallback: all candidate endpoints are in CD. Choose the one with the shortest remaining CD

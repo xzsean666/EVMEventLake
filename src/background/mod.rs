@@ -6,7 +6,9 @@ pub fn spawn_workers(state: ApplicationState) {
         return;
     }
 
-    tokio::spawn(rpc_pool::worker::run(state.clone()));
+    if state.configuration.background.rpc_healthcheck_enabled {
+        tokio::spawn(rpc_pool::worker::run(state.clone()));
+    }
     if state.configuration.block_transaction.enabled {
         tokio::spawn(block_transaction::worker::run(state.clone()));
     }

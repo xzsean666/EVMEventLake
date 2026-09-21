@@ -281,6 +281,8 @@ pub struct BackgroundConfiguration {
     pub max_batch_addresses: usize,
     /// Maximum number of subscription groups collected concurrently.
     pub collector_concurrency: usize,
+    /// Whether proactive background RPC health check worker is enabled.
+    pub rpc_healthcheck_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -334,6 +336,7 @@ impl ApplicationConfiguration {
                 "EVENTLAKE_COLLECTOR_CONCURRENCY",
                 "8",
             )?,
+            rpc_healthcheck_enabled: read_env("EVENTLAKE_RPC_HEALTHCHECK_ENABLED", "false").parse()?,
         };
 
         let block_transaction = BlockTransactionConfiguration {

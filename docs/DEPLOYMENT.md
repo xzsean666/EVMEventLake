@@ -107,7 +107,13 @@ docker compose ps
 curl -fsS http://127.0.0.1:8080/health/ready
 ```
 
-### 3.2 常用运维命令
+### 3.2 网络安全与持久化数据目录配置
+
+- **网络端口隔离**: ClickHouse 服务已收敛至 Docker 容器内部桥接网络（仅暴露内部端口供 `eventlake` API 容器访问），宿主机对外**仅暴露 EventLake API 端口**（默认 `8080`，可通过 `EVENTLAKE_HTTP_PORT` 自定义），彻底避免数据库端口直接暴露于公网的安全隐患。
+- **自定义 ClickHouse 数据目录**: 支持在 `.env` 中声明 `CLICKHOUSE_DATA_DIR` 指向宿主机任意目标路径（例如 `CLICKHOUSE_DATA_DIR=/mnt/nvme/clickhouse`）。若未配置或保持注释，则默认使用当前目录下的 `./data/clickhouse`。
+
+
+### 3.3 常用运维命令
 
 ```bash
 # 查看实时日志
@@ -121,7 +127,7 @@ docker compose pull && docker compose up -d
 docker compose down
 ```
 
-### 3.3 远程一键部署自动化脚本 (本地执行，秒级远端部署)
+### 3.4 远程一键部署自动化脚本 (本地执行，秒级远端部署)
 
 如果你在本地工作机或开发机上，需要将项目一键部署/升级到远程 Linux 服务器，可以使用内置的 [`scripts/deploy-remote.sh`](file:///ssd0/git/EVMEventLake/scripts/deploy-remote.sh)。
 

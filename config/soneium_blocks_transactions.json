@@ -77,7 +77,35 @@
       "max_batch_size": 10
     }
   ],
-  "subscriptions": [],
+  "subscriptions": [
+    {
+      "chain_id": 1868,
+      "collection_scope": "contract",
+      "contract_address": "0xb04bfc80b54fa6de7822247d156b65bf346c6446",
+      "start_block": 27080665,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 10000
+    },
+    {
+      "chain_id": 1868,
+      "collection_scope": "contract",
+      "contract_address": "0x7b49f8008721ea596cd4aa2e2764146468f8fac5",
+      "start_block": 27080667,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 10000
+    },
+    {
+      "chain_id": 1868,
+      "collection_scope": "contract",
+      "contract_address": "0x40fef07eaf2ca43869f575b22bf2014d6cb237f0",
+      "start_block": 27080671,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 10000
+    }
+  ],
   "block_transaction_sync": [
     {
       "chain_id": 1868,
