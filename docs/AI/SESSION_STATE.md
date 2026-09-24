@@ -27,7 +27,18 @@
 
 ## 2. 本次会话完成内容 (Accomplished Work)
 
-### 2.0 彻底解决高频 RPC 探活限流、按需 CD 自愈与本地回环隔离 (TASK-032)
+### 2.0 配置更新：添加 NFT 合约订阅至 soneium_blocks_transactions.json
+- **链上浏览器探查**：
+  - 通过 Soneium Blockscout API (`getcontractcreation`) 查明 NFT 合约 `0x639A44807bb006869Bc79c2b644cE2c9C29B762E` 的创建交易为 `0xa0226b3d11857bde0dba154cf1cbf88d02d743bcca1da8c2f384de54d3ddf8a0`。
+  - 部署/起始区块确认：**`25564764`**（合约名称：`GN Field3 Test`）。
+- **配置更新与校验**：
+  - 在 [`config/soneium_blocks_transactions.json`](file:///ssd0/ems/soneium-points/soneium-points-indexer/config/soneium_blocks_transactions.json) 中的 `subscriptions` 数组追加该合约订阅配置（`chain_id: 1868`, `contract_address: "0x639a44807bb006869bc79c2b644ce2c9c29b762e"`, `start_block: 25564764`, `realtime_enabled: true`）。
+  - 完成 JSON 语法校验与编译检查。
+- **lakectl 客户端体验优化与连通性自愈**：
+  - **自动端口嗅探**：在 [`scripts/lakectl`](file:///ssd0/ems/soneium-points/soneium-points-indexer/scripts/lakectl) 中优化 `load_saved_context`，未显式指定 `--remote-port` 时自动从本地 `.env` 或 `.env.dev` 提取 `EVENTLAKE_HTTP_PORT`（如 10010），防止默认回退到 8080 导致 SSH 端口转发 Connection reset by peer。
+  - **导入前置探活拦截**：在 `cmd_config_import` 中增加 `/health/live` 前置探活拦截，彻底杜绝由于端口错误或断连引发的静默假成功。
+
+### 2.1 彻底解决高频 RPC 探活限流、按需 CD 自愈与本地回环隔离 (TASK-032)
 - **关闭主动高频 RPC 探活轮询**：
   - 在 `src/configuration/mod.rs` 中新增 `EVENTLAKE_RPC_HEALTHCHECK_ENABLED`（默认 `false`），解耦原先与 `worker_tick` (5s) 混用的高频主动探测。
   - 在 `src/background/mod.rs` 中仅在该配置为 `true` 时才启动后台探活 Worker；彻底根除每 5 秒并发无脑向公网节点发请求导致公网 RPC 限流报警的根因。

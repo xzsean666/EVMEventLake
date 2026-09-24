@@ -758,6 +758,15 @@ cmd_config_import() {
     fi
     ensure_connection
 
+    # 预先进行连通性检查，杜绝由于端口错误等导致的静默失败
+    local health_check
+    if ! health_check=$(api_request GET "/health/live" 2>&1); then
+        echo -e "${RED}[ERROR] 连通性检查失败，无法连接至 EventLake 节点！${RESET}" >&2
+        echo -e "错误原因: $health_check" >&2
+        echo -e "提示: 若使用了 -s/--ssh 穿透，请检查是否需要通过 --remote-port 指定内部监听端口 (例如 --remote-port 10010)。" >&2
+        exit 1
+    fi
+
     echo -e "${CYAN}=== 正在执行声明式配置幂等导入: ${BOLD}$infile${CYAN} ===${RESET}"
 
     local content
@@ -949,6 +958,7 @@ cmd_whoami() {
 # 加载已持久化的上下文
 load_saved_context() {
     local config_file="${HOME}/.lakectl/config"
+    local saved_remote_port=""
     if [ -f "$config_file" ]; then
         while IFS='=' read -r key val; do
             [[ "$key" =~ ^#.*$ ]] && continue
@@ -963,9 +973,20 @@ load_saved_context() {
                 SSH_TARGET)       [ -z "${CLI_GIVEN_SSH:-}" ] && SSH_TARGET="$val" ;;
                 SSH_PORT)         [ -z "${CLI_GIVEN_SSH_PORT:-}" ] && SSH_PORT="$val" ;;
                 SSH_IDENTITY)     [ -z "${CLI_GIVEN_IDENTITY:-}" ] && SSH_IDENTITY="$val" ;;
-                REMOTE_PORT)      [ -z "${CLI_GIVEN_REMOTE_PORT:-}" ] && REMOTE_PORT="$val" ;;
+                REMOTE_PORT)      saved_remote_port="$val"; [ -z "${CLI_GIVEN_REMOTE_PORT:-}" ] && REMOTE_PORT="$val" ;;
             esac
         done < "$config_file"
+    fi
+
+    # 若命令行未显式指定且持久化配置中未保存自定义端口，自动尝试检测本地 .env 或 .env.dev 的 EVENTLAKE_HTTP_PORT
+    if [ -z "${CLI_GIVEN_REMOTE_PORT:-}" ] && [ -z "$saved_remote_port" ]; then
+        local detected_port=""
+        if [ -f ".env" ]; then
+            detected_port=$(grep -E '^EVENTLAKE_HTTP_PORT=' .env 2>/dev/null | cut -d '=' -f2 | tr -d ' "\r' || true)
+        elif [ -f ".env.dev" ]; then
+            detected_port=$(grep -E '^EVENTLAKE_HTTP_PORT=' .env.dev 2>/dev/null | cut -d '=' -f2 | tr -d ' "\r' || true)
+        fi
+        [ -n "$detected_port" ] && REMOTE_PORT="$detected_port"
     fi
 }
 
@@ -1054,4 +1075,6 @@ main() {
     esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

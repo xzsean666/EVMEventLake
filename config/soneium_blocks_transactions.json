@@ -104,6 +104,24 @@
       "realtime_enabled": true,
       "min_block_window": 1,
       "max_block_window": 10000
+    },
+    {
+      "chain_id": 1868,
+      "collection_scope": "contract",
+      "contract_address": "0x08E33020Ce133a09Be08A718430922827DAb30bd",
+      "start_block": 27080671,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 10000
+    },
+    {
+      "chain_id": 1868,
+      "collection_scope": "contract",
+      "contract_address": "0x639a44807bb006869bc79c2b644ce2c9c29b762e",
+      "start_block": 25564764,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 10000
     }
   ],
   "block_transaction_sync": [
