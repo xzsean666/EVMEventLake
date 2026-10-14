@@ -2,6 +2,9 @@ use std::{env, net::IpAddr, time::Duration};
 
 use anyhow::Context;
 
+pub mod declarative;
+pub use declarative::*;
+
 #[derive(Clone, Debug)]
 pub struct ApplicationConfiguration {
     pub http: HttpConfiguration,
@@ -12,6 +15,7 @@ pub struct ApplicationConfiguration {
     pub block_transaction: BlockTransactionConfiguration,
     pub rpc_pool: RpcPoolConfiguration,
     pub telemetry: TelemetryConfiguration,
+    pub config_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -22,10 +26,48 @@ pub struct RpcPoolConfiguration {
 #[derive(Clone, Debug)]
 pub struct BlockTransactionConfiguration {
     pub enabled: bool,
+    pub enable_chain_ids: Option<Vec<i64>>,
     pub batch_size: i32,
     pub max_concurrency: i32,
     pub reorg_window: i32,
     pub max_response_bytes: usize,
+}
+
+impl Default for BlockTransactionConfiguration {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            enable_chain_ids: None,
+            batch_size: 10,
+            max_concurrency: 2,
+            reorg_window: 32,
+            max_response_bytes: 67108864,
+        }
+    }
+}
+
+impl BlockTransactionConfiguration {
+    pub fn is_enabled(&self) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if let Some(ref ids) = self.enable_chain_ids {
+            if ids.is_empty() {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn is_chain_enabled(&self, chain_id: i64) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        match &self.enable_chain_ids {
+            None => true,
+            Some(ids) => ids.contains(&chain_id),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -339,8 +381,56 @@ impl ApplicationConfiguration {
             rpc_healthcheck_enabled: read_env("EVENTLAKE_RPC_HEALTHCHECK_ENABLED", "false").parse()?,
         };
 
+        let config_path = env::var("EVENTLAKE_CONFIG_PATH")
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                let default_path = "config/soneium_ecosystem.json";
+                if std::path::Path::new(default_path).is_file() {
+                    Some(default_path.to_owned())
+                } else {
+                    None
+                }
+            });
+
+        let enable_chain_ids_env = env::var("EVENTLAKE_BLOCK_TRANSACTION_ENABLE_CHAIN_IDS").ok();
+        let enabled_env = read_env("EVENTLAKE_BLOCK_TRANSACTION_ENABLED", "true");
+
+        let (enabled, enable_chain_ids) = if let Some(ref raw_ids) = enable_chain_ids_env {
+            let ids = parse_enable_chain_ids(raw_ids)?;
+            let is_globally_disabled = enabled_env.eq_ignore_ascii_case("false") || enabled_env == "0";
+            let enabled = !is_globally_disabled && ids.as_ref().map_or(true, |v| !v.is_empty());
+            (enabled, ids)
+        } else if let Some(ref path) = config_path
+            && let Ok(content) = std::fs::read_to_string(path)
+            && let Ok(file) = serde_json::from_str::<DeclarativeConfigFile>(&content)
+            && !file.block_transaction_sync.is_empty()
+        {
+            let enabled_ids: Vec<i64> = file
+                .block_transaction_sync
+                .iter()
+                .filter(|b| b.enabled.unwrap_or(true))
+                .map(|b| b.chain_id)
+                .collect();
+            let is_globally_disabled = enabled_env.eq_ignore_ascii_case("false") || enabled_env == "0";
+            let enabled = !is_globally_disabled && !enabled_ids.is_empty();
+            (enabled, Some(enabled_ids))
+        } else {
+            match enabled_env.to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" => (true, None),
+                "false" | "0" | "no" => (false, Some(Vec::new())),
+                _ => {
+                    let ids = parse_enable_chain_ids(&enabled_env)?;
+                    let enabled = ids.as_ref().map_or(true, |v| !v.is_empty());
+                    (enabled, ids)
+                }
+            }
+        };
+
         let block_transaction = BlockTransactionConfiguration {
-            enabled: read_env("EVENTLAKE_BLOCK_TRANSACTION_ENABLED", "true").parse()?,
+            enabled,
+            enable_chain_ids,
             batch_size: read_positive_i32_env("EVENTLAKE_BLOCK_TRANSACTION_BATCH_SIZE", "10")?,
             max_concurrency: read_positive_i32_env(
                 "EVENTLAKE_BLOCK_TRANSACTION_MAX_CONCURRENCY",
@@ -387,6 +477,7 @@ impl ApplicationConfiguration {
             block_transaction,
             rpc_pool,
             telemetry,
+            config_path,
         })
     }
 }
@@ -458,9 +549,116 @@ fn parse_comma_separated(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn parse_chain_id_or_alias(token: &str) -> anyhow::Result<i64> {
+    if let Ok(id) = token.parse::<i64>() {
+        return Ok(id);
+    }
+    match token.to_ascii_lowercase().as_str() {
+        "soneium" | "soneium-mainnet" => Ok(1868),
+        "minato" | "soneium-minato" => Ok(1946),
+        "ethereum" | "mainnet" | "eth" => Ok(1),
+        "sepolia" => Ok(11155111),
+        "optimism" | "op" => Ok(10),
+        "base" => Ok(8453),
+        "arbitrum" | "arb" => Ok(42161),
+        "polygon" | "matic" => Ok(137),
+        "astar" => Ok(592),
+        "astar-zkevm" => Ok(3776),
+        _ => anyhow::bail!("unknown chain id or alias: '{token}'"),
+    }
+}
+
+pub fn parse_enable_chain_ids(raw: &str) -> anyhow::Result<Option<Vec<i64>>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    if trimmed == "*" || trimmed.eq_ignore_ascii_case("all") {
+        return Ok(None);
+    }
+    if trimmed.eq_ignore_ascii_case("none") || trimmed.eq_ignore_ascii_case("false") || trimmed == "0" {
+        return Ok(Some(Vec::new()));
+    }
+
+    let mut ids = Vec::new();
+    for part in trimmed.split(',') {
+        let part = part.trim();
+        if !part.is_empty() {
+            let id = parse_chain_id_or_alias(part)?;
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    Ok(Some(ids))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ClickHouseConfig;
+    use super::{BlockTransactionConfiguration, ClickHouseConfig, parse_enable_chain_ids};
+
+    #[test]
+    fn test_parse_enable_chain_ids_numeric_and_aliases() {
+        // Numeric chain IDs
+        assert_eq!(parse_enable_chain_ids("1868").unwrap(), Some(vec![1868]));
+        assert_eq!(
+            parse_enable_chain_ids("1868, 1946").unwrap(),
+            Some(vec![1868, 1946])
+        );
+
+        // Aliases
+        assert_eq!(
+            parse_enable_chain_ids("soneium").unwrap(),
+            Some(vec![1868])
+        );
+        assert_eq!(
+            parse_enable_chain_ids("soneium, minato").unwrap(),
+            Some(vec![1868, 1946])
+        );
+
+        // Empty string means explicitly empty (no chains enabled)
+        assert_eq!(parse_enable_chain_ids("").unwrap(), Some(vec![]));
+        assert_eq!(parse_enable_chain_ids("   ").unwrap(), Some(vec![]));
+        assert_eq!(parse_enable_chain_ids("none").unwrap(), Some(vec![]));
+        assert_eq!(parse_enable_chain_ids("false").unwrap(), Some(vec![]));
+
+        // Wildcard means all chains enabled
+        assert_eq!(parse_enable_chain_ids("*").unwrap(), None);
+        assert_eq!(parse_enable_chain_ids("all").unwrap(), None);
+
+        // Unknown alias fails
+        assert!(parse_enable_chain_ids("unknown_chain_xyz").is_err());
+    }
+
+    #[test]
+    fn test_block_transaction_is_chain_enabled() {
+        let mut config = BlockTransactionConfiguration {
+            enabled: true,
+            enable_chain_ids: Some(vec![1868]),
+            ..Default::default()
+        };
+
+        assert!(config.is_enabled());
+        assert!(config.is_chain_enabled(1868));
+        assert!(!config.is_chain_enabled(1946));
+
+        // When globally disabled, no chain is enabled
+        config.enabled = false;
+        assert!(!config.is_enabled());
+        assert!(!config.is_chain_enabled(1868));
+
+        // When enable_chain_ids is empty list, no chain is enabled
+        config.enabled = true;
+        config.enable_chain_ids = Some(vec![]);
+        assert!(!config.is_enabled());
+        assert!(!config.is_chain_enabled(1868));
+
+        // When enable_chain_ids is None, all chains are enabled
+        config.enable_chain_ids = None;
+        assert!(config.is_enabled());
+        assert!(config.is_chain_enabled(1868));
+        assert!(config.is_chain_enabled(1946));
+    }
 
     #[test]
     fn clickhouse_url_targets_the_http_endpoint() {

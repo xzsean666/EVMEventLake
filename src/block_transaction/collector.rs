@@ -6,8 +6,18 @@ use crate::{
 use crate::{chains, rpc_pool};
 
 pub async fn collect_once(state: &ApplicationState) -> Result<(), ApplicationError> {
+    if !state.configuration.block_transaction.is_enabled() {
+        return Ok(());
+    }
+
+    let allowed_chains = state
+        .configuration
+        .block_transaction
+        .enable_chain_ids
+        .as_deref();
+
     let limit = (state.configuration.block_transaction.max_concurrency.max(1) * 2) as i64;
-    let sync_states = state::runnable_sync_states(&state.pool, limit.max(10)).await?;
+    let sync_states = state::runnable_sync_states(&state.pool, limit.max(10), allowed_chains).await?;
     if sync_states.is_empty() {
         return Ok(());
     }

@@ -9,8 +9,10 @@ pub fn spawn_workers(state: ApplicationState) {
     if state.configuration.background.rpc_healthcheck_enabled {
         tokio::spawn(rpc_pool::worker::run(state.clone()));
     }
-    if state.configuration.block_transaction.enabled {
+    if state.configuration.block_transaction.is_enabled() {
         tokio::spawn(block_transaction::worker::run(state.clone()));
+    } else {
+        tracing::info!("block-transaction worker disabled (no chains enabled)");
     }
     tokio::spawn(collector::worker::run(state));
 }

@@ -45,6 +45,7 @@ services:
       - "127.0.0.1:${EVENTLAKE_HTTP_PORT:-8080}:${EVENTLAKE_HTTP_PORT:-8080}"
     volumes:
       - ./data/sqlite:/data
+      - ./config:/var/lib/eventlake/config:ro
     depends_on:
       clickhouse:
         condition: service_healthy

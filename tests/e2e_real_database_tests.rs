@@ -758,6 +758,7 @@ fn build_test_state_with_clickhouse(
             },
             block_transaction: configuration::BlockTransactionConfiguration {
                 enabled: block_transaction_enabled,
+                enable_chain_ids: None,
                 batch_size: 10,
                 max_concurrency: 2,
                 reorg_window: 32,
@@ -768,6 +769,7 @@ fn build_test_state_with_clickhouse(
                 log_level: "debug".to_owned(),
                 json_logs: false,
             },
+            config_path: None,
         },
         pool,
     )

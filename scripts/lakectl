@@ -812,11 +812,11 @@ cmd_config_import() {
             [ -z "$b" ] && continue
             local cid enabled start_b batch reorg rt
             cid=$(echo "$b" | jq -r '.chain_id')
-            enabled=$(echo "$b" | jq -r '.enabled // true')
+            enabled=$(echo "$b" | jq -r 'if .enabled == false then "false" else "true" end')
             start_b=$(echo "$b" | jq -r '.start_block // 0')
             batch=$(echo "$b" | jq -r '.batch_size // 10')
             reorg=$(echo "$b" | jq -r '.reorg_window // 32')
-            rt=$(echo "$b" | jq -r '.realtime_enabled // true')
+            rt=$(echo "$b" | jq -r 'if .realtime_enabled == false then "false" else "true" end')
 
             local payload
             payload=$(printf '{"start_block":%s,"end_block":null,"batch_size":%s,"reorg_window":%s,"realtime_enabled":%s,"status":"pending"}' \

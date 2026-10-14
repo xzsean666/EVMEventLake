@@ -1,0 +1,135 @@
+{
+  "version": "1.0",
+  "chains": [
+    {
+      "chain_id": 1946,
+      "name": "Soneium Minato",
+      "native_token_symbol": "ETH",
+      "safe_confirmation_depth": 10,
+      "default_min_block_window": 1,
+      "default_max_block_window": 500,
+      "rpc_notes": "Soneium Minato Testnet OP Stack"
+    }
+  ],
+  "rpc_endpoints": [
+    {
+      "chain_id": 1946,
+      "url": "https://rpc.minato.soneium.org",
+      "weight": 100,
+      "is_archive": true,
+      "max_block_range": 500,
+      "max_batch_size": 20
+    }
+  ],
+  "subscriptions": [
+    {
+      "chain_id": 1946,
+      "collection_scope": "contract",
+      "contract_address": "0xc252a473DC466de3799149A2616ccc625832F40C",
+      "start_block": 34389757,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 500
+    },
+    {
+      "chain_id": 1946,
+      "collection_scope": "contract",
+      "contract_address": "0x2C2e569e3Df89c55Ba46Ce52248Ae180379d0B31",
+      "start_block": 34389759,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 500
+    },
+    {
+      "chain_id": 1946,
+      "collection_scope": "contract",
+      "contract_address": "0xbae7B318A137b68eB78c1f22e5B59FcDf4d50E19",
+      "start_block": 34389761,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 500
+    },
+    {
+      "chain_id": 1946,
+      "collection_scope": "contract",
+      "contract_address": "0x0B35f129fED436FBceE90f459C887D82904Cc2f5",
+      "start_block": 34171218,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 500
+    },
+    {
+      "chain_id": 1946,
+      "collection_scope": "contract",
+      "contract_address": "0xFf130296a42f5d16C23d825f58Cd94ce77A2570c",
+      "start_block": 34171392,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 500
+    },
+    {
+      "chain_id": 1946,
+      "collection_scope": "contract",
+      "contract_address": "0x0A9533A207126462cb5dBD3D90F344D75BADfE67",
+      "start_block": 33223508,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 500
+    },
+    {
+      "chain_id": 1946,
+      "collection_scope": "contract",
+      "contract_address": "0x8Dd4bADe2AB52b6B8fC122eAAB4be7e66AcEb8a1",
+      "start_block": 33223508,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 500
+    },
+    {
+      "chain_id": 1946,
+      "collection_scope": "contract",
+      "contract_address": "0x002c0f993C793a1a72b7eB1cf4B5dA55f992ebC3",
+      "start_block": 33223504,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 500
+    },
+    {
+      "chain_id": 1946,
+      "collection_scope": "contract",
+      "contract_address": "0x6d7cb2D979200862D09c6AFf877c3746e723E638",
+      "start_block": 33223524,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 500
+    },
+    {
+      "chain_id": 1946,
+      "collection_scope": "contract",
+      "contract_address": "0xdf83d800da8AD9F886759E85a5a0df4D490a442A",
+      "start_block": 33223528,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 500
+    },
+    {
+      "chain_id": 1946,
+      "collection_scope": "contract",
+      "contract_address": "0xE403d9eB5F3Efb86286789f33271458f6f532F9b",
+      "start_block": 33223497,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 500
+    },
+    {
+      "chain_id": 1946,
+      "collection_scope": "contract",
+      "contract_address": "0xd318E75503631eBC3f7666F6AA3Ac6a14fb8905f",
+      "start_block": 33223499,
+      "realtime_enabled": true,
+      "min_block_window": 1,
+      "max_block_window": 500
+    }
+  ],
+  "block_transaction_sync": []
+}

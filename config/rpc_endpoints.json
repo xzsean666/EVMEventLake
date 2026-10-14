@@ -4,6 +4,15 @@
   "total_endpoints": 92,
   "endpoints": [
     {
+      "chain_id": 1946,
+      "url": "https://rpc.minato.soneium.org",
+      "weight": 100,
+      "chain_name": "Soneium Minato",
+      "native_token_symbol": "ETH",
+      "updated_at": "2026-10-14T11:00:00Z",
+      "latency_ms": 150.0
+    },
+    {
       "chain_id": 1,
       "url": "https://ethereum-rpc.publicnode.com",
       "weight": 100,

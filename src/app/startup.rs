@@ -21,6 +21,13 @@ pub async fn run(configuration: ApplicationConfiguration) -> anyhow::Result<()> 
     let pool = database::connect(&configuration.database).await?;
     database::migrate(&pool).await?;
 
+    if let Some(ref config_path) = configuration.config_path {
+        let config_result = crate::configuration::seed_declarative_config_from_file(&pool, config_path).await;
+        if let Err(error) = config_result {
+            tracing::warn!(error = %error, path = %config_path, "failed to seed declarative config from file");
+        }
+    }
+
     if let Some(ref seeds_path) = configuration.rpc_pool.seeds_path {
         let seed_result = crate::rpc_pool::seed_rpc_endpoints_from_file(&pool, seeds_path).await;
         if let Err(error) = seed_result {

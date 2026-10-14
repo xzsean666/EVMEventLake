@@ -56,10 +56,30 @@ pub async fn get_sync_state(
 pub async fn runnable_sync_states(
     pool: &SqlitePool,
     limit: i64,
+    allowed_chain_ids: Option<&[i64]>,
 ) -> Result<Vec<BlockTransactionSyncStateRecord>, ApplicationError> {
+    if let Some(allowed) = allowed_chain_ids {
+        if allowed.is_empty() {
+            return Ok(Vec::new());
+        }
+    }
+
+    let chain_filter = match allowed_chain_ids {
+        Some(ids) => {
+            let ids_str = ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("AND chain_id IN ({ids_str})")
+        }
+        None => String::new(),
+    };
+
     let query = format!(
         "SELECT {SYNC_STATE_COLUMNS} FROM eventlake_block_transaction_sync_state \
          WHERE status IN ('pending', 'syncing', 'caught_up', 'error', 'reorg_retrying') \
+         {chain_filter} \
          ORDER BY updated_at ASC LIMIT $1"
     );
     let records = sqlx::query_as::<_, BlockTransactionSyncStateRecord>(sqlx::AssertSqlSafe(query))

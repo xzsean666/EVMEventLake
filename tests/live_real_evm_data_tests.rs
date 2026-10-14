@@ -93,6 +93,7 @@ fn test_configuration(clickhouse: ClickHouseConfig) -> ApplicationConfiguration 
         },
         block_transaction: BlockTransactionConfiguration {
             enabled: true,
+            enable_chain_ids: None,
             batch_size: 10,
             max_concurrency: 2,
             reorg_window: 32,
@@ -103,6 +104,7 @@ fn test_configuration(clickhouse: ClickHouseConfig) -> ApplicationConfiguration 
             log_level: "info".to_owned(),
             json_logs: false,
         },
+        config_path: None,
     }
 }
 
